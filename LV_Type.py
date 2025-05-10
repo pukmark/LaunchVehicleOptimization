@@ -37,11 +37,11 @@ class VLType(PythonMsg):
     Diameter: float = field(default = 3.66)
 
     #Mass Properties
-    EmptyFirstStageMass: float = field(default = 20.0 * 10**3)
+    EmptyFirstStageMass: float = field(default = 22.2 * 10**3)
     EmptySecondStageMass: float = field(default = 4.0 * 10**3)
     # PayloadMass: float = field(default = 22.8 * 10**3)
-    FirstStagePropellentMass: float = field(default = 418.7 * 10**3)
-    SecondStagePropellentMass: float = field(default = 111.5 * 10**3)
+    FirstStagePropellentMass: float = field(default = 411.0 * 10**3)
+    SecondStagePropellentMass: float = field(default = 107.5 * 10**3)
     LV_total_mass: float = field(default = 0.0)
     FirstStage_EmptyMass: float = field(default = 0.0)
     SecondStage_EmptyMass: float = field(default = 0.0)
@@ -63,8 +63,9 @@ class VLType(PythonMsg):
     FirstStage_MaxAlpha: float = field(default = 0.1745) # [rad]
     FairingSeparationAltitude: float = field(default = 100.0 * 10**3) # [m]
     FirstStage_MaxDynamicPressure: float = field(default = 30.0 * 10**3) # [Pa]
+    FirstStage_StageSeparationMaxDynamicPressure: float = field(default = 0.5 * 10**3) # [Pa]
 
-    Booster_Cd0: float = field(default = 1.5)
+    Booster_Cd0: float = field(default = 1.3)
     Booster_Cda2: float = field(default = 2.0)
     Booster_CLa: float = field(default = 0.6) # [1/rad]
     Booster_MaxDynamicPressure: float = field(default = 100.0 * 10**3) # [Pa]
@@ -75,7 +76,7 @@ class VLType(PythonMsg):
     FirstStage_Vac_Isp: float = field(default = 311.0) # [s]
     FirstStage_SL_Thrust: float = field(default = 845.0 * 10**3 * 9) # [N]
     FirstStage_Vac_Thrust: float = field(default = 914.0* 10**3 * 9) # [N]
-    FirstStage_MinThrust_Factor: float = field(default = 0.5) # [-]
+    FirstStage_MinThrust_Factor: float = field(default = 0.4) # [-]
     FirstStage_MinThrust_IspFactor: float = field(default = 0.9) # [-]
     FirstStage_Ae: float = field(default = 43.79) # [m^2]
     
@@ -90,6 +91,9 @@ class VLType(PythonMsg):
     e: float = field(default = 0.0) # [-] earth eccentricity 0.081819190842622
     omega_earth: float = field(default = 7.2921159e-5) # [rad/s] earth rotation rate
     mu: float = field(default = 3.986004418e14) # [m^3/s^2] earth gravitational parameter
+
+    # Parking Orbit:
+    ParkingOrbit_PerigeeAlt: float = field(default = 150.0 * 10**3) # [m^3/s^2] earth gravitational parameter
 
     nx: int = field(default=5)
     nu: int = field(default=2)
@@ -138,11 +142,6 @@ class VLType(PythonMsg):
 class BoosterLaunchVehicle_2D(VLType):
     def __init__(self, atmosphere: Atm_Type.AtmosphereType):
         super().__init__()
-        # Mass Properties - without payload
-        # self.LV_total_mass = self.EmptyFirstStageMass + self.EmptySecondStageMass + self.FirstStagePropellentMass + self.SecondStagePropellentMass + self.FairingMass
-        # self.FirstStage_EmptyMass = self.LV_total_mass - self.FirstStagePropellentMass
-        # self.Sref = np.pi * (self.Diameter/2)**2
-        # self.g0 = self.mu / self.R0**2
 
         sym_x = ca.MX.sym('x')
         sym_z = ca.MX.sym('z')
@@ -188,24 +187,11 @@ class BoosterLaunchVehicle_2D(VLType):
         self.dynamics_kp1 = ca.Function('dynamics_boost_kp1', [sym_q, sym_u, sym_dt], [self.RK4(self.dynamics, sym_q, sym_u, sym_dt, 1)])
         self.ISP_calc = ca.Function('Isp_calc', [sym_q, sym_u], [Isp])
         
-    # def RK4(self, f, x, u, h, M = 1):
-    #     hM = h/M
-    #     for _ in range(M):
-    #         k1 = f(x, u)
-    #         k2 = f(x + hM/2 * k1, u)
-    #         k3 = f(x + hM/2 * k2, u)
-    #         k4 = f(x + hM * k3, u)
-    #         x = x + hM/6 * (k1 + 2*k2 + 2*k3 + k4)
-    #     return x
 
 @dataclass
 class LaunchVehicle_ECI(VLType):
     def __init__(self):
         super().__init__()
-        # Mass Properties - without payload
-        # self.SecondStage_FullMass = self.EmptySecondStageMass + self.SecondStagePropellentMass + self.FairingMass
-        # self.SecondStage_EmptyMass = self.EmptySecondStageMass
-        # self.g0 = self.mu / self.R0**2
 
         # States
         sym_x = ca.MX.sym('x')
@@ -247,8 +233,6 @@ class LaunchVehicle_ECI(VLType):
         
         self.ISP_calc = ca.Function('Isp_calc', [sym_q, sym_u], [Isp])
         self.local_to_eci()
-
-
     
     def local_to_eci(self):
 
@@ -309,11 +293,6 @@ class LaunchVehicle_ECI(VLType):
 class BoosterReturn_2D(VLType):
     def __init__(self, atmosphere: Atm_Type.AtmosphereType):
         super().__init__()
-        # Mass Properties - without payload
-        # self.LV_total_mass = self.EmptyFirstStageMass + self.EmptySecondStageMass + self.FirstStagePropellentMass + self.SecondStagePropellentMass + self.FairingMass
-        # self.FirstStage_EmptyMass = self.LV_total_mass - self.FirstStagePropellentMass
-        # self.Sref = np.pi * (self.Diameter/2)**2
-        # self.g0 = self.mu / self.R0**2
 
         sym_x = ca.MX.sym('x')
         sym_z = ca.MX.sym('z')
@@ -332,13 +311,12 @@ class BoosterReturn_2D(VLType):
         self.nx = sym_q.size1()
         self.nu = sym_u.size1()
 
-
 # define the dynamics function - phase 1 (Booster atmospheric flight)
         gama_v = ca.atan2(sym_vz, sym_vx)
         Alt = ca.norm_2(ca.vertcat(sym_x, self.R0 + sym_z)) - self.R0
         rho = atmosphere.rho_fun(Alt)
         g = self.g0 * self.R0**2 / (sym_x**2+(self.R0 + sym_z)**2)
-        g_angle = ca.asin(sym_x / (self.R0 + sym_z))
+        g_angle = ca.asin(sym_x / (self.R0 + sym_z)) 
         Drag = 0.5 * rho * (self.Booster_Cd0) * self.Sref * (sym_vx**2 + sym_vz**2)
         # Thrust = sym_Tfac * (self.FirstStage_Vac_Thrust - (self.FirstStage_Vac_Thrust-self.FirstStage_SL_Thrust)*pres/atmosphere.p_fun(0))
         Thrust = sym_Tfac * self.FirstStage_SL_Thrust
@@ -361,3 +339,46 @@ class BoosterReturn_2D(VLType):
         self.dynamics_kp1_M10 = ca.Function('dynamics_boost_kp1_M50', [sym_q, sym_u, sym_dt], [self.RK4(self.dynamics, sym_q, sym_u, sym_dt, 10)])
         self.ISP_calc = ca.Function('Isp_calc', [sym_q, sym_u], [Isp])
         
+
+@dataclass
+class BoostBackBurn_2D(VLType):
+    def __init__(self):
+        super().__init__()
+
+        sym_x = ca.MX.sym('x')
+        sym_z = ca.MX.sym('z')
+        sym_vx = ca.MX.sym('vx')
+        sym_vz = ca.MX.sym('vz')
+        sym_m = ca.MX.sym('m')
+        sym_dt = ca.MX.sym('dt')
+
+        sym_Tx = ca.MX.sym('Tx')
+        sym_Tz = ca.MX.sym('Tz')
+
+        sym_q = ca.vertcat(sym_x, sym_z, sym_vx, sym_vz, sym_m)
+        sym_u = ca.vertcat(sym_Tx, sym_Tz)
+
+        self.nx = sym_q.size1()
+        self.nu = sym_u.size1()
+
+# define the dynamics function - phase 1 (Booster atmospheric flight)
+
+        g = self.g0 * self.R0**2 / (sym_x**2+(self.R0 + sym_z)**2)
+        g_angle = ca.asin(sym_x / (self.R0 + sym_z)) 
+        # Thrust = sym_Tfac * (self.FirstStage_Vac_Thrust - (self.FirstStage_Vac_Thrust-self.FirstStage_SL_Thrust)*pres/atmosphere.p_fun(0))
+        Fx = sym_Tx * self.FirstStage_Vac_Thrust
+        Fz = sym_Tz * self.FirstStage_Vac_Thrust
+        Isp = self.FirstStage_Vac_Isp
+
+        dx = sym_vx
+        dz = sym_vz
+        dvx = Fx / sym_m - g * ca.sin(g_angle)
+        dvz = Fz / sym_m - g * ca.cos(g_angle)
+        dm = -self.FirstStage_Vac_Thrust*ca.sqrt(sym_Tx**2 + sym_Tz**2) / (Isp * self.g0)
+
+        # define the dynamics function
+        dqdt = ca.vertcat(dx, dz, dvx, dvz, dm)
+        self.dynamics = ca.Function('dynamics_boostback', [sym_q, sym_u], [dqdt])
+        self.dynamics_kp1 = ca.Function('dynamics_boostback_kp1', [sym_q, sym_u, sym_dt], [self.RK4(self.dynamics, sym_q, sym_u, sym_dt, 1)])
+        self.dynamics_kp1_M20 = ca.Function('dynamics_boostback_kp1', [sym_q, sym_u, sym_dt], [self.RK4(self.dynamics, sym_q, sym_u, sym_dt, 20)])
+        self.ISP_calc = ca.Function('Isp_calc', [sym_q, sym_u], [Isp])

@@ -25,27 +25,27 @@ if __name__ == '__main__':
     rocket_eci = LV_Type.LaunchVehicle_ECI()
     
     # Target orbit parameters for LEO
-    # Target_Orbit = {"apogee": rocket_Booster.R0 + 300.0*1000.0, # semi-major axis
-    #                 "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
-    #                 "i": np.deg2rad(53.3), # inclination [rad]
-    #                 }
+    Target_Orbit = {"apogee": rocket_Booster.R0 + 400.0*1000.0, # semi-major axis
+                    "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
+                    "i": np.deg2rad(60.0), # inclination [rad]
+                    }
 
     # Target orbit parameters for GTO
     # Target_Orbit = {"apogee": rocket_Booster.R0 + 35786.0*1000.0, # semi-major axis
     #                 "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
-    #                 "i": np.deg2rad(rocket_Booster.LaunchLatitude), # inclination [rad]
+    #                 "i": np.deg2rad(0.0), # inclination [rad]
     #                 }
 
     # Target orbit parameters for SSO
-    Target_Orbit = {"apogee": rocket_Booster.R0 + 780 * 1000.0, # semi-major axis
-                    "perigee": rocket_Booster.R0 + 780.0*1000.0, # semi-minor axis
-                    "i": np.deg2rad(98.6), # inclination [rad]
-                    }
+    # Target_Orbit = {"apogee": rocket_Booster.R0 + 780 * 1000.0, # semi-major axis
+    #                 "perigee": rocket_Booster.R0 + 780.0*1000.0, # semi-minor axis
+    #                 "i": np.deg2rad(98.6), # inclination [rad]
+    #                 }
 
     Target_Orbit["a"] = 0.5 * (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # semi-major axis
     Target_Orbit["e"] = (Target_Orbit["apogee"] - Target_Orbit["perigee"]) / (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # eccentricity
 
-    dm = 28000.0
+    dm = 13000.0
     # define the optimization problem
     opti = ca.Opti()
 
@@ -163,8 +163,7 @@ if __name__ == '__main__':
 
     opti.subject_to(x3[6,N3]/(rocket_eci.SecondStage_EmptyMass + payload_mass + propellent_mass_for_final_dv) >= 1.0)
     opti.subject_to(apogee/Target_Orbit["perigee"] == 1.0)
-    opti.subject_to(perigee/(rocket_eci.R0 + 150*1000.0) >= 1.0)
-    opti.subject_to(i == Target_Orbit["i"])
+    opti.subject_to(perigee/(rocket_eci.R0 + 100*1000.0) >= 1.0)
 
             
     # set the cost function
@@ -173,7 +172,7 @@ if __name__ == '__main__':
     cost += 0.5*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])/rocket_Booster.FirstStage_MaxAlpha**2 )
     # cost += 0.5*(ca.sumsqr(u2) + ca.sumsqr(u3))/(rocket_eci.SecondStage_Thrust)**2
     cost += -0.5*payload_mass - 0.001*x3[6,N3]
-    # cost += ca.sumsqr((i-Target_Orbit["i"])/np.deg2rad(0.3))
+    cost += ca.sumsqr((i-Target_Orbit["i"])/np.deg2rad(0.5))
     # cost += 100*((a-Target_Orbit["perigee"])/1000)**2
     opti.minimize(cost)
 
@@ -202,7 +201,7 @@ if __name__ == '__main__':
     x1_guess = np.zeros((rocket_Booster.nx, N1+1))
     u1_guess = np.zeros((rocket_Booster.nu, N1))
     dt1_guess = 148.0 / N1
-    payload_mass_guess = 9000.0
+    payload_mass_guess = 5000.0
     LaunchAz_guess = np.pi/2.0 - Target_Orbit["i"]
 
     init_acc_guess = rocket_Booster.FirstStage_SL_Thrust / (rocket_Booster.LV_total_mass + payload_mass_guess) - rocket_Booster.g0 * (rocket_Booster.R0 / (rocket_Booster.R0 + rocket_Booster.LaunchAltitude))**2
@@ -229,11 +228,8 @@ if __name__ == '__main__':
             alt = rocket_Booster.local_to_alt(x1_guess[:,k])
             Q = 0.5 * (x1_guess[2,k]**2 + x1_guess[3,k]**2) * atmosphere.rho_fun(alt)
             x1_guess[:,k+1] = rocket_Booster.dynamics_kp1(x1_guess[:,k], u1_guess[:,k], dt1_guess).full().flatten()
-        if 0.5 * atmosphere.rho_fun(rocket_Booster.local_to_alt(x1_guess[:,N1])) * np.linalg.norm(x1_guess[2:4,N1]) > rocket_Booster.FirstStage_StageSeparationMaxDynamicPressure:
+        if rocket_Booster.local_to_alt(x1_guess[:,N1]) < 60000:
             dt1_guess += 0.01
-            iter += 1
-        elif x1_guess[4,N1] <= rocket_Booster.FirstStage_EmptyMass + payload_mass_guess + dm:
-            dt1_guess -= 1.0 / N1
             iter += 1
         else:
             break
@@ -286,7 +282,7 @@ if __name__ == '__main__':
     x3_guess[:,0] = x2_guess[:,N2]
     iter=0
     
-    alpha3_init = 0.0
+    alpha3_init = np.deg2rad(10.0)
     v3_max = ca.sqrt(rocket_eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["apogee"]))
     while iter < 50:
         alpha3, alpha_factor = alpha3_init, 1.0
@@ -296,8 +292,8 @@ if __name__ == '__main__':
             h = h / np.linalg.norm(h)
             i = np.arccos(h[2] / np.linalg.norm(h))
             u3_guess[0:3,k] = (x3_guess[3:6,k] / np.linalg.norm(x3_guess[3:6,k])) 
-            # alpha_factor = k/N3
-            alpha3 = -alpha3_init*alpha_factor
+            alpha_factor = k/N3
+            alpha3 = alpha3_init*alpha_factor
             u3_guess[0:3,k] = u3_guess[0:3,k] * np.cos(alpha3) + np.cross(h, u3_guess[0:3,k]) * np.sin(alpha3) + h * np.dot(h, u3_guess[0:3,k]) * (1 - np.cos(alpha3)) 
             
             u3_guess[0:3,k] *= rocket_eci.SecondStage_Thrust
@@ -319,15 +315,15 @@ if __name__ == '__main__':
         elif x3_guess[6,k+1] < rocket_eci.SecondStage_EmptyMass + payload_mass_guess:
             dt3_guess -= 0.25
             iter += 1
-        elif apogee < rocket_eci.ParkingOrbit_PerigeeAlt + rocket_eci.R0 or a < 0.5*(Target_Orbit['perigee']+rocket_eci.R0+200.0*1e3):
-            dt3_guess += 0.1
+        # elif perigee < rocket_eci.R0+100*10**3:
+        #     dt3_guess += 0.1
+        #     iter += 1
+        elif apogee > rocket_eci.R0+1000*10**3 or np.linalg.norm(x3_guess[3:6,N3]) > v3_max+100.0:
+            dt3_guess -= 0.025
             iter += 1
         elif perigee < rocket_eci.R0+10*10**3:
-            alpha3_init -= np.deg2rad(0.5)
+            alpha3_init += np.deg2rad(1.0)
             # dt3_guess += 0.
-            iter += 1
-        elif apogee > Target_Orbit['perigee'] + 150.0*1e3:
-            dt3_guess -= 0.1
             iter += 1
         else:
             break

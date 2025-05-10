@@ -32,7 +32,7 @@ if __name__ == '__main__':
 
 # Phase 4 - Booster Return:
     # m0 = rocket_return.EmptyFirstStageMass + 20000.0
-    N4 = 30
+    N4 = 15
     x4_0 = opti.variable(rocket_return.nx, 1) # [x, z, vx, vz, m]
     x4_before_reeentry = opti.variable(rocket_return.nx, 1) # [x, z, vx, vz, m]
     x4_after_reentry = opti.variable(rocket_return.nx, 1) # [x, z, vx, vz, m]
@@ -59,24 +59,25 @@ if __name__ == '__main__':
 
     # dynamics
     
-    opti.subject_to((x4_before_reeentry-rocket_return.dynamics_kp1_M50(x4_0, 0, dt4_ballistic)) == 0.0)
-    opti.subject_to(rocket_return.local_to_alt(x4_before_reeentry)/60000.0 == 1.0)
+    opti.subject_to((x4_before_reeentry-rocket_return.dynamics_kp1_M50(x4_0, 0, dt4_ballistic))/200 == 0.0)
+    opti.subject_to(rocket_return.local_to_alt(x4_before_reeentry)/60000.0 >= 1.0)
+    opti.subject_to(rocket_return.local_to_alt(x4_before_reeentry)/65000.0 <= 1.0)
     # Dynamics of entry burn
-    opti.subject_to((x4_after_reentry - rocket_return.dynamics_kp1_M20(x4_before_reeentry, u4_reentry, dt4_reentry)) == 0.0)
+    opti.subject_to((x4_after_reentry - rocket_return.dynamics_kp1_M20(x4_before_reeentry, u4_reentry, dt4_reentry))/200 == 0.0)
     # set the thrust constraints
     # opti.subject_to(u4_reentry/0.3333 <= 1.0)
     opti.subject_to(u4_reentry*3.0 <= 1.0)
-    opti.subject_to(u4_reentry*3.0 >= rocket_return.FirstStage_MinThrust_Factor)
+    opti.subject_to(u4_reentry >= 0.0)
 
     # opti.subject_to(u4_reentry >= rocket_return.FirstStage_MinThrust_Factor * 3.0/9.0)
 
-    opti.subject_to(ca.norm_2(ca.vertcat(x4_after_reentry[2], x4_after_reentry[3]))/1400.0 == 1.0)
+    opti.subject_to(ca.norm_2(ca.vertcat(x4_after_reentry[2], x4_after_reentry[3]))/1400.0 <= 1.0)
     opti.subject_to(rocket_return.local_to_alt(x4_after_reentry)/45000.0 >= 1.0)
 
     # After Reentry, before landing burn
-    opti.subject_to((x4_before_landing-rocket_return.dynamics_kp1_M20(x4_after_reentry, 0, dt4_before_landing)) == 0.0)
+    opti.subject_to((x4_before_landing-rocket_return.dynamics_kp1_M20(x4_after_reentry, 0, dt4_before_landing))/200.0 == 0.0)
     # opti.subject_to(rocket_return.local_to_alt(x4_before_landing) <= 2000.0)
-    opti.subject_to(rocket_return.local_to_alt(x4_before_landing)/1000.0 == 1.0)
+    opti.subject_to(rocket_return.local_to_alt(x4_before_landing)/1000.0 >= 1.0)
     
     N_before_landing_constraints = 5
     # x4_before_landing_intren = x4_reentry
@@ -88,7 +89,7 @@ if __name__ == '__main__':
     # Landing Burn:
     opti.subject_to(x4_landing[:,0] == x4_before_landing)
     for k in range(N4):
-        opti.subject_to((x4_landing[:,k+1]-rocket_return.dynamics_kp1(x4_landing[:,k], u4_landing[:,k], dt4_landing)) == 0.0)
+        opti.subject_to((x4_landing[:,k+1]-rocket_return.dynamics_kp1(x4_landing[:,k], u4_landing[:,k], dt4_landing))/200.0 == 0.0)
             
         opti.subject_to(u4_landing[k] <= 1.0/9.0)
         opti.subject_to(u4_landing[k] >= rocket_return.FirstStage_MinThrust_Factor / 9.0)
@@ -101,7 +102,6 @@ if __name__ == '__main__':
         # opti.subject_to(x4_landing[3,N4] == 0.0)
     # elif RecoveryStrategy == 'ASDS':
     # opti.subject_to(ca.norm_2(x4_landing[2:4,N4-1]) <= 1.0) # zero velocity at the end of the flight
-    opti.subject_to(ca.norm_2(x4_landing[2:4,N4-1]) == 2.0) # zero velocity at the end of the flight
     opti.subject_to(ca.norm_2(x4_landing[2:4,N4]) == 1.0) # zero velocity at the end of the flight
     # opti.subject_to(rocket_return.local_to_alt(x4_landing[:,N4]) <= 10.0) # landing altitude
     opti.subject_to(rocket_return.local_to_alt(x4_landing[:,N4]) == 0.0) # landing altitude

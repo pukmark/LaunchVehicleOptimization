@@ -24,29 +24,28 @@ if __name__ == '__main__':
     rocket_Booster = LV_Type.BoosterLaunchVehicle_2D(atmosphere=atmosphere)
     rocket_eci = LV_Type.LaunchVehicle_ECI()
     rocket_return = LV_Type.BoosterReturn_2D(atmosphere=atmosphere)
-    rocket_boostback = LV_Type.BoostBackBurn_2D()
-    # # Target orbit parameters for LEO
-    # Target_Orbit = {"apogee": rocket_Booster.R0 + 300.0*1000.0, # semi-major axis
-    #                 "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
-    #                 "i": np.deg2rad(53.3), # inclination [rad]
-    #                 }
+    # Target orbit parameters for LEO
+    Target_Orbit = {"apogee": rocket_Booster.R0 + 400.0*1000.0, # semi-major axis
+                    "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
+                    "i": np.deg2rad(60.0), # inclination [rad]
+                    }
 
     # Target orbit parameters for GTO
     # Target_Orbit = {"apogee": rocket_Booster.R0 + 35786.0*1000.0, # semi-major axis
     #                 "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
-    #                 "i": np.deg2rad(rocket_Booster.LaunchLatitude), # inclination [rad]
+    #                 "i": np.deg2rad(0.0), # inclination [rad]
     #                 }
 
-    # # Target orbit parameters for SSO
-    Target_Orbit = {"apogee": rocket_Booster.R0 + 780 * 1000.0, # semi-major axis
-                    "perigee": rocket_Booster.R0 + 780.0*1000.0, # semi-minor axis
-                    "i": np.deg2rad(98.6), # inclination [rad]
-                    }
+    # Target orbit parameters for SSO
+    # Target_Orbit = {"apogee": rocket_Booster.R0 + 780 * 1000.0, # semi-major axis
+    #                 "perigee": rocket_Booster.R0 + 780.0*1000.0, # semi-minor axis
+    #                 "i": np.deg2rad(98.6), # inclination [rad]
+    #                 }
 
     Target_Orbit["a"] = 0.5 * (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # semi-major axis
     Target_Orbit["e"] = (Target_Orbit["apogee"] - Target_Orbit["perigee"]) / (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # eccentricity
 
-    RecoveryStrategy = 'RTLS' # 'None', 'RTLS', 'ASDS'
+    RecoveryStrategy = 'None' # 'None', 'RTLS', 'ASDS'
     # define the optimization problem
     opti = ca.Opti()
 
@@ -73,6 +72,7 @@ if __name__ == '__main__':
     # set the constraints:
     for k in range(N1):
         # set the dynamics
+        # opti.subject_to(x1[:,k+1] == rocket_Booster.dynamics_kp1(x1[:,k], u1[:,k], dt1))
         opti.subject_to((x1[:,k+1]-rocket_Booster.dynamics_kp1(x1[:,k], u1[:,k], dt1))/dt1 == 0.0)
         # set the thrust constraints
         opti.subject_to(u1[0,k] <= 1.0)
@@ -82,37 +82,40 @@ if __name__ == '__main__':
 
         # set the state constraints
         opti.subject_to(0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=rocket_Booster.FirstStage_MaxDynamicPressure)
-        opti.subject_to(u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
-        opti.subject_to(-u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
         # opti.subject_to(0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)/rocket_Booster.FirstStage_MaxDynamicPressure <= 1.0)
+        opti.subject_to(u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
+        # opti.subject_to(-u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
         # opti.subject_to(u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)/1000.0 <= 1.0)
         # opti.subject_to(-u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)/1000.0 <= 1.0)
-    # set the time step constraints
-    opti.subject_to(dt1/0.1 >= 1.0)
     # set the final state constraints
+    # opti.subject_to(x1[4,N1] >= rocket_Booster.FirstStage_EmptyMass + payload_mass + dm)
     opti.subject_to(x1[4,N1]/(rocket_Booster.FirstStage_EmptyMass + payload_mass) >= 1.0)
-    opti.subject_to(0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,N1]))*(x1[2,N1]**2+x1[3,N1]**2)<=rocket_Booster.FirstStage_StageSeparationMaxDynamicPressure)
 
-    # Phase 2 - Second Stage, before fairing separation
+    # Phase 2 - Second Stage, before fairing separation (if needed)
     N2 = 10
     x2 = opti.variable(rocket_eci.nx, N2+1) # [x, y, z, vx, vy, vz, m]
     u2 = opti.variable(rocket_eci.nu, N2) # [fx, fy, fz]
     dt2 = opti.variable(1)
 
     # Set the initial state - the final state of the boost phase transformed to ECI
+    # opti.subject_to(LaunchAz >= -0.9*np.pi)
+    # opti.subject_to(LaunchAz <= 0.9*np.pi)
     opti.subject_to(dt2*N2 >= 10.0)
     eci_pos, eci_vel = rocket_eci.local_to_eci_func(ca.vertcat(x1[0,N1], 0.0, x1[1,N1]), ca.vertcat(x1[2,N1], 0.0, x1[3,N1]), LaunchAz)
     opti.subject_to(x2[0:3,0] == eci_pos)
     opti.subject_to(x2[3:6,0] == eci_vel)
-    opti.subject_to(x2[-1,0] == rocket_eci.SecondStage_FullMass + payload_mass)
+    opti.subject_to(x2[6,0] == rocket_eci.SecondStage_FullMass + payload_mass)
     for k in range(N2):
         # set the dynamics
+        # opti.subject_to(x2[:,k+1] == rocket_eci.dynamics_kp1(x2[:,k], u2[:,k], dt2))
         opti.subject_to((x2[:,k+1]-rocket_eci.dynamics_kp1(x2[:,k], u2[:,k], dt2))/dt2 == 0.0)
         # set the thrust constraints
+        # opti.subject_to(ca.norm_2(u2[:,k]) <= rocket_eci.SecondStage_Thrust)
         opti.subject_to(ca.norm_2(u2[:,k])/rocket_eci.SecondStage_Thrust <= 1.0)
         # set the time step constraints
 
     # set the final state constraints
+    # opti.subject_to(rocket_eci.eci_to_alt(x2[:,N2]) >= rocket_eci.FairingSeparationAltitude)
     opti.subject_to(rocket_eci.eci_to_alt(x2[:,N2])/rocket_eci.FairingSeparationAltitude >= 1.0)
 
     ## phase 3 - Second Stage, after fairing separation
@@ -121,14 +124,16 @@ if __name__ == '__main__':
     u3 = opti.variable(rocket_eci.nu, N3)
     dt3 = opti.variable(1)
     # Set the initial state - the final state of the boost phase transformed to ECI
-    opti.subject_to(dt3/0.5 >= 1.0)
+    opti.subject_to(dt3 >= 0.5)
     opti.subject_to(x3[0:6,0] == x2[0:6,N2])
     opti.subject_to(x3[6,0]/(x2[6,N2] - rocket_eci.FairingMass) == 1.0)
     for k in range(N3):
         # set the dynamics
         # opti.subject_to(x3[:,k+1] == rocket_eci.dynamics_kp1(x3[:,k], u3[:,k], dt3*(1-0.5*k/(N3-1))))
+        # opti.subject_to(x3[:,k+1] == rocket_eci.dynamics_kp1(x3[:,k], u3[:,k], dt3))
         opti.subject_to((x3[:,k+1]-rocket_eci.dynamics_kp1(x3[:,k], u3[:,k], dt3))/dt3 == 0.0)
         # set the thrust constraints
+        # opti.subject_to(ca.norm_2(u3[:,k]) == rocket_eci.SecondStage_Thrust)
         opti.subject_to(ca.norm_2(u3[:,k])/rocket_eci.SecondStage_Thrust == 1.0)
         # set the time step constraints
 
@@ -151,16 +156,17 @@ if __name__ == '__main__':
     v_apogee = ca.sqrt(rocket_eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / a))
     v_desired = ca.sqrt(rocket_eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["a"]))
     propellent_mass_for_final_dv = x3[6,N3] * (1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / (rocket_eci.SecondStage_Vac_Isp * rocket_eci.g0)))
-
+    
     # v_final_apogee = ca.sqrt(rocket_eci.mu * (1.0 / Target_Orbit["a"]))
     # dv_for_inclination_fix = 2 * v_apogee * ca.sin(Target_Orbit["i"]/2.0)
     # propellent_mass_for_inclination_fix = (x3[6,N3]-propellent_mass_for_final_dv) * (1.0 - ca.exp(-ca.fabs(dv_for_inclination_fix) / (rocket_eci.SecondStage_Vac_Isp * rocket_eci.g0)))
 
 
+    # propellent_mass_for_final_dv = 0.0
+
     opti.subject_to(x3[6,N3]/(rocket_eci.SecondStage_EmptyMass + payload_mass + propellent_mass_for_final_dv) >= 1.0)
     opti.subject_to(apogee/Target_Orbit["perigee"] == 1.0)
-    opti.subject_to(perigee / (rocket_eci.R0 + rocket_eci.ParkingOrbit_PerigeeAlt) >= 1.0)
-    opti.subject_to(i == Target_Orbit["i"])
+    opti.subject_to(perigee/(rocket_eci.R0 + 100*1000.0) >= 1.0)
 
     # Phase 4 - Booster Return:
     if RecoveryStrategy != 'None':
@@ -169,93 +175,84 @@ if __name__ == '__main__':
         x4_before_reentry = opti.variable(rocket_return.nx, 1) # [x, z, vx, vz, m]
         x4_after_reentry = opti.variable(rocket_return.nx, 1) # [x, z, vx, vz, m]
         u4_reentry = opti.variable(rocket_return.nu, 1) # [T_factor]
-        x4_before_landing = opti.variable(rocket_return.nx, 1) # [x, z, vx, vz, m]
-        x4_landing = opti.variable(rocket_return.nx, N4+1) # [x, z, vx, vz, m]
-        u4_landing = opti.variable(rocket_return.nu, N4) # [T_factor]
+        # x4_before_landing = opti.variable(rocket_return.nx, 1) # [x, z, vx, vz, m]
+        # x4_landing = opti.variable(rocket_return.nx, N4+1) # [x, z, vx, vz, m]
+        # u4_landing = opti.variable(rocket_return.nu, N4) # [T_factor]
         dt4_reentry = opti.variable(1)
         dt4_ballistic = opti.variable(1)
-        dt4_before_landing = opti.variable(1)
-        dt4_landing = opti.variable(1)
-        if RecoveryStrategy == 'RTLS':
-            dt4_boostback = opti.variable(1)
-            x4_boostback = opti.variable(rocket_boostback.nx, 1) # [x, z, vx, vz, m]
-            u4_boostback = opti.variable(rocket_boostback.nu, 1) # [Tx, Tz]
-
+        # dt4_before_landing = opti.variable(1)
+        # dt4_landing = opti.variable(1)
 
 
         # Set the initial state
         opti.subject_to(x4_0[0:4,0] == x1[0:4,N1])
-        opti.subject_to(x4_0[4,0] == x1[4,N1] - rocket_eci.SecondStage_FullMass - payload_mass)
+        opti.subject_to(x4_0[4,0]/(x1[4,N1] - rocket_eci.SecondStage_FullMass - payload_mass) == 1.0)
 
         # set the time step constraints
-        if RecoveryStrategy == 'RTLS':
-            opti.subject_to(dt4_boostback >= 1.0)
-        opti.subject_to(dt4_ballistic >= 1.0)
-        opti.subject_to(dt4_reentry >= 1.0)
-        opti.subject_to(dt4_before_landing >= 1.0)
-        opti.subject_to(dt4_landing*N4 >= 1.0)
-            
-            # dynamics
-        if RecoveryStrategy == 'RTLS':
-            opti.subject_to(x4_boostback == rocket_boostback.dynamics_kp1_M20(x4_0, u4_boostback, dt4_boostback))
-            opti.subject_to(ca.norm_2(u4_boostback) <= 3.0/9.0)
+        opti.subject_to(dt4_ballistic/100.0 >= 1.0)
+        opti.subject_to(dt4_reentry/10 >= 1.0)
+        # opti.subject_to(dt4_before_landing/20.0 >= 1.0)
+        # opti.subject_to(dt4_landing*N4/10.0 >= 1.0)
 
-            opti.subject_to(x4_before_reentry == rocket_return.dynamics_kp1_M50(x4_boostback, 0, dt4_ballistic))
+        # Ballistic phase
+        opti.subject_to((x4_before_reentry-rocket_return.dynamics_kp1_M50(x4_0, 0, dt4_ballistic))/200.0 == 0.0)
+        # opti.subject_to(rocket_return.local_to_alt(x4_before_reentry)/60000.0 >= 1.0)
+        # opti.subject_to(rocket_return.local_to_alt(x4_before_reentry)/65000.0 <= 1.0)
 
-        else:
-            opti.subject_to((x4_before_reentry-rocket_return.dynamics_kp1_M50(x4_0, 0, dt4_ballistic)) == 0.0)
-        opti.subject_to(rocket_return.local_to_alt(x4_before_reentry)/60000.0 == 1.0)
-        
-        # Dynamics of entry burn
-        opti.subject_to(x4_after_reentry  == rocket_return.dynamics_kp1_M20(x4_before_reentry, u4_reentry, dt4_reentry))
+        # Reentry phase - Dynamics of entry burn
+        opti.subject_to((x4_after_reentry-rocket_return.dynamics_kp1_M20(x4_before_reentry, u4_reentry, dt4_reentry))/200.0 == 0.0)
         # set the thrust constraints
-        opti.subject_to(u4_reentry*3.0 <= 1.0)
-        opti.subject_to(u4_reentry*3.0 >= rocket_return.FirstStage_MinThrust_Factor)
-
-        # opti.subject_to(u4_reentry >= rocket_return.FirstStage_MinThrust_Factor * 3.0/9.0)
-
+        opti.subject_to(u4_reentry <= 1.0)
+        opti.subject_to(u4_reentry/rocket_return.FirstStage_MinThrust_Factor >=  1.0)
         opti.subject_to(ca.norm_2(ca.vertcat(x4_after_reentry[2], x4_after_reentry[3]))/1400.0 <= 1.0)
-        opti.subject_to(rocket_return.local_to_alt(x4_after_reentry)/45000.0 >= 1.0)
+        opti.subject_to(rocket_return.local_to_alt(x4_after_reentry)/45000.0 == 1.0)
 
         # After Reentry, before landing burn
-        opti.subject_to((x4_before_landing-rocket_return.dynamics_kp1_M20(x4_after_reentry, 0, dt4_before_landing)) == 0.0)
+        # opti.subject_to((x4_before_landing-rocket_return.dynamics_kp1_M20(x4_after_reentry, 0, dt4_before_landing))/200.0 == 0.0)
         # opti.subject_to(rocket_return.local_to_alt(x4_before_landing)/1000.0 == 1.0)
-        
-        N_before_landing_constraints = 5
-        x4_before_landing_intren = x4_after_reentry
-        for i in range(N_before_landing_constraints):
-            x4_before_landing_intren = rocket_return.dynamics_kp1(x4_before_landing_intren, 0, dt4_before_landing/N_before_landing_constraints)
-            opti.subject_to(0.5 * atmosphere.rho_fun(rocket_return.local_to_alt(x4_before_landing_intren)) * ca.norm_2(ca.vertcat(x4_before_landing_intren[2], x4_before_landing_intren[3]))**2 <= rocket_return.Booster_MaxDynamicPressure)
+        # opti.subject_to(rocket_return.local_to_alt(x4_before_landing) <= 2000.0)
+
+        # N_before_landing_constraints = 2
+        # x4_before_landing_intren = x4_reentry
+        # for _ in range(N_before_landing_constraints):
+        #     x4_before_landing_intren = rocket_return.dynamics_kp1_M20(x4_before_landing_intren, 0, dt4_before_landing/N_before_landing_constraints)
+        #     opti.subject_to(0.5 * atmosphere.rho_fun(rocket_return.local_to_alt(x4_before_landing_intren)) * ca.norm_2(ca.vertcat(x4_before_landing_intren[2], x4_before_landing_intren[3]))**2 <= rocket_return.Booster_MaxDynamicPressure)
             # opti.subject_to(0.5 * atmosphere.rho_fun(rocket_return.local_to_alt(x4_before_landing_intren)) * ca.norm_2(ca.vertcat(x4_before_landing_intren[2], x4_before_landing_intren[3]))**3 <= rocket_return.Booster_MaxHeatFlux)
 
-        # Landing Burn:
-        opti.subject_to(x4_landing[:,0] == x4_before_landing)
-        for k in range(N4):
-            opti.subject_to(x4_landing[:,k+1] == rocket_return.dynamics_kp1(x4_landing[:,k], u4_landing[:,k], dt4_landing))
+            # Landing Burn:
+        # opti.subject_to(x4_landing[:,0] == x4_before_landing)
+        # for k in range(N4):
+        #     opti.subject_to((x4_landing[:,k+1]-rocket_return.dynamics_kp1(x4_landing[:,k], u4_landing[:,k], dt4_landing))/200.0 == 0.0)
                 
-            opti.subject_to(u4_landing[k] <= 1.0/9.0)
-            opti.subject_to(u4_landing[k] >= 0.75*rocket_return.EmptyFirstStageMass*rocket_return.g0/rocket_return.FirstStage_SL_Thrust)
-
-
-        if RecoveryStrategy == 'RTLS':
-            opti.subject_to(x4_landing[0,N4] == 0.0)
-            opti.subject_to(x4_landing[1,N4] == 0.0)
-        else:
-            # zero altitude at the end of the flight
-            opti.subject_to(rocket_return.local_to_alt(x4_landing[:,N4]) == 0.0) # landing altitude
-        # minimal velocity at the end of the flight
-        opti.subject_to(ca.norm_2(x4_landing[2:4,N4]) == 1.0) # minimal velocity at the end of the flight
-        opti.subject_to(x4_landing[4,N4] >= rocket_return.EmptyFirstStageMass)
+        # opti.subject_to(u4_landing[k] * 9.0 <= 1.0)
+        # opti.subject_to(u4_landing[k] * 9.0/rocket_return.FirstStage_MinThrust_Factor >= 1.0)
+            
+        # if RecoveryStrategy == 'RTLS':
+        #     opti.subject_to(x4_landing[0,N4] == 0.0)
+        #     opti.subject_to(x4_landing[1,N4] == 0.0)
+        #     opti.subject_to(x4_landing[2,N4] == 0.0)
+        #     opti.subject_to(x4_landing[3,N4] == 0.0)
+        # elif RecoveryStrategy == 'ASDS':
+        #     opti.subject_to(ca.norm_2(x4_landing[2:4,N4]) == 1.0) # zero velocity at the end of the flight
+        #     # opti.subject_to(rocket_return.local_to_alt(x4_landing[:,N4]) <= 10.0) # landing altitude
+        #     opti.subject_to(rocket_return.local_to_alt(x4_landing[:,N4]) == 0.0) # landing altitude
+        # opti.subject_to(x4_landing[4,N4]/rocket_Booster.EmptyFirstStageMass == 1.0) # mass at landing
 
     # set the cost function
     cost = 0.0
     # cost = 0.5*(ca.sumsqr(u1[0,:]) + ca.sumsqr(u1[1,:])/rocket_Booster.FirstStage_MaxAlpha**2)
-    cost += 0.5*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1]) )*10
-    cost += -0.5*payload_mass
-    cost += ca.sumsqr((i-Target_Orbit["i"])/np.deg2rad(0.2))
-    # if RecoveryStrategy != 'None':
-    #     cost += ca.sumsqr(u4_landing[1:] - u4_landing[:-1])/N4 # minimize the thrust changes
-    #     cost += ca.sumsqr(u4_reentry)
+    cost += 0.5*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])/rocket_Booster.FirstStage_MaxAlpha**2 )
+    # cost += 0.5*(ca.sumsqr(u2) + ca.sumsqr(u3))/(rocket_eci.SecondStage_Thrust)**2
+    cost += -0.5*payload_mass - 0.001*x3[6,N3]
+    cost += ca.sumsqr((i-Target_Orbit["i"])/np.deg2rad(0.5))
+    if RecoveryStrategy != 'None':
+        # cost += 0.5*(ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) + ca.sumsqr(u4_reentry) )/N4
+        # cost += (dt4_before_landing)*0.001
+        # cost += -x4_landing[4,N4]/rocket_Booster.EmptyFirstStageMass # mass at landing
+        # cost += ca.sumsqr(u4_landing[1:] - u4_landing[:-1]) # minimize the thrust changes
+        cost += ca.sumsqr(u4_reentry)
+        # cost += (ca.norm_2(x4_landing[2:4,N4])-1)**2 # mass at landing
+        # cost += (x4_landing[4,N4] - rocket_Booster.EmptyFirstStageMass)**2
     opti.minimize(cost)
 
 
@@ -263,15 +260,15 @@ if __name__ == '__main__':
     opts = {
             "print_time": 0,  # Print timing, 
             "ipopt": {
-            # "tol": 1e-4,  # Convergence tolerance
-            "max_iter": 1000,  # Max iterations
+            "tol": 1e-4,  # Convergence tolerance
+            # "max_iter": 1000,  # Max iterations
             # "print_level": 0,  # Verbosity level
             # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter
             # "timing_statistics": "yes", # Enable timing statistics
             # "nlp_scaling_method": "None", # Scaling method
             # 'nlp_scaling_max_gradient': 100,
             # "obj_scaling_factor": 1e-2, # Scaling factor for the objective function
-            # "mu_strategy": "adaptive",  # "monotone" or "adaptive" Strategy for updating the barrier parameter
+            "mu_strategy": "adaptive",  # "monotone" or "adaptive" Strategy for updating the barrier parameter
             # "mu_init": 1e-1,  # 1e-1 Initial value of the barrier parameter
             # "mu_min": 1e-11,  # 1e-11 Smallest mu allowed — optimization stops when mu ≤ this
             # "mu_target": 0.0,  # 0.0 IPOPT drives mu towards this target; if 0, tries to reach exact KKT solution
@@ -290,8 +287,8 @@ if __name__ == '__main__':
     x1_guess = np.zeros((rocket_Booster.nx, N1+1))
     u1_guess = np.zeros((rocket_Booster.nu, N1))
     dt1_guess = 148.0 / N1
-    payload_mass_guess = 10000.0
-    LaunchAz_guess = np.pi/2.0 - Target_Orbit["i"]
+    payload_mass_guess = 5000.0
+    LaunchAz_guess = np.pi/2.0 - Target_Orbit["i"] + np.deg2rad(rocket_Booster.LaunchLatitude)
 
     init_acc_guess = rocket_Booster.FirstStage_SL_Thrust / (rocket_Booster.LV_total_mass + payload_mass_guess) - rocket_Booster.g0 * (rocket_Booster.R0 / (rocket_Booster.R0 + rocket_Booster.LaunchAltitude))**2
     init_vz_guess = init_acc_guess * init_time
@@ -303,11 +300,6 @@ if __name__ == '__main__':
 
     x1_guess[:,0] = x0_guess
     iter=0
-    dm = 0.0
-    if RecoveryStrategy == 'RTLS':
-        dm = 30000.0
-    elif RecoveryStrategy == 'ASDS':
-        dm = 13000.0
     while iter < 10:
         for k in range(N1):
             if x1_guess[1,k]<5000 or x1_guess[1,k]>10000:
@@ -322,11 +314,8 @@ if __name__ == '__main__':
             alt = rocket_Booster.local_to_alt(x1_guess[:,k])
             Q = 0.5 * (x1_guess[2,k]**2 + x1_guess[3,k]**2) * atmosphere.rho_fun(alt)
             x1_guess[:,k+1] = rocket_Booster.dynamics_kp1(x1_guess[:,k], u1_guess[:,k], dt1_guess).full().flatten()
-        if 0.5 * atmosphere.rho_fun(rocket_Booster.local_to_alt(x1_guess[:,N1])) * np.linalg.norm(x1_guess[2:4,N1]) > rocket_Booster.FirstStage_StageSeparationMaxDynamicPressure:
+        if rocket_Booster.local_to_alt(x1_guess[:,N1]) < 60000:
             dt1_guess += 0.01
-            iter += 1
-        elif x1_guess[4,N1] <= rocket_Booster.FirstStage_EmptyMass + payload_mass_guess + dm and RecoveryStrategy != 'None':
-            dt1_guess -= 1.0 / N1
             iter += 1
         else:
             break
@@ -335,7 +324,8 @@ if __name__ == '__main__':
     alt1_guess = np.zeros((N1+1))
     for k in range(N1+1):
         alt1_guess[k] = ca.norm_2(ca.vertcat(x1_guess[0,k], rocket_Booster.R0 + x1_guess[1,k])) - rocket_Booster.R0
-        Q_guess[k] = 0.5 * (x1_guess[2,k]**2 + x1_guess[3,k]**2) * atmosphere.rho_fun(alt1_guess[k])    
+        Q_guess[k] = 0.5 * (x1_guess[2,k]**2 + x1_guess[3,k]**2) * atmosphere.rho_fun(alt1_guess[k])
+    
 
     # calculate the initial guess for second stage before fairing separation, if needed
     dt2_guess = 50.0 / N2
@@ -365,13 +355,8 @@ if __name__ == '__main__':
     x3_guess[:,0] = x2_guess[:,N2]
     iter=0
     
-    alpha3_init = 0.0
+    alpha3_init = 0*np.deg2rad(10.0)
     v3_max = ca.sqrt(rocket_eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["apogee"]))
-    a_parking = 0.5 * (Target_Orbit["perigee"] + (rocket_eci.R0 + rocket_eci.ParkingOrbit_PerigeeAlt))
-    v3_apogee_guess = ca.sqrt(rocket_eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / a_parking))
-    v3_desired_guess = ca.sqrt(rocket_eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["a"]))
-    propellent_mass_for_final_dv3_guess = (rocket_eci.SecondStage_EmptyMass + payload_mass_guess)* (1.0 - ca.exp((v3_apogee_guess - v3_desired_guess) / (rocket_eci.SecondStage_Vac_Isp * rocket_eci.g0)))
-
     while iter < 50:
         alpha3, alpha_factor = alpha3_init, 1.0
         for k in range(N3):
@@ -380,7 +365,7 @@ if __name__ == '__main__':
             h = h / np.linalg.norm(h)
             i = np.arccos(h[2] / np.linalg.norm(h))
             u3_guess[0:3,k] = (x3_guess[3:6,k] / np.linalg.norm(x3_guess[3:6,k])) 
-            # alpha_factor = k/N3
+            alpha_factor = k/N3
             alpha3 = -alpha3_init*alpha_factor
             u3_guess[0:3,k] = u3_guess[0:3,k] * np.cos(alpha3) + np.cross(h, u3_guess[0:3,k]) * np.sin(alpha3) + h * np.dot(h, u3_guess[0:3,k]) * (1 - np.cos(alpha3)) 
             
@@ -395,28 +380,32 @@ if __name__ == '__main__':
             apogee = a * (1.0 + ca.norm_2(e))
             i = ca.acos(h[2] / ca.norm_2(h))
             
-            if x3_guess[6,k+1] < rocket_eci.SecondStage_EmptyMass + payload_mass_guess + propellent_mass_for_final_dv3_guess:
+            if x3_guess[6,k+1] < rocket_eci.SecondStage_EmptyMass + payload_mass_guess:
                 break
-
-
         if k < N3-1:
             iter += 1
             dt3_guess = dt3_guess * (k+1) / N3
         elif x3_guess[6,k+1] < rocket_eci.SecondStage_EmptyMass + payload_mass_guess:
             dt3_guess -= 0.25
             iter += 1
-        elif apogee < rocket_eci.ParkingOrbit_PerigeeAlt + rocket_eci.R0 or a < 0.5*(Target_Orbit['perigee']+rocket_eci.R0+200.0*1e3):
-            dt3_guess += 0.1
+        # elif perigee < rocket_eci.R0+100*10**3:
+        #     dt3_guess += 0.1
+        #     iter += 1
+        elif apogee > rocket_eci.R0+1000*10**3 or np.linalg.norm(x3_guess[3:6,N3]) > v3_max+100.0:
+            dt3_guess -= 0.025
             iter += 1
         elif perigee < rocket_eci.R0+10*10**3:
-            alpha3_init -= np.deg2rad(0.5)
+            alpha3_init += np.deg2rad(1.0)
             # dt3_guess += 0.
-            iter += 1
-        elif apogee > Target_Orbit['perigee'] + 150.0*1e3:
-            dt3_guess -= 0.1
             iter += 1
         else:
             break
+
+    opti.set_initial(dt3, dt3_guess)
+    for k in range(N3+1):
+        opti.set_initial(x3[:,k], x3_guess[:,k])
+    for k in range(N3):
+        opti.set_initial(u3[:,k], u3_guess[:,k])
 
     opti.set_initial(payload_mass, payload_mass_guess)
     opti.set_initial(LaunchAz, LaunchAz_guess)
@@ -433,38 +422,15 @@ if __name__ == '__main__':
     # calculate the initial guess for booster return
     if RecoveryStrategy != 'None':
         # calculate the initial guess for booster return
+        dt4_ballistic_guess = 200
         x4_0_guess = np.zeros((rocket_return.nx, 1))
         x4_0_guess[0:4,0] = x1_guess[0:4,N1]
         x4_0_guess[4,0] = x1_guess[4,N1] - rocket_eci.SecondStage_FullMass - payload_mass_guess
-        if RecoveryStrategy == 'RTLS':
-            dt4_boostback_guess = 18.5
-            x4_boostback_guess = np.zeros((rocket_boostback.nx, 1))
-            u4_boostback_guess = np.zeros((rocket_boostback.nu, 1))
-            iter = 0
-            while iter < 1:
-                u4_boostback_guess[0] = -3.0/9.0 * np.cos(np.deg2rad(-10.0))
-                u4_boostback_guess[1] = -3.0/9.0 * np.sin(np.deg2rad(-10.0))
-                x4_boostback_guess = rocket_boostback.dynamics_kp1_M20(x4_0_guess, u4_boostback_guess, dt4_boostback_guess).full().flatten()
-                alt = rocket_Booster.local_to_alt(x4_boostback_guess)
-                vel = np.linalg.norm(x4_boostback_guess[2:4])
-                t_bal = (-x4_boostback_guess[3]  + np.sqrt(x4_boostback_guess[3]**2 +2*rocket_boostback.g0*alt))/(0.5*rocket_boostback.g0)
-                x_bal = x4_boostback_guess[0] + x4_boostback_guess[2]*t_bal
-                if abs(x_bal) > 100.0:
-                    dt4_boostback_guess += np.clip(-0.01*x_bal / x4_boostback_guess[2], -1.0, 1.0)
-                    iter += 1
-                else:
-                    break
-
-        # calculate the initial guess for booster return
-        dt4_ballistic_guess = 200
+        
         iter=0
         while iter < 50:
-            if RecoveryStrategy == 'RTLS':
-                x4_before_reentry_guess = rocket_return.dynamics_kp1_M50(x4_boostback_guess, 0, dt4_ballistic_guess)
-            else:
-                x4_before_reentry_guess = rocket_return.dynamics_kp1_M50(x4_0_guess, 0, dt4_ballistic_guess)
+            x4_before_reentry_guess = rocket_return.dynamics_kp1_M50(x4_0_guess, 0, dt4_ballistic_guess)
             alt = ca.norm_2(ca.vertcat(x4_before_reentry_guess[0,0], rocket_return.R0+x4_before_reentry_guess[1,0])) - rocket_return.R0
-            vel = ca.norm_2(ca.vertcat(x4_before_reentry_guess[2,0], x4_before_reentry_guess[3,0]))
             if abs(alt - 60000) > 10:
                 dt4_ballistic_guess += np.clip((alt - 60000)/abs(x4_before_reentry_guess[3,0]), -10.0, 10.0)
                 iter += 1
@@ -472,24 +438,23 @@ if __name__ == '__main__':
                 break
         
         u4_reentry_guess = 0.3333
-        dt4_reentry_guess = 1.0
+        dt4_reentry_guess = 12.0
         iter = 0
-        v_final = 1400.0
         while iter < 50:
             x4_after_reentry_guess = rocket_return.dynamics_kp1_M20(x4_before_reentry_guess, u4_reentry_guess, dt4_reentry_guess)
             alt = ca.norm_2(ca.vertcat(x4_after_reentry_guess[0,0], rocket_return.R0+x4_after_reentry_guess[1,0])) - rocket_return.R0
             vel = ca.norm_2(ca.vertcat(x4_after_reentry_guess[2,0], x4_after_reentry_guess[3,0]))
             mass = x4_after_reentry_guess[4,0]
-            if abs(vel- v_final) > 10:
-                dt4_reentry_guess += 0.5 * np.sign(vel - v_final)
+            if abs(vel- 1250.0) > 10:
+                dt4_reentry_guess += 0.05 * np.sign(vel - 1250.0)
+                iter += 1
             else:
                 break
-            iter += 1
 
         # after reentry burn before landing burn
         iter = 0
         dt4_before_landing_guess = 50.0
-        alt4_before_landing = 1000.0
+        alt4_before_landing = 1250.0
         while iter < 50:
             x4_before_landing_guess = rocket_return.dynamics_kp1_M20(x4_after_reentry_guess, 0, dt4_before_landing_guess)
             alt = ca.norm_2(ca.vertcat(x4_before_landing_guess[0,0], rocket_return.R0+x4_before_landing_guess[1,0])) - rocket_return.R0
@@ -501,44 +466,28 @@ if __name__ == '__main__':
                 break
 
         # initial guess for the landing burn
-        vel = np.linalg.norm(x4_before_landing_guess[2:4])
-        alt  = rocket_return.local_to_alt(x4_before_landing_guess)
-        dt4_landing_guess = 0.5*vel**2/alt / N4
+        dt4_landing_guess = 30 / N4
         x4_landing_guess = np.zeros((rocket_return.nx, N4+1))
         u4_landing_guess = np.zeros((rocket_return.nu, N4))
         iter = 0
         thrust_factor = 1.0
-        while iter < 20:
+        while iter < 1:
             u4_landing_guess[0,0] = 0.1111
             x4_landing_guess[:,0] = x4_before_landing_guess.full().flatten()
             for k in range(N4):
-                vel = np.linalg.norm(x4_landing_guess[2:4,k])
-                alt = rocket_return.local_to_alt(x4_landing_guess[:,k])
-                # if vel > 75.0:
-                #     u4_landing_guess[0,k] = 0.1111 * thrust_factor
-                # else:
-                #     u4_landing_guess[0,k] = x4_landing_guess[4,k] * rocket_return.g0/rocket_return.FirstStage_SL_Thrust
-                g_vec = -np.array([x4_landing_guess[0,k], rocket_return.R0 + x4_landing_guess[1,k]])
-                g_vec /= np.linalg.norm(g_vec)
-                g = rocket_return.g0 * (rocket_return.R0/(rocket_return.R0 + x4_landing_guess[1,k]))**2
-                v_g = np.dot(g_vec, x4_landing_guess[2:4,k])
-                u4_landing_guess[0,k] = np.dot(g_vec, x4_landing_guess[2:4,k])/vel * x4_landing_guess[4,k] * g/rocket_return.FirstStage_SL_Thrust
-                if vel > 1.0:
-                    u4_landing_guess[0,k] += (v_g**2)/(2*alt)*x4_landing_guess[4,k]/rocket_return.FirstStage_SL_Thrust
-                u4_landing_guess[0,k] = np.clip(u4_landing_guess[0,k], 0.03, 1.0/9.0)
+                vel = ca.norm_2(ca.vertcat(x4_landing_guess[2,k], x4_landing_guess[3,k]))
+                if vel > 75.0:
+                    u4_landing_guess[0,k] = 0.1111 * thrust_factor
+                else:
+                    u4_landing_guess[0,k] = x4_landing_guess[4,k] * rocket_return.g0/rocket_return.FirstStage_SL_Thrust
                 x4_landing_guess[:,k+1] = rocket_return.dynamics_kp1(x4_landing_guess[:,k], u4_landing_guess[0,k], dt4_landing_guess).full().flatten()
-                alt = rocket_return.local_to_alt(x4_landing_guess[:,k+1])
-                vel = np.linalg.norm(x4_landing_guess[2:4,k+1])
-                if alt < -1.0:
-                    break
-            if alt > 10:
+            alt = rocket_return.local_to_alt(x4_landing_guess[:,k+1])
+            vel = ca.norm_2(ca.vertcat(x4_landing_guess[2,k+1], x4_landing_guess[3,k+1]))
+            if abs(alt) > 20:
                 dt4_landing_guess += 0.2*(alt)/vel/N4
                 iter += 1
-            # elif vel > 20:
-            #     thrust_factor += rocket_return.FirstStage_EmptyMass/rocket_return.FirstStage_SL_Thrust
-            #     iter += 1
-            elif alt < -1.0:
-                dt4_landing_guess *= k/(N4-1)
+            elif abs(vel) > 20:
+                thrust_factor += 0.5*vel/10
                 iter += 1
             else:
                 break
@@ -549,18 +498,14 @@ if __name__ == '__main__':
         opti.set_initial(x4_0, x4_0_guess)
         opti.set_initial(dt4_ballistic, dt4_ballistic_guess)
         opti.set_initial(dt4_reentry, dt4_reentry_guess)
-        opti.set_initial(dt4_before_landing, dt4_before_landing_guess)
-        opti.set_initial(dt4_landing, dt4_landing_guess)
+        # opti.set_initial(dt4_before_landing, dt4_before_landing_guess)
+        # opti.set_initial(dt4_landing, dt4_landing_guess)
         opti.set_initial(x4_before_reentry, x4_before_reentry_guess)
         opti.set_initial(x4_after_reentry, x4_after_reentry_guess)
         opti.set_initial(u4_reentry, u4_reentry_guess)
-        opti.set_initial(x4_before_landing, x4_before_landing_guess)
-        opti.set_initial(x4_landing, x4_landing_guess)
-        opti.set_initial(u4_landing, u4_landing_guess)
-        if RecoveryStrategy == 'RTLS':
-            opti.set_initial(dt4_boostback, dt4_boostback_guess)
-            opti.set_initial(x4_boostback, x4_boostback_guess)
-            opti.set_initial(u4_boostback, u4_boostback_guess)
+        # opti.set_initial(x4_before_landing, x4_before_landing_guess)
+        # opti.set_initial(x4_landing, x4_landing_guess)
+        # opti.set_initial(u4_landing, u4_landing_guess)
 
 
     # Solution from file:
@@ -580,18 +525,14 @@ if __name__ == '__main__':
             opti.set_initial(x4_0, return_solution['x4_0'])
             opti.set_initial(dt4_ballistic, return_solution['dt4_ballistic'])
             opti.set_initial(dt4_reentry, return_solution['dt4_reentry'])
-            opti.set_initial(dt4_before_landing, return_solution['dt4_before_landing'])
-            opti.set_initial(dt4_landing, return_solution['dt4_landing'])
+            # opti.set_initial(dt4_before_landing, return_solution['dt4_before_landing'])
+            # opti.set_initial(dt4_landing, return_solution['dt4_landing'])
             opti.set_initial(x4_before_reentry, return_solution['x4_before_reentry'])
             opti.set_initial(x4_after_reentry, return_solution['x4_after_reentry'])
             opti.set_initial(u4_reentry, return_solution['u4_reentry'])
-            opti.set_initial(x4_before_landing, return_solution['x4_before_landing'])
-            opti.set_initial(x4_landing, return_solution['x4_landing'])
-            opti.set_initial(u4_landing, return_solution['u4_landing'])
-            if RecoveryStrategy == 'RTLS':
-                opti.set_initial(dt4_boostback, return_solution['dt4_boostback'])
-                opti.set_initial(x4_boostback, return_solution['x4_boostback'])
-                opti.set_initial(u4_boostback, return_solution['u4_boostback'])
+            # opti.set_initial(x4_before_landing, return_solution['x4_before_landing'])
+            # opti.set_initial(x4_landing, return_solution['x4_landing'])
+            # opti.set_initial(u4_landing, return_solution['u4_landing'])
 
 
     if RecoveryStrategy != 'None':
@@ -622,15 +563,11 @@ if __name__ == '__main__':
             x4_after_reentry_sol = np.array(sol.value(x4_after_reentry))
             u4_reentry_sol = np.array(sol.value(u4_reentry))
             dt4_reentry_sol = np.array(sol.value(dt4_reentry))
-            dt4_before_landing_sol = np.array(sol.value(dt4_before_landing))
-            x4_before_landing_sol = np.array(sol.value(x4_before_landing))
-            dt4_landing_sol = np.array(sol.value(dt4_landing))
-            x4_landing_sol = np.array(sol.value(x4_landing))
-            u4_landing_sol = np.array(sol.value(u4_landing))
-            if RecoveryStrategy == 'RTLS':
-                dt4_boostback_sol = np.array(sol.value(dt4_boostback))
-                x4_boostback_sol = np.array(sol.value(x4_boostback))
-                u4_boostback_sol = np.array(sol.value(u4_boostback))
+            # dt4_before_landing_sol = np.array(sol.value(dt4_before_landing))
+            # x4_before_landing_sol = np.array(sol.value(x4_before_landing))
+            # dt4_landing_sol = np.array(sol.value(dt4_landing))
+            # x4_landing_sol = np.array(sol.value(x4_landing))
+            # u4_landing_sol = np.array(sol.value(u4_landing))
 
     except:
 
@@ -642,8 +579,8 @@ if __name__ == '__main__':
         lbg = opti.debug.lbg
         ubg = opti.debug.ubg # Evaluates g at solution
 
-        tol = 1e-1
-        print("Significant constraint residuals (> 1e-1):")
+        tol = 1e-3
+        print("Significant constraint residuals (> 1e-3):")
         for i, val in enumerate(g_val):
             lb = lbg[i]
             ub = ubg[i]
@@ -683,15 +620,11 @@ if __name__ == '__main__':
             x4_after_reentry_sol = opti.debug.value(x4_after_reentry)
             u4_reentry_sol = opti.debug.value(u4_reentry)
             dt4_reentry_sol = opti.debug.value(dt4_reentry)
-            dt4_before_landing_sol = opti.debug.value(dt4_before_landing)
-            x4_before_landing_sol = opti.debug.value(x4_before_landing)
-            dt4_landing_sol = opti.debug.value(dt4_landing)
-            x4_landing_sol = opti.debug.value(x4_landing)
-            u4_landing_sol = opti.debug.value(u4_landing)
-            if RecoveryStrategy == 'RTLS':
-                dt4_boostback_sol = opti.debug.value(dt4_boostback)
-                x4_boostback_sol = opti.debug.value(x4_boostback)
-                u4_boostback_sol = opti.debug.value(u4_boostback)
+            # dt4_before_landing_sol = opti.debug.value(dt4_before_landing)
+            # x4_before_landing_sol = opti.debug.value(x4_before_landing)
+            # dt4_landing_sol = opti.debug.value(dt4_landing)
+            # x4_landing_sol = opti.debug.value(x4_landing)
+            # u4_landing_sol = opti.debug.value(u4_landing)
 
         grad_f = ca.gradient(opti.f, opti.x)
         grad_func = ca.Function("grad_f", [opti.x], [grad_f])
@@ -703,20 +636,22 @@ if __name__ == '__main__':
     t1_vec = np.linspace(init_time, init_time+N1*dt1_sol, N1+1)
     t2_vec = np.linspace(t1_vec[-1], t1_vec[-1]+N2*dt2_sol, N2+1)
     t3_vec = np.linspace(t2_vec[-1], t2_vec[-1]+N3*dt3_sol, N3+1)
+    # t3_vec = np.zeros((N3+1))
+    # t3_vec[0] = t2_vec[-1]
+    # for k in range(N3):
+    #     t3_vec[k+1] = t3_vec[k] + dt3_sol*(1-0.5*k/(N3-1))
 
     Isp1_sol = np.zeros((N1))
     Qdyn1_sol = np.zeros((N1+1))
     a1_sol, b1_sol = np.zeros((N1+1)), np.zeros((N1+1))
     apogee1_sol, perigee1_sol = np.zeros((N1+1)), np.zeros((N1+1))
     alt1_sol, vel1_sol = np.zeros((N1+1)), np.zeros((N1+1))
-    i1_sol, gama1_sol, gama1_local_sol = np.zeros((N1+1)), np.zeros((N1+1)), np.zeros((N1+1))
-    x1_eci_sol = np.zeros((rocket_eci.nx, N1+1))
+    i1_sol, gama1_sol = np.zeros((N1+1)), np.zeros((N1+1))
     for k in range(N1+1):
         if k < N1:
             Isp1_sol[k] = rocket_Booster.ISP_calc(x1_sol[:,k], u1_sol[:,k]).full().flatten()[0]
         Qdyn1_sol[k] = 0.5 * (x1_sol[2,k]**2 + x1_sol[3,k]**2) * atmosphere.rho_fun(x1_sol[1,k])
         pos, vel = rocket_eci.local_to_eci_func(ca.vertcat(x1_sol[0,k], 0.0, x1_sol[1,k]), ca.vertcat(x1_sol[2,k], 0.0, x1_sol[3,k]), LaunchAz_sol)
-        x1_eci_sol[0:3,k], x1_eci_sol[3:6,k], x1_eci_sol[6,k] = pos.T, vel.T, x1_sol[4,k]
         alt1_sol[k] = np.linalg.norm(pos) - rocket_eci.R0 / np.sqrt(1.0 - rocket_eci.e**2 * np.sin(np.deg2rad(rocket_eci.LaunchLatitude))**2)
         vel1_sol[k] = np.linalg.norm(vel)
         h1 = ca.cross(pos, vel)
@@ -728,7 +663,6 @@ if __name__ == '__main__':
         perigee1_sol[k] = a1_sol[k] * (1.0 - np.linalg.norm(e1))
         i1_sol[k] = np.arccos(h1[2] / ca.norm_2(h1))
         gama1_sol[k] = np.arccos(ca.dot(vel, pos) / (ca.norm_2(vel) * ca.norm_2(pos)))
-        gama1_local_sol[k] = np.atan2(x1_sol[3,k], x1_sol[2,k])
 
     Isp2_sol = np.zeros((N2))
     Alpha2_sol = np.zeros((N2))
@@ -782,29 +716,13 @@ if __name__ == '__main__':
     if RecoveryStrategy != 'None':
         alt4_0_sol = ca.norm_2(ca.vertcat(x4_0_sol[0], rocket_return.R0+x4_0_sol[1])) - rocket_return.R0
         vel4_0_sol = ca.norm_2(ca.vertcat(x4_0_sol[2], x4_0_sol[3]))
-        
-        if RecoveryStrategy == 'RTLS':
-            t4_boostback_vec = t1_vec[-1]+np.linspace(0, dt4_boostback_sol, N4+1)
-            alt4_boostback_sol = np.zeros((N4+1,1))
-            vel4_boostback_sol = np.zeros((N4+1,1))
-            x4_boostback_vec_sol = np.zeros((rocket_boostback.nx, N4+1))
-            x4_boostback_vec_sol[:,0] = x4_0_sol
-            for k in range(N4+1):
-                if k<N4:
-                    x4_boostback_vec_sol[:,k+1] = rocket_boostback.dynamics_kp1(x4_boostback_vec_sol[:,k], u4_boostback_sol, dt4_boostback_sol/N4).full().flatten()
-                alt4_boostback_sol[k] = ca.norm_2(ca.vertcat(x4_boostback_vec_sol[0,k], rocket_return.R0+x4_boostback_vec_sol[1,k])) - rocket_return.R0
-                vel4_boostback_sol[k] = ca.norm_2(ca.vertcat(x4_boostback_vec_sol[2,k], x4_boostback_vec_sol[3,k]))
-            
         N4_ballistic = 50
         x4_ballistic_sol = np.zeros((rocket_return.nx, N4_ballistic))
         alt4_ballistic_sol, vel4_ballistic_sol = np.zeros((N4_ballistic,1)), np.zeros((N4_ballistic,1))
         Qdyn4_ballistic_sol = np.zeros((N4_ballistic,1))
         t4_ballistic_vec = np.zeros((N4_ballistic,1))
-        if RecoveryStrategy == 'RTLS':
-            x4_ballistic_sol[:,0] = x4_boostback_sol.reshape((-1,))
-        else:
-            x4_ballistic_sol[:,0] = x4_0_sol
-        t4_ballistic_vec[0]  = t1_vec[-1] if RecoveryStrategy != 'RTLS' else dt4_boostback_sol+t1_vec[-1]
+        x4_ballistic_sol[:,0] = x4_0_sol
+        t4_ballistic_vec[0] = np.linspace(t1_vec[-1], t1_vec[-1]+dt4_ballistic_sol, N4_ballistic+1)[0]
         alt4_ballistic_sol[0] = ca.norm_2(ca.vertcat(x4_ballistic_sol[0,0], rocket_return.R0+x4_ballistic_sol[1,0])) - rocket_return.R0
         vel4_ballistic_sol[0] = ca.norm_2(ca.vertcat(x4_ballistic_sol[2,0], x4_ballistic_sol[3,0]))
         Qdyn4_ballistic_sol[0] = 0.5 * atmosphere.rho_fun(alt4_ballistic_sol[0]) * vel4_ballistic_sol[0]**2
@@ -851,8 +769,8 @@ if __name__ == '__main__':
         vel4_before_landing_sol[0] = ca.norm_2(ca.vertcat(x4_before_landing_vec_sol[2,0], x4_before_landing_vec_sol[3,0]))
         Qdyn4_before_landing_sol[0] = 0.5 * atmosphere.rho_fun(alt4_before_landing_sol[0]) * vel4_before_landing_sol[0]**2
         for k in range(1,N4_before_landing):
-            t4_before_landing_vec[k] = t4_before_landing_vec[k-1] + dt4_before_landing_sol/(N4_before_landing-1)
-            x4_before_landing_vec_sol[:,k] = rocket_return.dynamics_kp1(x4_before_landing_vec_sol[:,k-1], 0, dt4_before_landing_sol/(N4_before_landing-1)).full().flatten()
+            # t4_before_landing_vec[k] = t4_before_landing_vec[k-1] + dt4_before_landing_sol/(N4_before_landing-1)
+            # x4_before_landing_vec_sol[:,k] = rocket_return.dynamics_kp1(x4_before_landing_vec_sol[:,k-1], 0, dt4_before_landing_sol/(N4_before_landing-1)).full().flatten()
             alt4_before_landing_sol[k] = rocket_return.local_to_alt(x4_before_landing_vec_sol[:,k])
             vel4_before_landing_sol[k] = ca.norm_2(ca.vertcat(x4_before_landing_vec_sol[2,k], x4_before_landing_vec_sol[3,k]))
             Qdyn4_before_landing_sol[k] = 0.5 * atmosphere.rho_fun(alt4_before_landing_sol[k]) * vel4_before_landing_sol[k]**2
@@ -883,28 +801,23 @@ if __name__ == '__main__':
     fig.suptitle(f'dt1={dt1_sol:.2f} s, dt2={dt2_sol:.2f} s, dt3={dt3_sol:.2f} s, LaunchAz={np.rad2deg(LaunchAz_sol):.2f} deg, PayloadMass={payload_mass_sol:.2f} kg', fontsize=16)
     gs = gridspec.GridSpec(3, 4, figure=fig)
     ax_traj = fig.add_subplot(gs[0, 0])
-    ax_traj.plot(x1_sol[0,:]/1000, x1_sol[1,:]/1000, label='1st Stage')
+    ax_traj.plot(x1_sol[0,:]/1000, alt1_sol/1000, label='1st Stage')
+    ax_traj.plot(x1_guess[0,:]/1000, x1_guess[1,:]/1000, 'k--')
     if RecoveryStrategy != 'None':
-        if RecoveryStrategy == 'ASDS':
-            x_earth = np.linspace(0, 850000,1000)
-            z_earth = np.sqrt(rocket_return.R0**2 - x_earth**2) - rocket_return.R0
-            ax_traj.plot(x_earth/1000, z_earth/1000, 'k--')
-
+        x_earth = np.linspace(0, 850000,1000)
+        z_earth = np.sqrt(rocket_return.R0**2 - x_earth**2) - rocket_return.R0
+        ax_traj.plot(x_earth/1000, z_earth/1000, 'k--')
         ax_traj.plot(x4_ballistic_sol[0,:]/1000, x4_ballistic_sol[1,:]/1000, label='Booster Return')
         ax_traj.plot(x4_reentry_sol[0]/1000, x4_reentry_sol[1]/1000)
         ax_traj.plot(x4_reentry_sol[0,:]/1000, x4_reentry_sol[1,:]/1000, label='Reentry Burn')
         ax_traj.plot(x4_before_landing_vec_sol[0,:]/1000, x4_before_landing_vec_sol[1,:]/1000)
         ax_traj.plot(x4_landing_sol[0,:]/1000, x4_landing_sol[1,:]/1000, label='Landing Burn')
         ax_traj.plot(x4_before_reentry_sol[0]/1000, x4_before_reentry_sol[1]/1000, 's')
-        if RecoveryStrategy == 'RTLS':
-            ax_traj.plot(x4_boostback_vec_sol[0,:]/1000, x4_boostback_vec_sol[1,:]/1000, label='Boostback Phase')
-            ax_traj.plot(x4_boostback_sol[0]/1000, x4_boostback_sol[1]/1000, 's', label='Booster Return')
     ax_traj.set_title('Trajectory')
     ax_traj.set_ylabel('Altitude [Km]')
     ax_traj.set_xlabel('Distance [Km]')
     ax_traj.grid()
-    if RecoveryStrategy != 'RTLS':
-        ax_traj.set_aspect('equal', adjustable='box')
+    ax_traj.set_aspect('equal', adjustable='box')
 
     ax_alt = fig.add_subplot(gs[0,1])
     ax_alt.plot(t1_vec, alt1_sol/1000, label='1st Stage')
@@ -916,8 +829,6 @@ if __name__ == '__main__':
         ax_alt.plot(t4_before_landing_vec, alt4_before_landing_sol/1000, label='Landing Burn')
         ax_alt.plot(t4_landing_vec, alt4_landing_sol/1000, label='Landing Burn')
         ax_alt.plot(t4_reentry_vec[0], alt4_before_reentry_sol[0]/1000, 's')
-    if RecoveryStrategy == 'RTLS':
-        ax_alt.plot(t4_boostback_vec, alt4_boostback_sol/1000, label='Boostback')
 
     ax_alt.set_title('Altitude')
     ax_alt.set_ylabel('Altitude [Km]')
@@ -954,18 +865,16 @@ if __name__ == '__main__':
 
 
     ax_vel = fig.add_subplot(gs[0,2])
-    ax_vel.plot(t1_vec, np.linalg.norm(x1_sol[2:4,:], axis=0), label='1st Stage Local')
-    ax_vel.plot(t2_vec, np.linalg.norm(x2_sol[3:6,:], axis=0), label='2nd Stage ECI')
-    ax_vel.plot(t3_vec, np.linalg.norm(x3_sol[3:6,:], axis=0), label='2nd Stage ECI')
-    if RecoveryStrategy == 'RTLS':
-        ax_vel.plot(t4_boostback_vec, vel4_boostback_sol, label='Boostback')
+    ax_vel.plot(t1_vec, vel1_sol, label='1st Stage')
+    ax_vel.plot(t2_vec, np.linalg.norm(x2_sol[3:6,:], axis=0), label='2nd Stage')
+    ax_vel.plot(t3_vec, np.linalg.norm(x3_sol[3:6,:], axis=0), label='2nd Stage')
     if RecoveryStrategy != 'None':
-        ax_vel.plot(t4_ballistic_vec, vel4_ballistic_sol, label = 'Booster Local')
+        ax_vel.plot(t4_ballistic_vec, vel4_ballistic_sol)
         ax_vel.plot(t4_reentry_vec, vel4_reentry_sol)
         ax_vel.plot(t4_before_landing_vec, vel4_before_landing_sol)
         ax_vel.plot(t4_landing_vec, vel4_landing_sol)
         ax_vel.plot(t4_reentry_vec[0], vel4_before_reentry_sol[0], 's')
-    ax_vel.set_title('Velocity')
+    ax_vel.set_title('Velocity ECI')
     ax_vel.set_ylabel('Velocity [m/s]')
     ax_vel.set_xlabel('Time [s]')
     ax_vel.grid()
@@ -994,9 +903,6 @@ if __name__ == '__main__':
     ax_mass.plot(t1_vec, x1_sol[4,:]/1000)
     ax_mass.plot(t2_vec, x2_sol[6,:]/1000)
     ax_mass.plot(t3_vec, x3_sol[6,:]/1000)
-    if RecoveryStrategy == 'RTLS':
-        ax_mass.plot(t4_boostback_vec, x4_boostback_vec_sol[4,:]/1000, label='Boostback')
-        ax_mass.plot(dt4_boostback_sol, x4_boostback_sol[4]/1000,'s', label='Booster Return')
     if RecoveryStrategy != 'None':
         ax_mass.plot(t4_ballistic_vec, x4_ballistic_sol[4,:]/1000)
         ax_mass.plot(t4_reentry_vec, x4_reentry_sol[4,:]/1000)
@@ -1033,111 +939,15 @@ if __name__ == '__main__':
 
     ax_gama = fig.add_subplot(gs[2,3])
     ax_gama.plot(t1_vec, np.rad2deg(gama1_sol), label='1st Stage')
-    ax_gama.plot(t1_vec, np.rad2deg(gama1_local_sol), label='1st Stage Local')
-    ax_gama.plot(t1_vec, np.rad2deg(np.atan2(x1_guess[3,:], x1_guess[2,:])), label='1st Stage Local guess')
     ax_gama.plot(t2_vec, np.rad2deg(gama2_sol), label='2nd Stage before fairing separation')
     ax_gama.plot(t3_vec, np.rad2deg(gama3_sol), label='2nd Stage after fairing separation') 
     ax_gama.set_title('Gama')
     ax_gama.set_ylabel('Gama [deg]')
     ax_gama.set_xlabel('Time [s]')
     ax_gama.grid()
-    ax_gama.legend(loc='best')
+    ax_gama.legend()
 
     plt.tight_layout()
-
-    # Calc parking orbit
-    x_parking = x3_sol[:,-1].reshape(1,-1)
-    dtheta = 0
-    tf = 0
-    while True:
-        x_parking = np.vstack((x_parking, rocket_eci.dynamics_kp1(x_parking[-1,:], 0, 1.0).full().flatten()))
-        tf += 1.0
-        dtheta += np.arccos(np.dot(x_parking[-1,0:3],x_parking[-2,0:3])/(np.linalg.norm(x_parking[-1,0:3])*np.linalg.norm(x_parking[-2,0:3])))
-        if dtheta >= 2*np.pi:
-            break
-
-    r_parking = np.linalg.norm(x_parking[:,0:3], axis=1)
-    i_apogee = np.argmax(r_parking)
-    x_final = x_parking[i_apogee,:].reshape(1,-1)
-    x_final[-1,3:6] = v3_desired * x_final[-1,3:6] / np.linalg.norm(x_final[-1,3:6])
-
-    Parking_apogee = np.linalg.norm(x_parking[np.argmax(r_parking),0:3])
-    Parking_perigee = np.linalg.norm(x_parking[np.argmin(r_parking),0:3])
-
-    
-    dtheta = 0
-    while True:
-        x_final = np.vstack((x_final, rocket_eci.dynamics_kp1(x_final[-1,:], 0, dt3_sol).full().flatten()))
-        dtheta += np.arccos(np.dot(x_final[-1,0:3],x_final[-2,0:3])/(np.linalg.norm(x_final[-1,0:3])*np.linalg.norm(x_final[-2,0:3])))
-        if dtheta >= 2*np.pi:
-            break
-    r_final = np.linalg.norm(x_final[:,0:3], axis=1)
-
-    final_apogee = np.linalg.norm(x_final[np.argmax(r_final),0:3])
-    final_perigee = np.linalg.norm(x_final[np.argmin(r_final),0:3])
-        
-
-
-    phi, theta = np.mgrid[0:np.pi:30j, 0:2*np.pi:30j]
-    x = rocket_Booster.R0 * np.sin(phi) * np.cos(theta)
-    y = rocket_Booster.R0 * np.sin(phi) * np.sin(theta)
-    z = rocket_Booster.R0 * np.cos(phi)
-
-    # Create equatorial plane (z=0)
-    theta_plane = np.linspace(0, 2*np.pi, 100)
-    r_plane = np.linspace(0, rocket_Booster.R0*1.1, 25)
-    r_grid, theta_grid = np.meshgrid(r_plane, theta_plane)
-    x_plane = r_grid * np.cos(theta_grid)
-    y_plane = r_grid * np.sin(theta_grid)
-    z_plane = np.zeros_like(x_plane)
-    
-    # fig_3d = plt.figure(figsize=(12, 12))
-    # ax_3d = plt.subplot(1,2,1, projection='3d')
-
-    # # Plot Earth
-    # ax_3d.plot_surface(x, y, z, rstride=2, cstride=2, color='blue', alpha=0.1, edgecolor='none', antialiased=False)
-
-    # # Plot equatorial plane
-    # ax_3d.plot_surface(x_plane, y_plane, z_plane, color='gray', alpha=0.4)
-
-    # #plot trajectory
-    # ax_3d.plot(x1_eci_sol[0,:], x1_eci_sol[1,:], x1_eci_sol[2,:], 'r')
-    # ax_3d.plot(x2_sol[0,:], x2_sol[1,:], x2_sol[2,:], 'g')
-    # ax_3d.plot(x3_sol[0,:], x3_sol[1,:], x3_sol[2,:], 'g')
-    # ax_3d.plot(x_parking[:,0], x_parking[:,1], x_parking[:,2], 'c', label=f'Parking Orbit (apogee={np.round((np.max(r_parking) - rocket_Booster.R0)/1000)}, perigee={np.round((np.min(r_parking) - rocket_Booster.R0)/1000)})')
-    # ax_3d.plot(x_final[:,0], x_final[:,1], x_final[:,2], '--m', label=f'Final Orbit (apogee={np.round((np.max(final_apogee) - rocket_Booster.R0)/1000)}, perigee={np.round((np.min(final_perigee) - rocket_Booster.R0)/1000)})')
-    # ax_3d.legend()
-
-    # # ECI axes
-    # max_range = rocket_Booster.R0 * 2
-    # ax_3d.quiver(0, 0, 0, max_range, 0, 0, color='r')
-    # ax_3d.quiver(0, 0, 0, 0, max_range, 0, color='g')
-    # ax_3d.quiver(0, 0, 0, 0, 0, max_range, color='b')
-
-    # # Set aspect and limits
-    # ax_3d.set_aspect('equal')
-    # ax_3d.set_xlabel('X (km)')
-    # ax_3d.set_ylabel('Y (km)')
-    # ax_3d.set_zlabel('Z (km)')
-    # ax_3d.set_title('Earth in ECI Frame with Equatorial Plane')
-    # ax_3d.legend()
-
-    # ax_traj3d = plt.subplot(1,2,2, projection='3d')
-    #     #plot trajectory
-    # ax_traj3d.plot(x1_eci_sol[0,:], x1_eci_sol[1,:], x1_eci_sol[2,:], 'r', label='1st Stage')
-    # ax_traj3d.plot(x2_sol[0,:], x2_sol[1,:], x2_sol[2,:], 'c', label='2nd Stage before fairing separation')
-    # ax_traj3d.plot(x3_sol[0,:], x3_sol[1,:], x3_sol[2,:], 'g', label='2nd Stage after fairing separation')
-    # for i in range(0,u2_sol.shape[1], 5):
-    #     u_vec = u2_sol[:,i] / np.linalg.norm(u2_sol[:,i])*100000
-    #     ax_traj3d.quiver(x2_sol[0,i], x2_sol[1,i], x2_sol[2,i], u_vec[0], u_vec[1], u_vec[2], color='b')
-    # for i in range(0,u3_sol.shape[1], 5):
-    #     u_vec = u3_sol[:,i] / np.linalg.norm(u3_sol[:,i])*100000
-    #     ax_traj3d.quiver(x3_sol[0,i], x3_sol[1,i], x3_sol[2,i], u_vec[0], u_vec[1], u_vec[2], color='b')
-
-    
-    # ax_traj3d.legend()
-
-
     plt.show()
         
 
