@@ -54,6 +54,7 @@ class VLType(PythonMsg):
     # LaunchLatitude: float = field(default = 0.0) # [deg]
     # LaunchLongitude: float = field(default = 0.0) #e[dege]    
     LaunchAltitude: float = field(default = 0.0) # [m]
+    atmosphere: Atm_Type.AtmosphereType = field(default=None)
 
     #Aerodynamic Properties
     Sref: float = field(default = 0.0)
@@ -143,6 +144,8 @@ class BoosterLaunchVehicle_2D(VLType):
     def __init__(self, atmosphere: Atm_Type.AtmosphereType):
         super().__init__()
 
+        self.atmosphere = atmosphere
+
         sym_x = ca.MX.sym('x')
         sym_z = ca.MX.sym('z')
         sym_vx = ca.MX.sym('vx')
@@ -186,7 +189,6 @@ class BoosterLaunchVehicle_2D(VLType):
         self.dynamics = ca.Function('dynamics_boost', [sym_q, sym_u], [dqdt])
         self.dynamics_kp1 = ca.Function('dynamics_boost_kp1', [sym_q, sym_u, sym_dt], [self.RK4(self.dynamics, sym_q, sym_u, sym_dt, 1)])
         self.ISP_calc = ca.Function('Isp_calc', [sym_q, sym_u], [Isp])
-        
 
 @dataclass
 class LaunchVehicle_ECI(VLType):
@@ -294,6 +296,8 @@ class BoosterReturn_2D(VLType):
     def __init__(self, atmosphere: Atm_Type.AtmosphereType):
         super().__init__()
 
+        self.atmosphere = atmosphere
+
         sym_x = ca.MX.sym('x')
         sym_z = ca.MX.sym('z')
         sym_vx = ca.MX.sym('vx')
@@ -382,3 +386,6 @@ class BoostBackBurn_2D(VLType):
         self.dynamics_kp1 = ca.Function('dynamics_boostback_kp1', [sym_q, sym_u, sym_dt], [self.RK4(self.dynamics, sym_q, sym_u, sym_dt, 1)])
         self.dynamics_kp1_M20 = ca.Function('dynamics_boostback_kp1', [sym_q, sym_u, sym_dt], [self.RK4(self.dynamics, sym_q, sym_u, sym_dt, 20)])
         self.ISP_calc = ca.Function('Isp_calc', [sym_q, sym_u], [Isp])
+
+
+

@@ -25,10 +25,10 @@ if __name__ == '__main__':
     rocket_eci = LV_Type.LaunchVehicle_ECI()
     
     # Target orbit parameters for LEO
-    # Target_Orbit = {"apogee": rocket_Booster.R0 + 300.0*1000.0, # semi-major axis
-    #                 "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
-    #                 "i": np.deg2rad(53.3), # inclination [rad]
-    #                 }
+    Target_Orbit = {"apogee": rocket_Booster.R0 + 300.0*1000.0, # semi-major axis
+                    "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
+                    "i": np.deg2rad(53.3), # inclination [rad]
+                    }
 
     # Target orbit parameters for GTO
     # Target_Orbit = {"apogee": rocket_Booster.R0 + 35786.0*1000.0, # semi-major axis
@@ -37,10 +37,10 @@ if __name__ == '__main__':
     #                 }
 
     # Target orbit parameters for SSO
-    Target_Orbit = {"apogee": rocket_Booster.R0 + 780 * 1000.0, # semi-major axis
-                    "perigee": rocket_Booster.R0 + 780.0*1000.0, # semi-minor axis
-                    "i": np.deg2rad(98.6), # inclination [rad]
-                    }
+    # Target_Orbit = {"apogee": rocket_Booster.R0 + 780 * 1000.0, # semi-major axis
+    #                 "perigee": rocket_Booster.R0 + 780.0*1000.0, # semi-minor axis
+    #                 "i": np.deg2rad(98.6), # inclination [rad]
+    #                 }
 
     Target_Orbit["a"] = 0.5 * (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # semi-major axis
     Target_Orbit["e"] = (Target_Orbit["apogee"] - Target_Orbit["perigee"]) / (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # eccentricity
@@ -82,8 +82,7 @@ if __name__ == '__main__':
 
         # set the state constraints
         opti.subject_to(0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=rocket_Booster.FirstStage_MaxDynamicPressure)
-        opti.subject_to(u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
-        opti.subject_to(-u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
+        opti.subject_to((u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2))**2/1000.0**2<=1.0)
     # set the final state constraints
     # opti.subject_to(x1[4,N1] >= rocket_Booster.FirstStage_EmptyMass + payload_mass + dm)
     opti.subject_to(x1[4,N1]/(rocket_Booster.FirstStage_EmptyMass + payload_mass + dm) >= 1.0)
@@ -172,7 +171,7 @@ if __name__ == '__main__':
     # cost = 0.5*(ca.sumsqr(u1[0,:]) + ca.sumsqr(u1[1,:])/rocket_Booster.FirstStage_MaxAlpha**2)
     cost += 0.5*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])/rocket_Booster.FirstStage_MaxAlpha**2 )
     # cost += 0.5*(ca.sumsqr(u2) + ca.sumsqr(u3))/(rocket_eci.SecondStage_Thrust)**2
-    cost += -0.5*payload_mass - 0.001*x3[6,N3]
+    cost += -0.5*payload_mass
     # cost += ca.sumsqr((i-Target_Orbit["i"])/np.deg2rad(0.3))
     # cost += 100*((a-Target_Orbit["perigee"])/1000)**2
     opti.minimize(cost)
@@ -283,7 +282,8 @@ if __name__ == '__main__':
     dt3_guess = 370.0/N3
     x3_guess = np.zeros((rocket_eci.nx, N3+1))
     u3_guess = np.zeros((rocket_eci.nu, N3))
-    x3_guess[:,0] = x2_guess[:,N2]
+    x3_guess[0:6,0] = x2_guess[0:6,N2]
+    x3_guess[6,0] = x2_guess[6,N2] - rocket_eci.FairingMass
     iter=0
     
     alpha3_init = 0.0
@@ -386,6 +386,43 @@ if __name__ == '__main__':
         u3_sol = opti.debug.value(u3)
         payload_mass_sol = opti.debug.value(payload_mass)
         LaunchAz_sol = opti.debug.value(LaunchAz)
+
+    if 1:
+        g_expr = opti.debug.g  # Symbolic expression for all constraints
+        g_func = ca.Function("g_func", [opti.x], [g_expr])
+        x_val = opti.debug.value(opti.x)
+        g_val = g_func(x_val).full().flatten()
+
+        lbg = opti.debug.lbg
+        ubg = opti.debug.ubg # Evaluates g at solution
+
+        tol = 1e-2
+        print("Significant constraint residuals (> 1e-2):")
+        for i, val in enumerate(g_val):
+            lb = lbg[i]
+            ub = ubg[i]
+            if val < lb - tol or val > ub + tol:
+                # print(f"  g[{i}] = {val:.4e}, bounds = [{lb:.4e}, {ub:.4e}]")
+                print(f"  g[{i}] = {val:.4e}")
+
+        f_expr = opti.f  # symbolic expression for cost
+        f_func = ca.Function("f_func", [opti.x], [f_expr])
+        f_val = f_func(opti.debug.value(opti.x)).full().flatten()
+        print(f"True objective value at solution: {f_val[0]:.6e}")
+
+        g = opti.debug.g
+        J = ca.jacobian(g, opti.x)
+        J_func = ca.Function("J", [opti.x], [J])
+        J_val = J_func(opti.debug.value(opti.x))
+        print("Jacobian max:", np.max(np.abs(J_val.full())))
+
+        grad_f = ca.gradient(opti.f, opti.x)
+        grad_func = ca.Function("grad_f", [opti.x], [grad_f])
+        g_val = grad_func(opti.debug.value(opti.x))
+        for i, val in enumerate(g_val.full().flatten()):
+            if abs(val) > 1e-1:
+                print(f"  g[{i}] = {val:.4e}")
+
 
     Isp1_sol = np.zeros((N1))
     Qdyn1_sol = np.zeros((N1+1))

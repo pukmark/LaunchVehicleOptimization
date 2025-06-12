@@ -12,7 +12,7 @@ import casadi as ca
 import pickle
 
 import Atmosphere_Type as Atm_Type
-import LV_Type as LV_Type
+import LV_Type_scaled as LV_Type
 
 
 
@@ -25,15 +25,15 @@ if __name__ == '__main__':
     rocket_eci = LV_Type.LaunchVehicle_ECI()
     
     # Target orbit parameters for LEO
-    Target_Orbit = {"apogee": rocket_Booster.R0 + 400.0*1000.0, # semi-major axis
+    Target_Orbit = {"apogee": rocket_Booster.R0 + 300.0*1000.0, # semi-major axis
                     "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
-                    "i": np.deg2rad(60.0), # inclination [rad]
+                    "i": np.deg2rad(53.3), # inclination [rad]
                     }
 
     # Target orbit parameters for GTO
     # Target_Orbit = {"apogee": rocket_Booster.R0 + 35786.0*1000.0, # semi-major axis
     #                 "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
-    #                 "i": np.deg2rad(0.0), # inclination [rad]
+    #                 "i": np.deg2rad(rocket_Booster.LaunchLatitude), # inclination [rad]
     #                 }
 
     # Target orbit parameters for SSO
@@ -51,11 +51,13 @@ if __name__ == '__main__':
 
     # First Phase - Booster 
     N1 = 60
-    payload_mass = opti.variable(1)
+    payload_mass_scaled = opti.variable(1) 
     x1 = opti.variable(rocket_Booster.nx, N1+1) # [x, z, vx, vz, m]
     u1 = opti.variable(rocket_Booster.nu, N1) # [T_factor, alpha]
     dt1 = opti.variable(1)
     LaunchAz = opti.variable(1)
+
+    payload_mass = payload_mass_scaled * rocket_Booster.scaleX[4]
 
     # Set the initial state
     init_time = 5.0
@@ -66,27 +68,39 @@ if __name__ == '__main__':
     init_x = 0.0
     init_m = rocket_Booster.LV_total_mass + payload_mass - (rocket_Booster.FirstStage_SL_Thrust / (rocket_Booster.FirstStage_SL_Isp * rocket_Booster.g0)) * init_time
 
-    opti.subject_to(x1[:,0] == ca.vertcat(init_x, init_z, init_vx, init_vz, init_m))
-    opti.subject_to(payload_mass >= 0.0)
-    opti.subject_to(dt1 >= 0.1)
+    opti.subject_to(x1[:,0] == rocket_Booster.scale_x(ca.vertcat(init_x, init_z, init_vx, init_vz, init_m)))
+    opti.subject_to(payload_mass_scaled >= 0.0)
+    opti.subject_to(dt1*N1 >= 60.0)
     # set the constraints:
     for k in range(N1):
         # set the dynamics
         # opti.subject_to(x1[:,k+1] == rocket_Booster.dynamics_kp1(x1[:,k], u1[:,k], dt1))
-        opti.subject_to((x1[:,k+1]-rocket_Booster.dynamics_kp1(x1[:,k], u1[:,k], dt1))/dt1 == 0.0)
+        opti.subject_to(x1[:,k+1] == rocket_Booster.dynamics_kp1(x1[:,k], u1[:,k], dt1))
         # set the thrust constraints
         opti.subject_to(u1[0,k] <= 1.0)
-        opti.subject_to(u1[0,k]/rocket_Booster.FirstStage_MinThrust_Factor >= 1.0)
-        opti.subject_to(u1[1,k]/rocket_Booster.FirstStage_MaxAlpha <= 1.0)
-        opti.subject_to(-u1[1,k]/rocket_Booster.FirstStage_MaxAlpha <= 1.0)
+        opti.subject_to(u1[0,k] >= rocket_Booster.FirstStage_MinThrust_Factor)
+        opti.subject_to(u1[1,k] <= 1.0)
+        opti.subject_to(-u1[1,k] <= 1.0)
 
         # set the state constraints
-        opti.subject_to(0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=rocket_Booster.FirstStage_MaxDynamicPressure)
-        opti.subject_to(u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
-        opti.subject_to(-u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
+        xk = rocket_Booster.unscale_x(x1[:,k])
+        uk = rocket_Booster.unscale_u(u1[:,k])
+        q = 0.5 * (xk[2]**2 + xk[3]**2) * atmosphere.rho_fun(rocket_Booster.local_to_alt(xk))
+
+        opti.subject_to(q/rocket_Booster.FirstStage_MaxDynamicPressure <= 1.0) # dynamic pressure limit
+        opti.subject_to((uk[1] * q / 1e4)**2 <= 1.0) # alpha * dynamic pressure limit
+
+        # opti.subject_to(0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(xk))*(xk[2]**2+xk[3]**2)<=rocket_Booster.FirstStage_MaxDynamicPressure)
+        # opti.subject_to(u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
+        # opti.subject_to(-u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)<=1000.0)
     # set the final state constraints
     # opti.subject_to(x1[4,N1] >= rocket_Booster.FirstStage_EmptyMass + payload_mass + dm)
-    opti.subject_to(x1[4,N1]/(rocket_Booster.FirstStage_EmptyMass + payload_mass + dm) >= 1.0)
+    
+    x1f = rocket_Booster.unscale_x(x1[:,N1])
+    q1f = 0.5 * (x1f[2]**2 + x1f[3]**2) * atmosphere.rho_fun(rocket_Booster.local_to_alt(x1f))
+    target_mass_scaled = (rocket_Booster.FirstStage_EmptyMass + payload_mass + dm) / rocket_Booster.scaleX[4]
+    opti.subject_to(x1[4,N1] >= target_mass_scaled)
+    opti.subject_to(q1f/rocket_Booster.FirstStage_StageSeparationMaxDynamicPressure <= 1.0)
 
     # Phase 2 - Second Stage, before fairing separation (if needed)
     N2 = 10
@@ -97,23 +111,18 @@ if __name__ == '__main__':
     # Set the initial state - the final state of the boost phase transformed to ECI
     # opti.subject_to(LaunchAz >= -0.9*np.pi)
     # opti.subject_to(LaunchAz <= 0.9*np.pi)
-    opti.subject_to(dt2*N2 >= 10.0)
-    eci_pos, eci_vel = rocket_eci.local_to_eci_func(ca.vertcat(x1[0,N1], 0.0, x1[1,N1]), ca.vertcat(x1[2,N1], 0.0, x1[3,N1]), LaunchAz)
-    opti.subject_to(x2[0:3,0] == eci_pos)
-    opti.subject_to(x2[3:6,0] == eci_vel)
-    opti.subject_to(x2[6,0] == rocket_eci.SecondStage_FullMass + payload_mass)
+    opti.subject_to(dt2*N2 >= 1.0)
+    eci_pos, eci_vel = rocket_eci.local_to_eci_func(ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz)
+    x2_init = ca.vertcat(eci_pos, eci_vel, rocket_eci.SecondStage_FullMass + payload_mass)
+    opti.subject_to(x2[:,0] == rocket_eci.scale_x(x2_init))
     for k in range(N2):
         # set the dynamics
-        # opti.subject_to(x2[:,k+1] == rocket_eci.dynamics_kp1(x2[:,k], u2[:,k], dt2))
-        opti.subject_to((x2[:,k+1]-rocket_eci.dynamics_kp1(x2[:,k], u2[:,k], dt2))/dt2 == 0.0)
+        opti.subject_to(x2[:,k+1] == rocket_eci.dynamics_kp1(x2[:,k], u2[:,k], dt2))
         # set the thrust constraints
-        # opti.subject_to(ca.norm_2(u2[:,k]) <= rocket_eci.SecondStage_Thrust)
-        opti.subject_to(ca.norm_2(u2[:,k])/rocket_eci.SecondStage_Thrust <= 1.0)
-        # set the time step constraints
+        opti.subject_to(ca.norm_2(u2[:,k]) == 1.0)
 
     # set the final state constraints
-    # opti.subject_to(rocket_eci.eci_to_alt(x2[:,N2]) >= rocket_eci.FairingSeparationAltitude)
-    opti.subject_to(rocket_eci.eci_to_alt(x2[:,N2])/rocket_eci.FairingSeparationAltitude >= 1.0)
+    opti.subject_to(rocket_eci.eci_to_alt(rocket_eci.unscale_x(x2[:,N2]))/rocket_eci.FairingSeparationAltitude >= 1.0)
 
     ## phase 3 - Second Stage, after fairing separation
     N3 = 60
@@ -121,26 +130,23 @@ if __name__ == '__main__':
     u3 = opti.variable(rocket_eci.nu, N3)
     dt3 = opti.variable(1)
     # Set the initial state - the final state of the boost phase transformed to ECI
-    opti.subject_to(dt3 >= 0.5)
-    opti.subject_to(x3[0:6,0] == x2[0:6,N2])
-    opti.subject_to(x3[6,0]/(x2[6,N2] - rocket_eci.FairingMass) == 1.0)
+    x3_init = ca.vertcat(x2[0:6,N2], x2[6,N2] - rocket_eci.FairingMass/ rocket_eci.scaleX[6])
+    opti.subject_to(dt3*N3 >= 60.0)
+    opti.subject_to(x3[:,0] == x3_init)
     for k in range(N3):
         # set the dynamics
-        # opti.subject_to(x3[:,k+1] == rocket_eci.dynamics_kp1(x3[:,k], u3[:,k], dt3*(1-0.5*k/(N3-1))))
-        # opti.subject_to(x3[:,k+1] == rocket_eci.dynamics_kp1(x3[:,k], u3[:,k], dt3))
-        opti.subject_to((x3[:,k+1]-rocket_eci.dynamics_kp1(x3[:,k], u3[:,k], dt3))/dt3 == 0.0)
+        opti.subject_to(x3[:,k+1] == rocket_eci.dynamics_kp1(x3[:,k], u3[:,k], dt3))
         # set the thrust constraints
-        # opti.subject_to(ca.norm_2(u3[:,k]) == rocket_eci.SecondStage_Thrust)
-        opti.subject_to(ca.norm_2(u3[:,k])/rocket_eci.SecondStage_Thrust == 1.0)
-        # set the time step constraints
+        opti.subject_to(ca.norm_2(u3[:,k]) == 1.0)
+        # xk = rocket_eci.unscale_x(x3[:,k])
+        # opti.subject_to(rocket_eci.eci_to_alt(xk) >= 0.0)
 
     # set the final state constraints (Parking orbit)
-    h = ca.cross(x3[0:3,N3], x3[3:6,N3])
-    cos_i = h[2] / ca.norm_2(h)
-    i = ca.acos(ca.fmin(ca.fmax(cos_i, -1.0), 1.0))
-    # i = ca.acos(h[2] / ca.norm_2(h))
-    e = ca.cross(x3[3:6,N3], h) / (rocket_eci.mu) - x3[0:3,N3] / ca.norm_2(x3[0:3,N3])
-    eps = 0.5*ca.sumsqr(x3[3:6,N3]) - rocket_eci.mu / ca.norm_2(x3[0:3,N3])
+    x3f = rocket_eci.unscale_x(x3[:,N3])
+    h = ca.cross(x3f[0:3], x3f[3:6])
+    i = ca.acos(ca.fmin(ca.fmax(h[2] / ca.norm_2(h), -1.0), 1.0))
+    e = ca.cross(x3f[3:6], h) / (rocket_eci.mu) - x3f[0:3] / ca.norm_2(x3f[0:3])
+    eps = 0.5*ca.sumsqr(x3f[3:6]) - rocket_eci.mu / ca.norm_2(x3f[0:3])
     a = -rocket_eci.mu / (2.0*eps)
     apogee = a * (1.0 + ca.norm_2(e))
     perigee = a * (1.0 - ca.norm_2(e))
@@ -152,7 +158,7 @@ if __name__ == '__main__':
     # 3a. This manuever is done in the current apogee (which is the same as the target orbit perigee)
     v_apogee = ca.sqrt(rocket_eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / a))
     v_desired = ca.sqrt(rocket_eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["a"]))
-    propellent_mass_for_final_dv = x3[6,N3] * (1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / (rocket_eci.SecondStage_Vac_Isp * rocket_eci.g0)))
+    propellent_mass_for_final_dv = x3f[6] * (1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / (rocket_eci.SecondStage_Vac_Isp * rocket_eci.g0)))
     
     # v_final_apogee = ca.sqrt(rocket_eci.mu * (1.0 / Target_Orbit["a"]))
     # dv_for_inclination_fix = 2 * v_apogee * ca.sin(Target_Orbit["i"]/2.0)
@@ -160,20 +166,17 @@ if __name__ == '__main__':
 
 
     # propellent_mass_for_final_dv = 0.0
-
-    opti.subject_to(x3[6,N3]/(rocket_eci.SecondStage_EmptyMass + payload_mass + propellent_mass_for_final_dv) >= 1.0)
+    x3f_mass_scaled = (rocket_eci.SecondStage_EmptyMass + payload_mass + propellent_mass_for_final_dv) / rocket_eci.scaleX[6]
+    opti.subject_to(x3[6,N3] >= x3f_mass_scaled)
     opti.subject_to(apogee/Target_Orbit["perigee"] == 1.0)
-    opti.subject_to(perigee/(rocket_eci.R0 + 100*1000.0) >= 1.0)
+    opti.subject_to(perigee/(rocket_eci.R0 + rocket_eci.ParkingOrbit_PerigeeAlt) >= 1.0)
+    opti.subject_to(i/Target_Orbit["i"] == 1.0)
 
             
     # set the cost function
     cost = 0.0
-    # cost = 0.5*(ca.sumsqr(u1[0,:]) + ca.sumsqr(u1[1,:])/rocket_Booster.FirstStage_MaxAlpha**2)
-    cost += 0.5*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])/rocket_Booster.FirstStage_MaxAlpha**2 )
-    # cost += 0.5*(ca.sumsqr(u2) + ca.sumsqr(u3))/(rocket_eci.SecondStage_Thrust)**2
-    cost += -0.5*payload_mass - 0.001*x3[6,N3]
-    cost += ca.sumsqr((i-Target_Orbit["i"])/np.deg2rad(0.5))
-    # cost += 100*((a-Target_Orbit["perigee"])/1000)**2
+    cost += 0.5*10e-3*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1]) )
+    cost += -payload_mass_scaled*10
     opti.minimize(cost)
 
 
@@ -181,12 +184,12 @@ if __name__ == '__main__':
     opts = {
             # "print_time": 1,  # Print timing, 
             "ipopt": {
-            # "tol": 1e-8,  # Convergence tolerance
-            "max_iter": 1000,  # Max iterations
+            "tol": 1e-8,  # Convergence tolerance
+            "max_iter": 100,  # Max iterations
             # "print_level": 0,  # Verbosity level
             # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter
             # "timing_statistics": "yes", # Enable timing statistics
-            # "nlp_scaling_method": "None", 'gradient-based', # Scaling method
+            # "nlp_scaling_method": "None", # 'gradient-based', # Scaling method
             # 'nlp_scaling_max_gradient': 100,
             # "obj_scaling_factor": 1e-4, # Scaling factor for the objective function
             "mu_strategy": "adaptive",  # "monotone" or "adaptive" Strategy for updating the barrier parameter
@@ -201,7 +204,7 @@ if __name__ == '__main__':
     x1_guess = np.zeros((rocket_Booster.nx, N1+1))
     u1_guess = np.zeros((rocket_Booster.nu, N1))
     dt1_guess = 148.0 / N1
-    payload_mass_guess = 5000.0
+    payload_mass_guess = 9000.0
     LaunchAz_guess = np.pi/2.0 - Target_Orbit["i"]
 
     init_acc_guess = rocket_Booster.FirstStage_SL_Thrust / (rocket_Booster.LV_total_mass + payload_mass_guess) - rocket_Booster.g0 * (rocket_Booster.R0 / (rocket_Booster.R0 + rocket_Booster.LaunchAltitude))**2
@@ -212,176 +215,214 @@ if __name__ == '__main__':
     init_m_guess = rocket_Booster.LV_total_mass + payload_mass_guess - (rocket_Booster.FirstStage_SL_Thrust / (rocket_Booster.FirstStage_SL_Isp * rocket_Booster.g0)) * init_time
     x0_guess = np.array([init_x_guess, init_z_guess, init_vx_guess, init_vz_guess, init_m_guess])
 
-    x1_guess[:,0] = x0_guess
+    x1_guess[:,0] = rocket_Booster.scale_x(x0_guess).full().flatten()
     iter=0
     while iter < 10:
         for k in range(N1):
-            if x1_guess[1,k]<5000 or x1_guess[1,k]>10000:
+            xk = rocket_Booster.unscale_x(x1_guess[:,k])
+            uk = rocket_Booster.unscale_u(u1_guess[:,k])
+            alt = rocket_Booster.local_to_alt(xk)
+            if xk[1]<5000 or xk[1]>10000:
                 u1_guess[0,k] = 1.0
             else:
                 u1_guess[0,k] = 0.70
-            if np.atan2(x1_guess[3,k], x1_guess[2,k]) > 88.0*np.pi/180.0 and np.linalg.norm(x1_guess[2:4,k]) > 75.0:
-                u1_guess[1,k] = -np.deg2rad(1.0)
+            if np.atan2(xk[3], xk[2]) > 88.0*np.pi/180.0 and np.linalg.norm(xk[2:4]) > 75.0:
+                u1_guess[1,k] = -np.deg2rad(1.0) / rocket_Booster.FirstStage_MaxAlpha
             else:
                 u1_guess[1,k] = 0.0
             
-            alt = rocket_Booster.local_to_alt(x1_guess[:,k])
-            Q = 0.5 * (x1_guess[2,k]**2 + x1_guess[3,k]**2) * atmosphere.rho_fun(alt)
             x1_guess[:,k+1] = rocket_Booster.dynamics_kp1(x1_guess[:,k], u1_guess[:,k], dt1_guess).full().flatten()
-        if rocket_Booster.local_to_alt(x1_guess[:,N1]) < 60000:
-            dt1_guess += 0.01
+
+        xN = rocket_Booster.unscale_x(x1_guess[:,N1])
+        alt_N1 = rocket_Booster.local_to_alt(xN)
+        Q = 0.5 * (xN[2]**2 + xN[3]**2) * atmosphere.rho_fun(alt_N1)
+        if Q > rocket_Booster.FirstStage_StageSeparationMaxDynamicPressure:
+            dt1_guess += 0.5 / N1
+            iter += 1
+        elif xN[4] <= rocket_Booster.FirstStage_EmptyMass + payload_mass_guess + dm:
+            dt1_guess -= 1.0 / N1
             iter += 1
         else:
             break
-
-    Q_guess = np.zeros((N1+1))
-    alt1_guess = np.zeros((N1+1))
-    for k in range(N1+1):
-        alt1_guess[k] = ca.norm_2(ca.vertcat(x1_guess[0,k], rocket_Booster.R0 + x1_guess[1,k])) - rocket_Booster.R0
-        Q_guess[k] = 0.5 * (x1_guess[2,k]**2 + x1_guess[3,k]**2) * atmosphere.rho_fun(alt1_guess[k])
-
-    opti.set_initial(payload_mass, payload_mass_guess)
-    opti.set_initial(dt1, dt1_guess)
-    for k in range(N1+1):
-        opti.set_initial(x1[:,k], x1_guess[:,k])
-    for k in range(N1):
-        opti.set_initial(u1[:,k], u1_guess[:,k])
-    
 
     # calculate the initial guess for second stage before fairing separation, if needed
     dt2_guess = 50.0 / N2
     x2_guess = np.zeros((rocket_eci.nx, N2+1))
     u2_guess = np.zeros((rocket_eci.nu, N2))
-    pos, vel = rocket_eci.local_to_eci_func(ca.vertcat(x1_guess[0,N1], 0.0, x1_guess[1,N1]), ca.vertcat(x1_guess[2,N1], 0.0, x1_guess[3,N1]), LaunchAz_guess)
-    x2_guess[0:3,0] = pos.full().flatten()
-    x2_guess[3:6,0] = vel.full().flatten()
-    x2_guess[6,0] = rocket_eci.SecondStage_FullMass + payload_mass_guess
+    x1f = rocket_Booster.unscale_x(x1_guess[:,N1])
+    pos, vel = rocket_eci.local_to_eci_func(ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz_guess)
+    x2_init = ca.vertcat(pos, vel, rocket_eci.SecondStage_FullMass + payload_mass_guess)
+    x2_guess[:,0] = rocket_eci.scale_x(x2_init).full().flatten()
     iter=0
     while iter < 10:
         for k in range(N2):
-            u2_guess[0:3,k] = (x2_guess[3:6,k] / ca.norm_2(x2_guess[3:6,k])).full().flatten() * rocket_eci.SecondStage_Thrust
+            xk = rocket_eci.unscale_x(x2_guess[:,k])
+            alt = rocket_eci.eci_to_alt(xk)
+            u2_guess[0:3,k] = (x2_guess[3:6,k] / ca.norm_2(x2_guess[3:6,k])).full().flatten()
             x2_guess[:,k+1] = rocket_eci.dynamics_kp1(x2_guess[:,k], u2_guess[:,k], dt2_guess).full().flatten()
-            alt = ca.norm_2(x2_guess[0:3,k+1]) - rocket_eci.R0 / np.sqrt(1.0 - rocket_eci.e**2 * np.sin(np.deg2rad(rocket_eci.LaunchLatitude))**2)
+        xN = rocket_eci.unscale_x(x2_guess[:,N2])
+        alt = rocket_eci.eci_to_alt(xN)
         if abs(alt-rocket_eci.FairingSeparationAltitude) < 100.0:
             break
         else:
-            alt_N1 = ca.norm_2(ca.vertcat(x1_guess[0,N1], rocket_Booster.R0 + x1_guess[1,N1])) - rocket_Booster.R0
             dt2_guess = dt2_guess*(rocket_eci.FairingSeparationAltitude-alt_N1)/ (alt-alt_N1)
             iter += 1
-    opti.set_initial(LaunchAz, LaunchAz_guess)
-    opti.set_initial(dt2, dt2_guess)
-    for k in range(N2+1):
-        opti.set_initial(x2[:,k], x2_guess[:,k])
-    for k in range(N2):
-        opti.set_initial(u2[:,k], u2_guess[:,k])
 
 # calculate the initial guess for second stage after fairing separation
     dt3_guess = 370.0/N3
     x3_guess = np.zeros((rocket_eci.nx, N3+1))
     u3_guess = np.zeros((rocket_eci.nu, N3))
-    x3_guess[:,0] = x2_guess[:,N2]
+    x3_guess[0:6,0] = x2_guess[0:6,N2]
+    x3_guess[6,0] = x2_guess[6,N2] - rocket_eci.FairingMass / rocket_eci.scaleX[6]
     iter=0
     
-    alpha3_init = np.deg2rad(10.0)
+    alpha3_init = 0.0
     v3_max = ca.sqrt(rocket_eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["apogee"]))
     while iter < 50:
         alpha3, alpha_factor = alpha3_init, 1.0
         for k in range(N3):
-            alt = np.linalg.norm(x3_guess[0:3,k]) - rocket_eci.R0 / np.sqrt(1.0 - rocket_eci.e**2 * np.sin(np.deg2rad(rocket_eci.LaunchLatitude))**2)
-            h = np.cross(x3_guess[0:3,k], x3_guess[3:6,k])
+            xk = rocket_eci.unscale_x(x3_guess[:,k]).full().flatten()
+            h = np.cross(xk[0:3], xk[3:6])
             h = h / np.linalg.norm(h)
-            i = np.arccos(h[2] / np.linalg.norm(h))
-            u3_guess[0:3,k] = (x3_guess[3:6,k] / np.linalg.norm(x3_guess[3:6,k])) 
-            alpha_factor = k/N3
-            alpha3 = alpha3_init*alpha_factor
+            u3_guess[0:3,k] = (xk[3:6] / np.linalg.norm(xk[3:6])) 
+            # alpha_factor = k/N3
+            alpha3 = -alpha3_init*alpha_factor
             u3_guess[0:3,k] = u3_guess[0:3,k] * np.cos(alpha3) + np.cross(h, u3_guess[0:3,k]) * np.sin(alpha3) + h * np.dot(h, u3_guess[0:3,k]) * (1 - np.cos(alpha3)) 
             
-            u3_guess[0:3,k] *= rocket_eci.SecondStage_Thrust
-            # x3_guess[:,k+1] = rocket_eci.dynamics_kp1(x3_guess[:,k], u3_guess[:,k], dt3_guess*(1-0.5*k/(N3-1))).full().flatten()
             x3_guess[:,k+1] = rocket_eci.dynamics_kp1(x3_guess[:,k], u3_guess[:,k], dt3_guess).full().flatten()
-            h = np.cross(x3_guess[0:3,k+1], x3_guess[3:6,k+1])
-            e = ca.cross(x3_guess[3:6,k+1], h) / (rocket_eci.mu) - x3_guess[0:3,k+1] / ca.norm_2(x3_guess[0:3,k+1])
-            eps = 0.5*ca.sumsqr(x3_guess[3:6,k+1]) - rocket_eci.mu / ca.norm_2(x3_guess[0:3,k+1])
+        
+            xkp1 = rocket_eci.unscale_x(x3_guess[:,k+1]).full().flatten()
+            vel = np.linalg.norm(xkp1[3:6])
+            h = np.cross(xkp1[0:3], xkp1[3:6])
+            e = ca.cross(xkp1[3:6], h) / (rocket_eci.mu) - xkp1[0:3] / ca.norm_2(xkp1[0:3])
+            eps = 0.5*ca.sumsqr(xkp1[3:6]) - rocket_eci.mu / ca.norm_2(xkp1[0:3])
             a = -rocket_eci.mu / (2.0*eps)
             perigee = a * (1.0 - ca.norm_2(e))
             apogee = a * (1.0 + ca.norm_2(e))
             i = ca.acos(h[2] / ca.norm_2(h))
             
-            if x3_guess[6,k+1] < rocket_eci.SecondStage_EmptyMass + payload_mass_guess:
+            if xkp1[6] < rocket_eci.SecondStage_EmptyMass + payload_mass_guess:
                 break
         if k < N3-1:
             iter += 1
             dt3_guess = dt3_guess * (k+1) / N3
-        elif x3_guess[6,k+1] < rocket_eci.SecondStage_EmptyMass + payload_mass_guess:
+        elif xkp1[6] < rocket_eci.SecondStage_EmptyMass + payload_mass_guess:
             dt3_guess -= 0.25
             iter += 1
-        # elif perigee < rocket_eci.R0+100*10**3:
-        #     dt3_guess += 0.1
-        #     iter += 1
-        elif apogee > rocket_eci.R0+1000*10**3 or np.linalg.norm(x3_guess[3:6,N3]) > v3_max+100.0:
-            dt3_guess -= 0.025
+        elif apogee < rocket_eci.ParkingOrbit_PerigeeAlt + rocket_eci.R0 or a < 0.5*(Target_Orbit['perigee']+rocket_eci.R0+200.0*1e3):
+            dt3_guess += 0.1
             iter += 1
         elif perigee < rocket_eci.R0+10*10**3:
-            alpha3_init += np.deg2rad(1.0)
+            alpha3_init -= np.deg2rad(0.5)
             # dt3_guess += 0.
+            iter += 1
+        elif apogee > Target_Orbit['perigee'] + 150.0*1e3:
+            dt3_guess -= 0.1
             iter += 1
         else:
             break
 
+    # set the initial guess for the optimization variables
+    opti.set_initial(payload_mass_scaled, payload_mass_guess/rocket_Booster.scaleX[4])
+    opti.set_initial(dt1, dt1_guess)
+    opti.set_initial(x1, x1_guess)
+    opti.set_initial(u1, u1_guess)
+    opti.set_initial(LaunchAz, LaunchAz_guess)
+    opti.set_initial(dt2, dt2_guess)
+    opti.set_initial(x2, x2_guess)
+    opti.set_initial(u2, u2_guess)
     opti.set_initial(dt3, dt3_guess)
-    for k in range(N3+1):
-        opti.set_initial(x3[:,k], x3_guess[:,k])
-    for k in range(N3):
-        opti.set_initial(u3[:,k], u3_guess[:,k])
+    opti.set_initial(x3, x3_guess)
+    opti.set_initial(u3, u3_guess)
 
     # Solve the optimization problem
     try:
         sol = opti.solve()
 
-        u1_sol = np.array(sol.value(u1))
-        x1_sol = np.array(sol.value(x1))
-        dt1_sol = np.array(sol.value(dt1))
-        u2_sol = np.array(sol.value(u2))
-        x2_sol = np.array(sol.value(x2))
-        dt2_sol = np.array(sol.value(dt2))
-        dt3_sol = np.array(sol.value(dt3))
-        x3_sol = np.array(sol.value(x3))
-        u3_sol = np.array(sol.value(u3))
-        payload_mass_sol = np.array(sol.value(payload_mass))
+        u1_scaled_sol = np.array(sol.value(u1))
+        x1_scaled_sol = np.array(sol.value(x1))
+        dt1_scaled_sol = np.array(sol.value(dt1))
+        u2_scaled_sol = np.array(sol.value(u2))
+        x2_scaled_sol = np.array(sol.value(x2))
+        dt2_scaled_sol = np.array(sol.value(dt2))
+        dt3_scaled_sol = np.array(sol.value(dt3))
+        x3_scaled_sol = np.array(sol.value(x3))
+        u3_scaled_sol = np.array(sol.value(u3))
+        payload_mass_scaled_sol = np.array(sol.value(payload_mass_scaled))
         LaunchAz_sol = np.array(sol.value(LaunchAz))
 
-        solution = {
-            "u1": u1_sol,
-            "x1": x1_sol,
-            "dt1": dt1_sol,
-            "u2": u2_sol,
-            "x2": x2_sol,
-            "dt2": dt2_sol,
-            "dt3": dt3_sol,
-            "x3": x3_sol,
-            "u3": u3_sol,
-            "payload_mass": payload_mass_sol,
-            "LaunchAz": LaunchAz_sol,
-            'Target_Orbit': Target_Orbit,
-        }
-        with open('solution.pickle', 'wb') as f:
-            pickle.dump(solution, f)
-
-        x1_N1_data = { "x1_N1": x1_sol[:, N1], "payload_mass": payload_mass_sol}
-        with open('x1_N1_data.pickle', 'wb') as f:
-            pickle.dump(x1_N1_data, f)
     except:
-        u1_sol = opti.debug.value(u1)
-        x1_sol = opti.debug.value(x1)
-        dt1_sol = opti.debug.value(dt1)
-        u2_sol = opti.debug.value(u2)
-        x2_sol = opti.debug.value(x2)
-        dt2_sol = opti.debug.value(dt2)
-        dt3_sol = opti.debug.value(dt3)
-        x3_sol = opti.debug.value(x3)
-        u3_sol = opti.debug.value(u3)
-        payload_mass_sol = opti.debug.value(payload_mass)
+        u1_scaled_sol = opti.debug.value(u1)
+        x1_scaled_sol = opti.debug.value(x1)
+        dt1_scaled_sol = opti.debug.value(dt1)
+        u2_scaled_sol = opti.debug.value(u2)
+        x2_scaled_sol = opti.debug.value(x2)
+        dt2_scaled_sol = opti.debug.value(dt2)
+        dt3_scaled_sol = opti.debug.value(dt3)
+        x3_scaled_sol = opti.debug.value(x3)
+        u3_scaled_sol = opti.debug.value(u3)
+        payload_mass_scaled_sol = opti.debug.value(payload_mass_scaled)
         LaunchAz_sol = opti.debug.value(LaunchAz)
+        
+    payload_mass_sol = payload_mass_scaled_sol * rocket_Booster.scaleX[4]
+    dt1_sol = dt1_scaled_sol
+    dt2_sol = dt2_scaled_sol
+    dt3_sol = dt3_scaled_sol
+    u1_sol = np.zeros_like(u1_scaled_sol)
+    for i in range(u1_scaled_sol.shape[1]):
+        u1_sol[:,i] = rocket_Booster.unscale_u(u1_scaled_sol[:,i]).full().flatten()
+    x1_sol = np.zeros_like(x1_scaled_sol)
+    for i in range(x1_scaled_sol.shape[1]):
+        x1_sol[:,i] = rocket_Booster.unscale_x(x1_scaled_sol[:,i]).full().flatten()
+    u2_sol = np.zeros_like(u2_scaled_sol)
+    for i in range(u2_scaled_sol.shape[1]):
+        u2_sol[:,i] = rocket_eci.unscale_u(u2_scaled_sol[:,i]).full().flatten()
+    x2_sol = np.zeros_like(x2_scaled_sol)
+    for i in range(x2_scaled_sol.shape[1]):
+        x2_sol[:,i] = rocket_eci.unscale_x(x2_scaled_sol[:,i]).full().flatten()
+    x3_sol = np.zeros_like(x3_scaled_sol)
+    for i in range(x3_scaled_sol.shape[1]):
+        x3_sol[:,i] = rocket_eci.unscale_x(x3_scaled_sol[:,i]).full().flatten()
+    u3_sol = np.zeros_like(u3_scaled_sol)
+    for i in range(u3_scaled_sol.shape[1]):
+        u3_sol[:,i] = rocket_eci.unscale_u(u3_scaled_sol[:,i]).full().flatten()
+
+    if 0:
+        g_expr = opti.debug.g  # Symbolic expression for all constraints
+        g_func = ca.Function("g_func", [opti.x], [g_expr])
+        x_val = opti.debug.value(opti.x)
+        g_val = g_func(x_val).full().flatten()
+
+        lbg = opti.debug.lbg
+        ubg = opti.debug.ubg # Evaluates g at solution
+
+        tol = 1e-2
+        print("Significant constraint residuals (> 1e-2):")
+        for i, val in enumerate(g_val):
+            lb = lbg[i]
+            ub = ubg[i]
+            if val < lb - tol or val > ub + tol:
+                # print(f"  g[{i}] = {val:.4e}, bounds = [{lb:.4e}, {ub:.4e}]")
+                print(f"  g[{i}] = {val:.4e}")
+
+        f_expr = opti.f  # symbolic expression for cost
+        f_func = ca.Function("f_func", [opti.x], [f_expr])
+        f_val = f_func(opti.debug.value(opti.x)).full().flatten()
+        print(f"True objective value at solution: {f_val[0]:.6e}")
+
+        g = opti.debug.g
+        J = ca.jacobian(g, opti.x)
+        J_func = ca.Function("J", [opti.x], [J])
+        J_val = J_func(opti.debug.value(opti.x))
+        print("Jacobian max:", np.max(np.abs(J_val.full())))
+
+        grad_f = ca.gradient(opti.f, opti.x)
+        grad_func = ca.Function("grad_f", [opti.x], [grad_f])
+        g_val = grad_func(opti.debug.value(opti.x))
+        for i, val in enumerate(g_val.full().flatten()):
+            if abs(val) > 1e-1:
+                print(f"  g[{i}] = {val:.4e}")
+
 
     Isp1_sol = np.zeros((N1))
     Qdyn1_sol = np.zeros((N1+1))
@@ -569,6 +610,28 @@ if __name__ == '__main__':
     ax_q.set_ylabel('Qynamic Pressure [KPa]')
     ax_q.grid()
 
+
+
+    solution = {
+        "u1": u1_sol,
+        "x1": x1_sol,
+        "dt1": dt1_sol,
+        "u2": u2_sol,
+        "x2": x2_sol,
+        "dt2": dt2_sol,
+        "dt3": dt3_sol,
+        "x3": x3_sol,
+        "u3": u3_sol,
+        "payload_mass": payload_mass_sol,
+        "LaunchAz": LaunchAz_sol,
+        'Target_Orbit': Target_Orbit,
+    }
+    with open('solution.pickle', 'wb') as f:
+        pickle.dump(solution, f)
+
+    x1_N1_data = { "x1_N1": x1_sol[:, N1], "payload_mass": payload_mass_sol}
+    with open('x1_N1_data.pickle', 'wb') as f:
+        pickle.dump(x1_N1_data, f)
 
 
 

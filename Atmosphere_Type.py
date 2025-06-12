@@ -77,7 +77,7 @@ class AtmosphereType(PythonMsg):
     p_fun = ca.Function("pressure", [h], [ca.exp(log_p_interp(h))])
     a_fun = ca.Function("speed_of_sound", [h], [a_interp(h)])
 
-    
+    pass
 
 
 

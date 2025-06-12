@@ -25,11 +25,12 @@ if __name__ == '__main__':
     rocket_eci = LV_Type.LaunchVehicle_ECI()
     rocket_return = LV_Type.BoosterReturn_2D(atmosphere=atmosphere)
     rocket_boostback = LV_Type.BoostBackBurn_2D()
+    
     # # Target orbit parameters for LEO
-    # Target_Orbit = {"apogee": rocket_Booster.R0 + 300.0*1000.0, # semi-major axis
-    #                 "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
-    #                 "i": np.deg2rad(53.3), # inclination [rad]
-    #                 }
+    Target_Orbit = {"apogee": rocket_Booster.R0 + 300.0*1000.0, # semi-major axis
+                    "perigee": rocket_Booster.R0 + 200.0*1000.0, # semi-minor axis
+                    "i": np.deg2rad(53.3), # inclination [rad]
+                    }
 
     # Target orbit parameters for GTO
     # Target_Orbit = {"apogee": rocket_Booster.R0 + 35786.0*1000.0, # semi-major axis
@@ -38,20 +39,21 @@ if __name__ == '__main__':
     #                 }
 
     # # Target orbit parameters for SSO
-    Target_Orbit = {"apogee": rocket_Booster.R0 + 780 * 1000.0, # semi-major axis
-                    "perigee": rocket_Booster.R0 + 780.0*1000.0, # semi-minor axis
-                    "i": np.deg2rad(98.6), # inclination [rad]
-                    }
+    # Target_Orbit = {"apogee": rocket_Booster.R0 + 780 * 1000.0, # semi-major axis
+    #                 "perigee": rocket_Booster.R0 + 780.0*1000.0, # semi-minor axis
+    #                 "i": np.deg2rad(98.6), # inclination [rad]
+    #                 }
 
     Target_Orbit["a"] = 0.5 * (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # semi-major axis
     Target_Orbit["e"] = (Target_Orbit["apogee"] - Target_Orbit["perigee"]) / (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # eccentricity
 
-    RecoveryStrategy = 'RTLS' # 'None', 'RTLS', 'ASDS'
+    RecoveryStrategy = 'ASDS' # 'None', 'RTLS', 'ASDS'
     # define the optimization problem
-    opti = ca.Opti()
+    
 
     # First Phase - Booster 
-    N1 = 60
+    opti = ca.Opti()
+    N1 = 50
     payload_mass = opti.variable(1)
     x1 = opti.variable(rocket_Booster.nx, N1+1) # [x, z, vx, vz, m]
     u1 = opti.variable(rocket_Booster.nu, N1) # [T_factor, alpha]
@@ -69,7 +71,7 @@ if __name__ == '__main__':
 
     opti.subject_to(x1[:,0] == ca.vertcat(init_x, init_z, init_vx, init_vz, init_m))
     opti.subject_to(payload_mass >= 0.0)
-    opti.subject_to(dt1 >= 0.1)
+    opti.subject_to(dt1*N1 >= 120.0)
     # set the constraints:
     for k in range(N1):
         # set the dynamics
@@ -88,7 +90,6 @@ if __name__ == '__main__':
         # opti.subject_to(u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)/1000.0 <= 1.0)
         # opti.subject_to(-u1[1,k]*0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,k]))*(x1[2,k]**2+x1[3,k]**2)/1000.0 <= 1.0)
     # set the time step constraints
-    opti.subject_to(dt1/0.1 >= 1.0)
     # set the final state constraints
     opti.subject_to(x1[4,N1]/(rocket_Booster.FirstStage_EmptyMass + payload_mass) >= 1.0)
     opti.subject_to(0.5*atmosphere.rho_fun(rocket_Booster.local_to_alt(x1[:,N1]))*(x1[2,N1]**2+x1[3,N1]**2)<=rocket_Booster.FirstStage_StageSeparationMaxDynamicPressure)
@@ -116,7 +117,7 @@ if __name__ == '__main__':
     opti.subject_to(rocket_eci.eci_to_alt(x2[:,N2])/rocket_eci.FairingSeparationAltitude >= 1.0)
 
     ## phase 3 - Second Stage, after fairing separation
-    N3 = 60
+    N3 = 50
     x3 = opti.variable(rocket_eci.nx, N3+1) # [x, y, z, vx, vy, vz, m]
     u3 = opti.variable(rocket_eci.nu, N3)
     dt3 = opti.variable(1)
