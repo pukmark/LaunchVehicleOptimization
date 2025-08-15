@@ -2,13 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('TKAgg')
-import matplotlib.gridspec as gridspec
 import casadi as ca
-import pickle
-import json
 
-
-import Atmosphere_Type as Atm_Type
 import LV_Type_scaled as LV_Type
 
 
@@ -67,7 +62,7 @@ class LV_plot():
         plt.close(self.fig)
         self.fig = []
         self.ax_vec = []
-        plt.ion()
+        plt.ioff()
 
         return
 
@@ -135,31 +130,31 @@ class LV_plot():
             x2p[k,:] = self.rocket_eci.unscale_x(x2[k,:]).full().flatten()
             alt2[k] = self.rocket_eci.eci_to_alt(x2p[k,:])
         if self.rocket_return is not None:
-            N4 = 20
+            N4 = self.rocket_return.N
             x4p = np.zeros((3*N4+self.rocket_return.N+1,self.rocket_return.nx))
             t4_vec = np.zeros((3*N4+self.rocket_return.N+1,))
             if self.rocket_boostback is not None:
-                x4p = np.vstack(x4p,np.zeros(N4+1,self.rocket_return.nx))
-                t4_vec = np.vstack(t4_vec.reshape(-1,1), np.zeros((N4+1,1))).reshape(-1)
+                x4p = np.vstack((x4p,np.zeros((N4+1,self.rocket_return.nx))))
+                t4_vec = np.vstack((t4_vec.reshape(-1,1), np.zeros((N4+1,1)))).reshape(-1)
             else:
                 t4_vec[0] = t1_vec[-1]
                 x4p[0,:] = self.rocket_return.unscale_x(x4_0).full().flatten()
             i = 0
             for k in range(0,N4):
                 t4_vec[i+1] = t4_vec[i] + dt4_ballistic/N4
-                x4p[i+1,:] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), 0, dt4_ballistic/N4)).full().flatten()
+                x4p[i+1,:] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), 0, self.rocket_return.scale_t(dt4_ballistic/N4))).full().flatten()
                 i += 1
             for k in range(N4):
                 t4_vec[i+1] = t4_vec[i] + dt4_reentry/N4
-                x4p[i+1,:] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), u4_reentry, dt4_reentry/N4)).full().flatten()
+                x4p[i+1,:] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), u4_reentry, self.rocket_return.scale_t(dt4_reentry/N4))).full().flatten()
                 i += 1
             for k in range(N4):
                 t4_vec[i+1] = t4_vec[i] + dt4_before_landing/N4
-                x4p[i+1,:] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), 0, dt4_before_landing/N4)).full().flatten()
+                x4p[i+1,:] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), 0, self.rocket_return.scale_t(dt4_before_landing/N4))).full().flatten()
                 i += 1
             for k in range(self.rocket_return.N):
                 t4_vec[i+1] = t4_vec[i] + dt4_landing
-                x4p[i+1,:] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), u4_landing[k,0], dt4_landing)).full().flatten()
+                x4p[i+1,:] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), u4_landing[k,0], self.rocket_return.scale_t(dt4_landing))).full().flatten()
                 i += 1
             alt4, Qdyn4 = np.zeros((x4p.shape[0])), np.zeros((x4p.shape[0]))
             for k in range(x4p.shape[0]):
@@ -167,8 +162,8 @@ class LV_plot():
                 Qdyn4[k] = self.rocket_return.dynamic_pressure_fun(self.rocket_return.scale_x(x4p[k,:]))
 
         self.plot_traj[0].set_data(x1p[:,0]/1000, x1p[:,1]/1000)
-        if self.rocket_return is not None:
-            self.plot_traj[1].set_data(x4_landing[:,0] * self.rocket_return.scaleX[0]/1000, x4_landing[:,1] * self.rocket_return.scaleX[1]/1000)
+        # if self.rocket_return is not None:
+            # self.plot_traj[1].set_data(x4_landing[:,0] * self.rocket_return.scaleX[0]/1000, x4_landing[:,1] * self.rocket_return.scaleX[1]/1000)
         if self.rocket_boostback is not None:
             x_vec = np.vstack([x4_before_reentry[0], x4_after_reentryburn[0], x4_before_landing[0],x4_landing[:,0].reshape(-1,1)])
             z_vec = np.vstack([x4_before_reentry[1], x4_after_reentryburn[1], x4_before_landing[1],x4_landing[:,1].reshape(-1,1)])
@@ -185,7 +180,8 @@ class LV_plot():
                 z_earth = np.sqrt(self.rocket_return.R0**2 - x_earth**2) - self.rocket_return.R0
                 self.plot_traj[2].set_data(x_earth/1000, z_earth/1000)
                 self.plot_traj[2].set_linestyle('--')
-        self.plot_traj[3].set_data(x4p[:,0]/1000, x4p[:,1]/1000)
+        if self.rocket_return is not None:
+            self.plot_traj[3].set_data(x4p[:,0]/1000, x4p[:,1]/1000)
 
 
         self.plot_vel[0].set_data(t1_vec, np.linalg.norm(x1p[:,2:4], axis=1))
@@ -213,11 +209,13 @@ class LV_plot():
 
         self.plot_mass[0].set_data(t1_vec, x1p[:,4]/1000)
         self.plot_mass[1].set_data(t2_vec, x2p[:,6]/1000)
-        self.plot_mass[2].set_data(t4_vec, x4p[:,4]/1000)
+        if self.rocket_return is not None:
+            self.plot_mass[2].set_data(t4_vec, x4p[:,4]/1000)
 
         self.plot_alt[0].set_data(t1_vec, alt1/1000)
         self.plot_alt[1].set_data(t2_vec, alt2/1000)
-        self.plot_alt[2].set_data(t4_vec, alt4/1000)
+        if self.rocket_return is not None:
+            self.plot_alt[2].set_data(t4_vec, alt4/1000)
         
         i2, apogee2, perigee2 = np.zeros((x2.shape[0],)), np.zeros((x2.shape[0],)), np.zeros((x2.shape[0],))
         for k in range(x2.shape[0]):
@@ -243,12 +241,13 @@ class LV_plot():
         self.plot_pr[4].set_linestyle('--')
 
         self.plot_Q[0].set_data(t1_vec, Qdyn1/1000)
-        self.plot_Q[1].set_data(t4_vec, Qdyn4/1000)
+        if self.rocket_return is not None:
+            self.plot_Q[1].set_data(t4_vec, Qdyn4/1000)
 
 
         if self.rocket_return is None:
-            self.ax_vec[0].set_xlim([0, max(x1p[-1,0],np.max(x4p[:,0]))/1000+10])
-            self.ax_vec[0].set_ylim([0, max(x1p[-1,1],np.max(x4p[:,1]))/1000+10])
+            self.ax_vec[0].set_xlim([0, x1p[-1,0]/1000+10])
+            self.ax_vec[0].set_ylim([0, x1p[-1,1]/1000+10])
         else:
             self.ax_vec[0].set_xlim([0, max(x1p[-1,0]/1000, np.max(x4p[:,0])/1000)+10])
             self.ax_vec[0].set_ylim([-30, max(x1p[-1,1]/1000, np.max(x4p[:,1])/1000)+10])
@@ -266,8 +265,12 @@ class LV_plot():
         self.ax_vec[4].set_xlim([0, t2_vec[-1]+10])
         self.ax_vec[5].set_ylim([-1.1*np.rad2deg(Target_Orbit["i"]), 1.1*np.rad2deg(Target_Orbit["i"])])
         self.ax_vec[5].set_xlim([0, t2_vec[-1]+10])
-        self.ax_vec[6].set_ylim([0, 1.1/1000*max(np.max(Qdyn1), np.max(Qdyn4))])
-        self.ax_vec[6].set_xlim([0, t4_vec[-1]+10])
+        if self.rocket_return is not None:
+            self.ax_vec[6].set_ylim([0, 1.1/1000*max(np.max(Qdyn1), np.max(Qdyn4))])
+            self.ax_vec[6].set_xlim([0, t4_vec[-1]+10])
+        else:
+            self.ax_vec[6].set_ylim([0, 1.1/1000*np.max(Qdyn1)])
+            self.ax_vec[6].set_xlim([0, t1_vec[-1]+10])
         self.ax_vec[7].set_ylim([0, 1.1/1000*(max(np.max(perigee2), np.max(apogee2))-self.rocket_eci.R0)])
         self.ax_vec[7].set_xlim([0, t2_vec[-1]+10])
         self.ax_vec[7].set_yscale('symlog', linthresh=100)

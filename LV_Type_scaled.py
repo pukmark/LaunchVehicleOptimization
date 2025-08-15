@@ -36,7 +36,7 @@ class VLType(PythonMsg):
     Diameter: float = field(default = 3.66)
 
     #Mass Properties
-    EmptyFirstStageMass: float = field(default = 22.2 * 10**3)
+    EmptyFirstStageMass: float = field(default = 25.6 * 10**3)
     EmptySecondStageMass: float = field(default = 4.0 * 10**3)
     # PayloadMass: float = field(default = 22.8 * 10**3)
     FirstStagePropellentMass: float = field(default = 411.0 * 10**3)
@@ -76,7 +76,7 @@ class VLType(PythonMsg):
 
     #Propulsion Properties
     FirstStage_SL_Isp: float = field(default = 282.0) # [s]
-    FirstStage_Vac_Isp: float = field(default = 311.0) # [s]
+    FirstStage_Vac_Isp: float = field(default = 310.0) # [s]
     FirstStage_SL_Thrust: float = field(default = 845.0 * 10**3 * 9) # [N]
     FirstStage_Vac_Thrust: float = field(default = 914.0* 10**3 * 9) # [N]
     FirstStage_MinThrust_Factor: float = field(default = 0.5) # [-]
@@ -157,13 +157,13 @@ class VLType(PythonMsg):
     def scale_u(self, u):
         return ca.vertcat(*[u[i] / self.scaleU[i] for i in range(len(self.scaleU))])
     def scale_t(self, t):
-        return ca.vertcat(*[t[i] / self.scaleT[i] for i in range(len(self.scaleT))])
+        return t / self.scaleT
     def unscale_x(self, x):
         return ca.vertcat(*[x[i] * self.scaleX[i] for i in range(len(self.scaleX))])
     def unscale_u(self, u):
         return ca.vertcat(*[u[i] * self.scaleU[i] for i in range(len(self.scaleU))])    
     def unscale_t(self, t):
-        return ca.vertcat(*[t[i] * self.scaleT[i] for i in range(len(self.scaleT))])
+        return t * self.scaleT
     
     def StarShipDatabase(self):
         self.Diameter = 9.0  # Starship outer diameter in meters
@@ -260,8 +260,7 @@ class BoosterLaunchVehicle_2D(VLType):
         gama_v = ca.atan2(vz, vx)
 
         Thrust = Tfac * (self.FirstStage_Vac_Thrust - (self.FirstStage_Vac_Thrust - self.FirstStage_SL_Thrust) * pres / atmosphere.p_fun(0))
-        Isp = (self.FirstStage_SL_Isp + (self.FirstStage_Vac_Isp - self.FirstStage_SL_Isp) * pres / atmosphere.p_fun(0)) * \
-              (1.0 - (1.0 - self.FirstStage_MinThrust_IspFactor) * (1.0 - Tfac) / (1.0 - self.FirstStage_MinThrust_Factor))
+        Isp = (self.FirstStage_Vac_Isp - (self.FirstStage_Vac_Isp - self.FirstStage_SL_Isp) * pres / atmosphere.p_fun(0)) * (1.0 - (1.0 - self.FirstStage_MinThrust_IspFactor) * (1.0 - Tfac) / (1.0 - self.FirstStage_MinThrust_Factor))
 
         Fx = -Drag * ca.cos(gama_v) - Lift * ca.sin(gama_v) + Thrust * ca.cos(alpha + gama_v)
         Fz = -Drag * ca.sin(gama_v) - Lift * ca.cos(gama_v) + Thrust * ca.sin(alpha + gama_v)
@@ -270,7 +269,9 @@ class BoosterLaunchVehicle_2D(VLType):
         dz = vz
         dvx = Fx / m - g * ca.sin(g_angle)
         dvz = Fz / m - g * ca.cos(g_angle)
-        dm = -Thrust / (Isp * self.g0)
+        # dm = -Thrust / (Isp * self.g0)
+        # dm = -self.FirstStage_Vac_Thrust / (self.FirstStage_Vac_Isp * self.g0) * Tfac / (1.0 - (1.0 - self.FirstStage_MinThrust_IspFactor) * (1.0 - Tfac) / (1.0 - self.FirstStage_MinThrust_Factor))
+        dm = -self.FirstStage_Vac_Thrust / (self.FirstStage_Vac_Isp * self.g0) * Tfac 
 
         dqdt_scaled = ca.vertcat(dx / self.scaleX[0], dz / self.scaleX[1],
             dvx / self.scaleX[2], dvz / self.scaleX[3],
@@ -287,7 +288,7 @@ class BoosterLaunchVehicle_2D(VLType):
 
 @dataclass
 class LaunchVehicle_ECI(VLType):
-    def __init__(self, N = 60):
+    def __init__(self, N = [10, 60]):
         super().__init__()
 
         self.N = N
@@ -405,7 +406,7 @@ class LaunchVehicle_ECI(VLType):
     
 @dataclass
 class BoosterReturn_2D(VLType):
-    def __init__(self, atmosphere: Atm_Type.AtmosphereType, N: int = 15):
+    def __init__(self, atmosphere: Atm_Type.AtmosphereType, N: int = 10):
         super().__init__(atmosphere=atmosphere)
         self.N = N
         self.scaleX = [5e5, 1e5, 1e3, 1e3, 3e4]  # x, z, vx, vz, m
