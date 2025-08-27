@@ -55,21 +55,37 @@ class VLType(PythonMsg):
 
     Solution: dict = field(default = None)
 
+    ScenarioDispersion: LV_Type.DispesrionFactorsType = field(default = None)
+    LV_Configuration: int = field(default=1)
+
 @dataclass
 class LV_Optimization(VLType):
-    def __init__(self):
+    def __init__(self, ScenarioDispersion: LV_Type.DispesrionFactorsType, 
+                         LV_Configuration: int = 1):
         super().__init__()
+
+        self.ScenarioDispersion = ScenarioDispersion
+        self.LV_Configuration = LV_Configuration
 
         # Initialize Atmosphere:
         self.atmosphere = Atm_Type.AtmosphereType()
 
         # Initialize the rocket models
-        self.booster = LV_Type.BoosterLaunchVehicle_2D(self.atmosphere)
-        self.boostback = LV_Type.BoostBackBurn_2D()
-        self.eci = LV_Type.LaunchVehicle_ECI()
-        self.rocket_return = LV_Type.BoosterReturn_2D(self.atmosphere)
+        self.booster = LV_Type.BoosterLaunchVehicle_2D(self.atmosphere, LV_Configuration, ScenarioDispersion)
+        self.boostback = LV_Type.BoostBackBurn_2D(ScenarioDispersion, LV_Configuration)
+        self.eci = LV_Type.LaunchVehicle_ECI(ScenarioDispersion, LV_Configuration)
+        self.rocket_return = LV_Type.BoosterReturn_2D(self.atmosphere, LV_Configuration, ScenarioDispersion)
 
-    def SolveOptimiztion(self, RecoveryStrategy: list = 'EXP', payload_mass_predefined: float = -1.0, Target_Orbit = dict, Plot_interm: bool = False, init_guess = None):
+    def SolveOptimiztion(self, RecoveryStrategy: list = 'EXP',
+                         payload_mass_predefined: float = -1.0, 
+                         Target_Orbit = dict, 
+                         Plot_interm: bool = False, 
+                         init_guess = None):
+        
+        Target_Orbit["a"] = 0.5 * (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # semi-major axis
+        Target_Orbit["e"] = (Target_Orbit["apogee"] - Target_Orbit["perigee"]) / (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # eccentricity    
+
+
         if RecoveryStrategy == 'EXP':
             LV_plot = LVp.LV_plot(self.booster, self.eci, None, None)
         elif RecoveryStrategy == 'ASDS':
@@ -98,7 +114,7 @@ class LV_Optimization(VLType):
         init_acc = self.booster.FirstStage_SL_Thrust / (self.booster.LV_total_mass + payload_mass) - self.booster.g0 * (self.booster.R0 / (self.booster.R0 + self.booster.LaunchAltitude))**2
         init_vz = init_acc * init_time
         init_vx = 0.0
-        init_z = 0.5 * init_acc * init_time**2
+        init_z = 0.5 * init_acc * init_time**2 + self.booster.LaunchAltitude
         init_x = 0.0
         init_m = self.booster.LV_total_mass + payload_mass - (self.booster.FirstStage_SL_Thrust / (self.booster.FirstStage_SL_Isp * self.booster.g0)) * init_time
 
@@ -135,8 +151,8 @@ class LV_Optimization(VLType):
 
         # Set the initial state - the final state of the boost phase transformed to ECI
         opti.subject_to(dt2 >= 0.1/self.eci.scaleT)
-        opti.subject_to(LaunchAz >= -np.pi)
-        opti.subject_to(LaunchAz <= np.pi)
+        opti.subject_to(LaunchAz >= -np.pi/2)
+        opti.subject_to(LaunchAz <= np.pi/2)
         eci_pos, eci_vel = self.eci.local_to_eci_func(ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz)
         x2_init = ca.vertcat(eci_pos, eci_vel, self.eci.SecondStage_FullMass + payload_mass)
         opti.subject_to(x2[:,0] == self.eci.scale_x(x2_init))
@@ -242,13 +258,14 @@ class LV_Optimization(VLType):
             # rentry burn
             opti.subject_to(x4_after_reentryburn  == self.rocket_return.dynamics_kp1_M20(x4_before_reentry, u4_reentry, dt4_reentry))
             ### set the thrust constraints
+            # opti.subject_to(u4_reentry[0] == 1.0)
             opti.subject_to(u4_reentry[0] <= 1.0)
             opti.subject_to(u4_reentry[0] >= self.rocket_return.FirstStage_MinThrust_Factor)
 
             ### After Reentry, before landing burn (ballistic)
             opti.subject_to(x4_before_landing == self.rocket_return.dynamics_kp1_M20(x4_after_reentryburn, 0, dt4_before_landing))
 
-            N_before_landing_constraints = 15
+            N_before_landing_constraints = 20
             x4_before_landing_intren = x4_after_reentryburn
             for i in range(N_before_landing_constraints):
                 x4_before_landing_intren = self.rocket_return.dynamics_kp1(x4_before_landing_intren, 0, dt4_before_landing/N_before_landing_constraints)
@@ -272,9 +289,8 @@ class LV_Optimization(VLType):
                 # zero altitude at the end of the flight
                 opti.subject_to(self.rocket_return.local_to_alt(x4f_landing_unscaled) == 0.0) # landing altitude
             # minimal velocity at the end of the flight
-            opti.subject_to(ca.norm_2(x4_landing[2:4,self.rocket_return.N]) <= 1.0/self.rocket_return.scaleX[2]) # minimal velocity at the end of the flight
-            opti.subject_to(x4_landing[4,self.rocket_return.N] >= self.rocket_return.EmptyFirstStageMass/self.rocket_return.scaleX[4]) # minimal mass at the end of the flight
-
+            opti.subject_to(ca.norm_2(x4_landing[2:4,self.rocket_return.N]) <= 10/self.rocket_return.scaleX[2]) # minimal velocity at the end of the flight
+            opti.subject_to(x4_landing[4,self.rocket_return.N] >= (self.rocket_return.EmptyFirstStageMass)/self.rocket_return.scaleX[4]) # minimal mass at the end of the flight
 
         # set the cost function
         gain = 1e-2
@@ -296,12 +312,12 @@ class LV_Optimization(VLType):
                 "linear_solver": "ma97", "hsllib": "/usr/local/lib/libcoinhsl.so",  # MA97 solver Path to HSL library
                 "mu_strategy": "adaptive",  # "adaptive" or "adaptive" Strategy for updating the barrier parameter
                 # "tol": 1e-5,  # Convergence tolerance
-                # "max_iter": 5,  # Max iterations
+                "max_iter": 1500,  # Max iterations
                 "print_level": 0,  # Verbosity level
                 # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter
                 "timing_statistics": "no", # Enable timing statistics
                 # "nlp_scaling_method": "none", # 'none' 'gradient-based', # Scaling method
-                'nlp_scaling_max_gradient': 1,
+                'nlp_scaling_max_gradient': 10,
                 # "obj_scaling_factor": 1e-4, # Scaling factor for the objective function
                 # "mu_init": 1e-11,  # 1e-1 Initial value of the barrier parameter
                 # "mu_min": 1e-11,  # 1e-11 Smallest mu allowed — optimization stops when mu ≤ this
@@ -332,32 +348,32 @@ class LV_Optimization(VLType):
 
         if RecoveryStrategy == 'RTLS':
             v3_0_guess = 2300.0
+            # v3_0_guess = 2100.0
         elif RecoveryStrategy == 'ASDS':
             v3_0_guess = 2400.0
+            v3_0_guess = 2100.0
         else:
             v3_0_guess = 2700.0
 
         if payload_mass_predefined <= 0.0:
             alpha = ca.exp(ca.fabs(v_parking-v3_0_guess) / (self.eci.SecondStage_Vac_Isp * self.eci.g0))
-            payload_mass_guess = 0.1*(self.eci.SecondStage_FullMass - alpha*self.eci.SecondStage_EmptyMass)/(alpha-1.0)
+            payload_mass_guess = 0.75*(self.eci.SecondStage_FullMass - alpha*self.eci.SecondStage_EmptyMass)/(alpha-1.0)
         else:
-            payload_mass_guess = payload_mass_predefined*0.5
+            payload_mass_guess = payload_mass_predefined*0.25
         m3_final = (self.eci.SecondStage_EmptyMass + payload_mass_guess)*(1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / (self.eci.SecondStage_Vac_Isp * self.eci.g0)))
 
         init_acc_guess = self.booster.FirstStage_SL_Thrust / (self.booster.LV_total_mass + payload_mass_guess) - self.booster.g0 * (self.booster.R0 / (self.booster.R0 + self.booster.LaunchAltitude))**2
         init_vz_guess = init_acc_guess * init_time
         init_vx_guess = 0.0
-        init_z_guess = 0.5 * init_acc_guess * init_time**2
+        init_z_guess = 0.5 * init_acc_guess * init_time**2 + self.booster.LaunchAltitude
         init_x_guess = 0.0
         init_m_guess = self.booster.LV_total_mass + payload_mass_guess - (self.booster.FirstStage_SL_Thrust / (self.booster.FirstStage_SL_Isp * self.booster.g0)) * init_time
         x0_guess = np.array([init_x_guess, init_z_guess, init_vx_guess, init_vz_guess, init_m_guess])
 
         if RecoveryStrategy == 'RTLS':
-            dm = 30000.0
-            # dm = 200000.0
+            dm = self.booster.FirstStagePropellentMass * 0.1
         elif RecoveryStrategy == 'ASDS':
-            dm = 15000.0
-            # dm = 150000.0
+            dm = self.booster.FirstStagePropellentMass * 0.035
         else:    
             dm = 0.0
 
@@ -859,6 +875,7 @@ class LV_Optimization(VLType):
             gama1_sol[k] = np.arccos(ca.dot(vel, pos) / (ca.norm_2(vel) * ca.norm_2(pos)))
             gama1_local_sol[k] = np.atan2(x1_sol[3,k], x1_sol[2,k])
 
+        self.eci.local_to_eci_calc(ca.vertcat(x1_sol[0,k], 0.0, x1_sol[1,k]), ca.vertcat(x1_sol[2,k], 0.0, x1_sol[3,k]), LaunchAz_sol)
         Isp2_sol, acc2_sol = np.zeros((self.eci.N[0])), np.zeros((self.eci.N[0]))
         Alpha2_sol = np.zeros((self.eci.N[0]))
         a2_sol, b2_sol = np.zeros((self.eci.N[0]+1)), np.zeros((self.eci.N[0]+1))
@@ -1035,14 +1052,12 @@ class LV_Optimization(VLType):
             self.Solution['Qdyn4_sol'] = Qdyn4_sol
             self.Solution['acc4_sol'] = acc4_sol
 
-        print("Solver status:", opti.return_status())
-        print(f'Recovery Strategy: {RecoveryStrategy}, Payload Mass: {payload_mass_sol:.2f} [kg], Launch Azimuth: {np.rad2deg(LaunchAz_sol):.2f} deg')
-        print(f'dV for final orbit: {v3_desired-v3_apogee:.2f} m/s, Propellent mass for final dV: {propellent_mass_for_final_dv3:.2f} kg')
-        print(f'Final Orbit (Apogee, Perigee, Inclination): {(actual_apogee3 - self.eci.R0)/1000:.2f} Km, {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {np.rad2deg(i3_sol[-1]):.2f} deg')
-        # print(f'Final Orbit Apogee (Target):  m (Target: {(Target_Orbit["apogee"] - self.eci.R0)/1000:.2f} m)')
-        # print(f'Final Orbit Perigee (Target): {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} m (Target: {(Target_Orbit["perigee"] - self.eci.R0)/1000:.2f} m)')
-        print(f'Parking Orbit (Apogee, Perigee, Inclination): {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {(perigee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {np.rad2deg(i3_sol[-1]):.2f} deg')
-        print('='*70)
+        print(f"Orbit Name: {Target_Orbit['Name']}, Solver status:", opti.return_status())
+        print(f'Recovery Strategy: {RecoveryStrategy}, Payload Mass: {payload_mass_sol:.1f} [kg], Launch Azimuth: {np.rad2deg(LaunchAz_sol):.2f} deg')
+        # print(f'dV for final orbit: {v3_desired-v3_apogee:.2f} m/s, Propellent mass for final dV: {propellent_mass_for_final_dv3:.2f} kg')
+        # print(f'Final Orbit (Apogee, Perigee, Inclination): {(actual_apogee3 - self.eci.R0)/1000:.2f} Km, {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {np.rad2deg(i3_sol[-1]):.2f} deg')
+        # print(f'Parking Orbit (Apogee, Perigee, Inclination): {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {(perigee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {np.rad2deg(i3_sol[-1]):.2f} deg')
+        print('='*80)
 
         self.Solution['v3_desired'] = v3_desired
 

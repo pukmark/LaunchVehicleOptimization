@@ -27,6 +27,23 @@ class PythonMsg:
         else:
             object.__setattr__(self,key,value)
 
+
+@dataclass
+class DispesrionFactorsType(PythonMsg):
+    '''
+    base class for creating types and messages in python
+    '''
+    FirstStageIsp: int = field(default = 1.0)
+    SecondStageIsp: int = field(default = 1.0)
+    FirstStageThrust: int = field(default = 1.0)
+    SecondStageThrust: int = field(default = 1.0)
+    FirstStageCx0: int = field(default = 1.0)
+    BoosterStageCx0: int = field(default = 1.0)
+    FirstStageDeltaInertMass: int = field(default = 0.0)
+    SecondStageDeltaInertMass: int = field(default = 0.0)
+    AtmosphereDensity: int = field(default = 1.0)
+    LaunchAltDelta: int = field(default = 0.0)
+
 @dataclass
 class VLType(PythonMsg):
     '''
@@ -39,8 +56,8 @@ class VLType(PythonMsg):
     EmptyFirstStageMass: float = field(default = 25.6 * 10**3)
     EmptySecondStageMass: float = field(default = 4.0 * 10**3)
     # PayloadMass: float = field(default = 22.8 * 10**3)
-    FirstStagePropellentMass: float = field(default = 411.0 * 10**3)
-    SecondStagePropellentMass: float = field(default = 107.5 * 10**3)
+    FirstStagePropellentMass: float = field(default = 395.7 * 10**3)
+    SecondStagePropellentMass: float = field(default = 92.670 * 10**3)
     LV_total_mass: float = field(default = 0.0)
     FirstStage_EmptyMass: float = field(default = 0.0)
     SecondStage_EmptyMass: float = field(default = 0.0)
@@ -48,19 +65,16 @@ class VLType(PythonMsg):
     FairingMass: float = field(default = 1.9 * 10**3) # [kg]
     TotalPropellentMass: float = field(default = 0.0) # [kg]
     
-
     #Launch Site - Kennedy Space Center
     LaunchLatitude: float = field(default = 28.6) # [deg]
     LaunchLongitude: float = field(default = -80.6) # [deg]
-    # LaunchLatitude: float = field(default = 0.0) # [deg]
-    # LaunchLongitude: float = field(default = 0.0) #e[dege]    
     LaunchAltitude: float = field(default = 0.0) # [m]
     atmosphere: Atm_Type.AtmosphereType = field(default=None)
 
     #Aerodynamic Properties
     Sref: float = field(default = 0.0)
     FirstStage_CLa: float = field(default = 0.5) # [1/rad]
-    FirstStage_Cd0: float = field(default = 0.6)
+    FirstStage_Cd0: float = field(default = 1.0)
     FirstStage_Cda2: float = field(default = 3.0)
     FirstStage_MaxAlpha: float = field(default = 0.1745) # [rad]
     FairingSeparationAltitude: float = field(default = 100.0 * 10**3) # [m]
@@ -72,7 +86,7 @@ class VLType(PythonMsg):
     Booster_CLa: float = field(default = 0.6) # [1/rad]
     Booster_MaxDynamicPressure: float = field(default = 100.0 * 10**3) # [Pa]
     Booster_MaxHeatFlux: float = field(default = 100.0 * 10**3) # [Pa]
-    Booster_k_empirical: float = field(default = 1.83e-4) # [-]
+    Booster_k_empirical: float = field(default = 2.0e-4) # [-]
 
     #Propulsion Properties
     FirstStage_SL_Isp: float = field(default = 282.0) # [s]
@@ -122,13 +136,11 @@ class VLType(PythonMsg):
         # Mass Properties - without payload
         self.LV_total_mass = self.EmptyFirstStageMass + self.EmptySecondStageMass + self.FirstStagePropellentMass + self.SecondStagePropellentMass + self.FairingMass
         self.FirstStage_EmptyMass = self.LV_total_mass - self.FirstStagePropellentMass
-        self.SecondStage_EmptyMass = self.EmptySecondStageMass
         self.SecondStage_FullMass = self.EmptySecondStageMass + self.SecondStagePropellentMass + self.FairingMass
+        self.SecondStage_EmptyMass = self.EmptySecondStageMass
         self.TotalPropellentMass = self.FirstStagePropellentMass + self.SecondStagePropellentMass
         self.Sref = np.pi * (self.Diameter/2)**2
         self.g0 = self.mu / self.R0**2
-
-        # self.StarShipDatabase()
 
     def RK4(self, f, x, u, h, M = 1):
         hM = h/M
@@ -169,15 +181,15 @@ class VLType(PythonMsg):
         self.Diameter = 9.0  # Starship outer diameter in meters
 
         # Mass Properties
-        self.EmptyFirstStageMass = 180.0 * 10**3      # Super Heavy dry mass [kg]
-        self.EmptySecondStageMass = 120.0 * 10**3      # Starship (upper stage) dry mass [kg]
+        self.EmptyFirstStageMass = 275.0 * 10**3      # Super Heavy dry mass [kg]
+        self.EmptySecondStageMass = 85.0 * 10**3      # Starship (upper stage) dry mass [kg]
         self.FirstStagePropellentMass = 3400.0 * 10**3 # Super Heavy propellant [kg]
         self.SecondStagePropellentMass = 1500.0 * 10**3# Starship propellant [kg]
         self.FairingMass = 0.0
 
         # Aerodynamic Properties
         self.FirstStage_CLa = 0.4  # Less lift from cylindrical shape
-        self.FirstStage_Cd0 = 0.7  # More drag due to wider diameter
+        self.FirstStage_Cd0 = 0.8  # More drag due to wider diameter
         self.FirstStage_Cda2 = 3.5
         self.FirstStage_MaxAlpha = 0.1745  # [rad]
         self.FirstStage_MaxDynamicPressure = 25.0 * 10**3  # [Pa]
@@ -188,7 +200,7 @@ class VLType(PythonMsg):
         self.Booster_CLa = 0.5
         self.Booster_MaxDynamicPressure = 120.0 * 10**3  # [Pa]
         self.Booster_MaxHeatFlux = 300.0 * 10**3  # [W/m^2]
-        self.Booster_k_empirical = 2.0e-4
+        self.Booster_k_empirical = 2.0e-3
 
         # Propulsion Properties
         self.FirstStage_SL_Isp = 327.0  # Raptor 2 sea-level [s]
@@ -205,21 +217,37 @@ class VLType(PythonMsg):
         self.SecondStage_MinThrust_Factor = 0.5
         self.SecondStage_MinThrust_IspFactor = 0.85
 
-        self.LV_total_mass = self.EmptyFirstStageMass + self.EmptySecondStageMass + self.FirstStagePropellentMass + self.SecondStagePropellentMass + self.FairingMass
-        self.FirstStage_EmptyMass = self.LV_total_mass - self.FirstStagePropellentMass
-        self.SecondStage_EmptyMass = self.EmptySecondStageMass
-        self.SecondStage_FullMass = self.EmptySecondStageMass + self.SecondStagePropellentMass + self.FairingMass
-        self.Sref = np.pi * (self.Diameter/2)**2
-        self.g0 = self.mu / self.R0**2
-        self.TotalPropellentMass = self.FirstStagePropellentMass + self.SecondStagePropellentMass
+        self.__post_init__()
 
+    def ApplyScenarioDispersionToLV(self, DispesrionFactors: DispesrionFactorsType):
 
+        self.FirstStage_SL_Isp *= DispesrionFactors.FirstStageIsp
+        self.FirstStage_Vac_Isp *= DispesrionFactors.FirstStageIsp
+        self.SecondStage_Vac_Isp *= DispesrionFactors.SecondStageIsp
+        self.FirstStage_SL_Thrust *= DispesrionFactors.FirstStageThrust
+        self.FirstStage_Vac_Thrust *= DispesrionFactors.FirstStageThrust
+        self.SecondStage_Thrust *= DispesrionFactors.SecondStageThrust        
+        self.FirstStage_Cd0 *= DispesrionFactors.FirstStageCx0
+        self.Booster_Cd0 *= DispesrionFactors.BoosterStageCx0
+        self.FirstStage_EmptyMass += DispesrionFactors.FirstStageDeltaInertMass
+        self.SecondStage_EmptyMass += DispesrionFactors.SecondStageDeltaInertMass
+        self.LaunchAltitude += DispesrionFactors.LaunchAltDelta
+
+        self.__post_init__()
+        
 @dataclass
 class BoosterLaunchVehicle_2D(VLType):
-    def __init__(self, atmosphere: Atm_Type.AtmosphereType, N: int = 60):
+    def __init__(self, atmosphere: Atm_Type.AtmosphereType,
+                       LV_Configuration: int, 
+                       ScenarioDispersion: DispesrionFactorsType, 
+                       N: int = 60):
         super().__init__()
         self.N = N
         self.atmosphere = atmosphere
+        if LV_Configuration == 2: # Starship database
+            self.StarShipDatabase()
+
+        self.ApplyScenarioDispersionToLV(ScenarioDispersion)
         
         self.scaleX = [1e5, 1e5, 1e3, 1e3, 1e5]
         self.scaleU = [1.0, self.FirstStage_MaxAlpha] 
@@ -249,18 +277,18 @@ class BoosterLaunchVehicle_2D(VLType):
         alpha = salpha * self.scaleU[1]
 
         Alt = self.local_to_alt(ca.vertcat(x, z, vx, vz, m))
-        rho = atmosphere.rho_fun(Alt)
+        rho = atmosphere.rho_fun(Alt) * ScenarioDispersion.AtmosphereDensity
         pres = atmosphere.p_fun(Alt)
         g = self.g0 * self.R0 ** 2 / (x**2 + (self.R0 + z) ** 2)
-        g_angle = x / (self.R0 + z)
+        g_angle = ca.asin(x / (self.R0 + z))
         v2 = vx**2 + vz**2
 
-        Drag = 0.5 * rho * (self.FirstStage_Cd0 + self.FirstStage_Cda2 * alpha ** 2) * self.Sref * v2
-        Lift = 0.5 * rho * (self.FirstStage_CLa * alpha) * self.Sref * v2
+        Drag = 0.5 * rho * v2 * self.Sref * (self.FirstStage_Cd0*ScenarioDispersion.FirstStageCx0 + self.FirstStage_Cda2 * alpha ** 2)
+        Lift = 0.5 * rho * v2 * self.Sref * (self.FirstStage_CLa * alpha)
         gama_v = ca.atan2(vz, vx)
 
-        Thrust = Tfac * (self.FirstStage_Vac_Thrust - (self.FirstStage_Vac_Thrust - self.FirstStage_SL_Thrust) * pres / atmosphere.p_fun(0))
-        Isp = (self.FirstStage_Vac_Isp - (self.FirstStage_Vac_Isp - self.FirstStage_SL_Isp) * pres / atmosphere.p_fun(0)) * (1.0 - (1.0 - self.FirstStage_MinThrust_IspFactor) * (1.0 - Tfac) / (1.0 - self.FirstStage_MinThrust_Factor))
+        Thrust = ScenarioDispersion.FirstStageThrust * Tfac * (self.FirstStage_Vac_Thrust - (self.FirstStage_Vac_Thrust - self.FirstStage_SL_Thrust) * pres / atmosphere.p_fun(0))
+        Isp = ScenarioDispersion.FirstStageIsp * (self.FirstStage_Vac_Isp - (self.FirstStage_Vac_Isp - self.FirstStage_SL_Isp) * pres / atmosphere.p_fun(0)) * (1.0 - (1.0 - self.FirstStage_MinThrust_IspFactor) * (1.0 - Tfac) / (1.0 - self.FirstStage_MinThrust_Factor))
 
         Fx = -Drag * ca.cos(gama_v) - Lift * ca.sin(gama_v) + Thrust * ca.cos(alpha + gama_v)
         Fz = -Drag * ca.sin(gama_v) - Lift * ca.cos(gama_v) + Thrust * ca.sin(alpha + gama_v)
@@ -288,12 +316,16 @@ class BoosterLaunchVehicle_2D(VLType):
 
 @dataclass
 class LaunchVehicle_ECI(VLType):
-    def __init__(self, N = [10, 60]):
+    def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int, N = [10, 60]):
         super().__init__()
+
+        if LV_Configuration == 2: # Starship database
+            self.StarShipDatabase()
+        self.ApplyScenarioDispersionToLV(ScenarioDispersion)
 
         self.N = N
         self.scaleX = [1e7, 1e7, 1e7, 1e4, 1e4, 1e4, 1e5]
-        self.scaleU = [self.SecondStage_Thrust, self.SecondStage_Thrust, self.SecondStage_Thrust] 
+        self.scaleU = [self.SecondStage_Thrust, self.SecondStage_Thrust, self.SecondStage_Thrust]
         self.scaleT = 100.0
 
         sx = ca.MX.sym('sx')
@@ -361,11 +393,11 @@ class LaunchVehicle_ECI(VLType):
         lon = np.deg2rad(self.LaunchLongitude)
 
         # local origin altitude
-        R =  self.R0 / np.sqrt(1 - self.e**2 * np.sin(lat)**2)
+        R =  self.R0 / np.sqrt(1 - self.e**2 * ca.sin(lat)**2)
 
-        x = (R + self.LaunchAltitude) * np.cos(lat) * np.cos(lon)
-        y = (R + self.LaunchAltitude) * np.cos(lat) * np.sin(lon)
-        z = ((1 - self.e**2) * R + self.LaunchAltitude) * np.sin(lat)
+        x = (R + self.LaunchAltitude) * ca.cos(lat) * ca.cos(lon)
+        y = (R + self.LaunchAltitude) * ca.cos(lat) * ca.sin(lon)
+        z = ((1 - self.e**2) * R + self.LaunchAltitude) * ca.sin(lat)
 
         eci_origin =  ca.vertcat(x, y, z)
         # local origin velocity
@@ -376,16 +408,16 @@ class LaunchVehicle_ECI(VLType):
 
         # Build local to ECI rotation matrix
         # Local Up (Z)
-        z = ca.vertcat(np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat))
+        z = ca.vertcat(ca.cos(lat) * ca.cos(lon), ca.cos(lat) * ca.sin(lon), ca.sin(lat))
 
         # Local North
-        n = ca.vertcat(-np.sin(lat) * np.cos(lon), -np.sin(lat) * np.sin(lon), np.cos(lat))
+        n = ca.vertcat(-ca.sin(lat) * ca.cos(lon), -ca.sin(lat) * ca.sin(lon), ca.cos(lat))
 
         # Local East
-        e = ca.vertcat(-np.sin(lon), np.cos(lon), 0.0)
+        e = ca.vertcat(-ca.sin(lon), ca.cos(lon), 0.0)
 
         # X-axis: along azimuth (from North and East)
-        x = np.cos(az) * n + np.sin(az) * e
+        x = ca.cos(az) * n + ca.sin(az) * e
 
         # Y-axis: complete right-hand rule
         y = ca.vertcat(z[1]*x[2] - z[2]*x[1], z[2]*x[0] - z[0]*x[2], z[0]*x[1] - z[1]*x[0])
@@ -403,13 +435,71 @@ class LaunchVehicle_ECI(VLType):
 
         self.local_to_eci_func = ca.Function('local_to_eci', [local_pos_m, local_vel_mps, az], [pos_eci, vel_eci])
 
-    
+    def local_to_eci_calc(self, p, v, az):
+
+        local_pos_m = p
+        local_vel_mps = v
+        az = az
+
+        # local origin in ECI:
+        lat = np.deg2rad(self.LaunchLatitude)
+        lon = np.deg2rad(self.LaunchLongitude)
+
+        # local origin altitude
+        R =  self.R0 / np.sqrt(1 - self.e**2 * ca.sin(lat)**2)
+
+        x = (R + self.LaunchAltitude) * ca.cos(lat) * ca.cos(lon)
+        y = (R + self.LaunchAltitude) * ca.cos(lat) * ca.sin(lon)
+        z = ((1 - self.e**2) * R + self.LaunchAltitude) * ca.sin(lat)
+
+        eci_origin =  ca.vertcat(x, y, z)
+        # local origin velocity
+        v_x = -self.omega_earth * y
+        v_y = self.omega_earth * x
+        v_z = 0.0
+        origin_vel_eci = ca.vertcat(v_x, v_y, v_z)
+
+        # Build local to ECI rotation matrix
+        # Local Up (Z)
+        z = ca.vertcat(ca.cos(lat) * ca.cos(lon), ca.cos(lat) * ca.sin(lon), ca.sin(lat))
+
+        # Local North
+        n = ca.vertcat(-ca.sin(lat) * ca.cos(lon), -ca.sin(lat) * ca.sin(lon), ca.cos(lat))
+
+        # Local East
+        e = ca.vertcat(-ca.sin(lon), ca.cos(lon), 0.0)
+
+        # X-axis: along azimuth (from North and East)
+        x = ca.cos(az) * n + ca.sin(az) * e
+
+        # Y-axis: complete right-hand rule
+        y = ca.vertcat(z[1]*x[2] - z[2]*x[1], z[2]*x[0] - z[0]*x[2], z[0]*x[1] - z[1]*x[0])
+
+        # Build rotation matrix
+        R_local_to_eci = ca.horzcat(x, y, z)
+
+        # Transform local vectors
+        local_pos_eci = R_local_to_eci @ local_pos_m
+        local_vel_eci = R_local_to_eci @ local_vel_mps
+
+        # Final ECI state
+        pos_eci = eci_origin + local_pos_eci
+        vel_eci = origin_vel_eci + local_vel_eci
+
+        return
+
+
 @dataclass
 class BoosterReturn_2D(VLType):
-    def __init__(self, atmosphere: Atm_Type.AtmosphereType, N: int = 10):
+    def __init__(self, atmosphere: Atm_Type.AtmosphereType, LV_Configuration: int, ScenarioDispersion: DispesrionFactorsType, N: int = 10):
         super().__init__(atmosphere=atmosphere)
+
+        if LV_Configuration == 2: # Starship database
+            self.StarShipDatabase()
+        self.ApplyScenarioDispersionToLV(ScenarioDispersion)
+
         self.N = N
-        self.scaleX = [5e5, 1e5, 1e3, 1e3, 3e4]  # x, z, vx, vz, m
+        self.scaleX = [5e5, 1e5, 1e3, 1e3, 1e4]  # x, z, vx, vz, m
         self.scaleU = [self.FirstStage_SL_Thrust/3.0]  # Tfac - 3 engines out of 9
         self.scaleT = 100.0                     # dt
 
@@ -472,10 +562,13 @@ class BoosterReturn_2D(VLType):
 
 @dataclass
 class BoostBackBurn_2D(VLType):
-    def __init__(self, N:int = 1):
+    def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int):
         super().__init__()
 
-        self.N = N
+        if LV_Configuration == 2: # Starship database
+            self.StarShipDatabase()
+        self.ApplyScenarioDispersionToLV(ScenarioDispersion)
+
         self.scaleX = [1e5, 1e5, 1e3, 1e3, 3e4]  # x, z, vx, vz, m
         self.scaleU = [self.FirstStage_Vac_Thrust/3.0, self.FirstStage_Vac_Thrust/3.0]                 # Tx, Tz
         self.scaleT = 30.0                      # dt
@@ -499,12 +592,12 @@ class BoostBackBurn_2D(VLType):
         vx = svx * self.scaleX[2]
         vz = svz * self.scaleX[3]
         m = sm * self.scaleX[4]
-        Tx = sTx * self.scaleU[0]
-        Tz = sTz * self.scaleU[1]
+        Tx = sTx * self.scaleU[0] * ScenarioDispersion.FirstStageThrust
+        Tz = sTz * self.scaleU[1] * ScenarioDispersion.FirstStageThrust
 
         g = self.g0 * self.R0**2 / (x**2 + (self.R0 + z)**2)
         g_angle = ca.asin(x / (self.R0 + z))
-        Isp = self.FirstStage_Vac_Isp
+        Isp = self.FirstStage_Vac_Isp * ScenarioDispersion.FirstStageIsp
 
         dx = vx
         dz = vz

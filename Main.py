@@ -10,46 +10,57 @@ matplotlib.use('TKAgg')
 import matplotlib.gridspec as gridspec
 
 import LV_Optimization_Type as LVopt_Type
+from LV_Type_scaled import DispesrionFactorsType
 
 R0: float = 6378137.0 # [m]
-color_vec = ['r','b','g']
+color_vec = ['r','b','g','b','k','y','c','m']
 
 if __name__ == '__main__':
     RecoveryStrategyVec = ['EXP', 'ASDS', 'RTLS'] # 'EXP', 'ASDS', 'RTLS'
-    # RecoveryStrategyVec = ['ASDS'] # 'EXP', 'ASDS', 'RTLS'
+    # RecoveryStrategyVec = ['RTLS'] # 'EXP', 'ASDS', 'RTLS'
     payload_mass_predefined = -1 # payload mass defined in kg, maximmize the payload mass if set to non-positive value
-    Plot_interm = 1
+    Plot_interm = 0
+    LV_Configuration = 1 # 1 - Falcon 9, 2 - Starship
 
-    # Target orbit parameters for LEO (ISS)
-    # Target_Orbit = {"apogee": R0 + 420.0*1000.0, # semi-major axis
-    #                 "perigee": R0 + 400.0*1000.0, # semi-minor axis
-    #                 "i": np.deg2rad(53.3),} # inclination [rad]
+    Target_Orbits = []
+    ### Target orbit parameters for LEO 
+    Target_Orbits.append({"Name": 'LEO',            # Name
+                        "apogee": R0 + 200.0e3,     # semi-major axis
+                        "perigee": R0 + 200.0e3,    # semi-minor axis
+                        "i": np.deg2rad(28.6),})    # inclination [rad]
 
-    # Target orbit parameters for MEO
-    # Target_Orbit = {"apogee": R0 + 20196.0*1e3, # semi-major axis
-    #                 "perigee": R0 + 1193.0*1e3, # semi-minor axis
-    #                 "i": np.deg2rad(55.0),} # inclination [rad]
+    ### Target orbit parameters for LEO (ISS)
+    # Target_Orbits.append({"Name": 'ISS',                # Name
+    #                     "apogee": R0 + 420.0e3,       # semi-major axis
+    #                     "perigee": R0 + 415.0e3,      # semi-minor axis
+    #                     "i": np.deg2rad(51.6),})       # inclination [rad]
+    
+    ### Target orbit parameters for SSO
+    Target_Orbits.append({"Name": 'SSO',                # Name
+                        "apogee": R0 + 780.0e3 ,      # semi-major axis
+                        "perigee": R0 + 780.0e3,      # semi-minor axis
+                        "i": np.deg2rad(98.6),})       # inclination [rad]
+    
+    ### Target orbit parameters for MEO
+    Target_Orbits.append({"Name": 'MEO',                # Name
+                        "apogee": R0 + 20196.0*1e3,   # semi-major axis
+                        "perigee": R0 + 1193.0*1e3,   # semi-minor axis
+                        "i": np.deg2rad(55.0),})       # inclination [rad]
+    
+    ### Target orbit parameters for GTO
+    Target_Orbits.append({"Name": 'GTO',                # Name
+                        "apogee": R0 + 35786.0e3,       # semi-major axis
+                        "perigee": R0 + 200.0e3,        # semi-minor axis
+                        "i": np.deg2rad(28.6),})         # inclination [rad]
 
-    # Target orbit parameters for GTO
-    # Target_Orbit = {"apogee": R0 + 35786.0*1000.0, # semi-major axis
-    #                 "perigee": R0 + 200.0*1000.0, # semi-minor axis
-    #                 "i": np.deg2rad(28.6),} # inclination [rad]
-
-    # Target orbit parameters for TLI
-    # Target_Orbit = {"apogee": 384400*1000.0, # apogee [m]
-    #                 "perigee": R0 + 200.0*1000.0, # perigee [m]
-    #                 "i": np.deg2rad(28.6),} # inclination [rad]
-
-    # Target orbit parameters for SSO
-    Target_Orbit = {"apogee": R0 + 780 * 1000.0, # semi-major axis
-                    "perigee": R0 + 780.0*1000.0, # semi-minor axis
-                    "i": np.deg2rad(98.6),} # inclination [rad]
-
-    Target_Orbit["a"] = 0.5 * (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # semi-major axis
-    Target_Orbit["e"] = (Target_Orbit["apogee"] - Target_Orbit["perigee"]) / (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # eccentricity
-
-    LVopt = LVopt_Type.LV_Optimization()
-
+    ### Target orbit parameters for TLI
+    Target_Orbits.append({"Name": 'TLI',                # Name
+                        "apogee": 384400e3,           # apogee [m]
+                        "perigee": R0 + 200.0e3,      # perigee [m]
+                        "i": np.deg2rad(28.6),})       # inclination [rad]
+    
+    # Target_Orbits = [Target_Orbits[1]]
+    
     plt.ioff()
     fig = plt.figure(figsize=(12, 12))
     gs = gridspec.GridSpec(3, 4, figure=fig)
@@ -65,288 +76,333 @@ if __name__ == '__main__':
     ax_alpha = fig.add_subplot(gs[2,2])
     ax_Isp = fig.add_subplot(gs[2,3])
     fig_3d = plt.figure(figsize=(12, 12))
-    ax_3d = plt.subplot(1,1,1, projection='3d')
-    Solution = None
-    for i, RecoveryStrategy in enumerate(RecoveryStrategyVec):
-        Solution = LVopt.SolveOptimiztion(RecoveryStrategy=RecoveryStrategy,
-                                    payload_mass_predefined=payload_mass_predefined,
-                                    Target_Orbit=Target_Orbit,
-                                    Plot_interm=Plot_interm,
-                                    init_guess=Solution)
-        
-        col = color_vec[i]
-        # plot the results
-        # fig.suptitle(f'dt1={Solution['dt1']:.2f} s, dt2={Solution['dt2']:.2f} s, dt3={Solution['dt2']:.2f} s, LaunchAz={np.rad2deg(Solution['LaunchAz']):.2f} deg, PayloadMass={Solution['payload_mass']:.2f} kg', fontsize=16)
-        
-        
-        ax_traj.plot(Solution['x1'][0,:]/1000, Solution['x1'][1,:]/1000, color=col, label='1st Stage')
-        if RecoveryStrategy != 'EXP':
-            if RecoveryStrategy == 'ASDS':
-                x_earth = np.linspace(0, np.max(Solution['x4'][:,0])*1.1,1000)
-                z_earth = np.sqrt(R0**2 - x_earth**2) - R0
-                ax_traj.plot(x_earth/1000, z_earth/1000, 'k--')
+    ax_3d = plt.subplot2grid((3, 3), (0, 0), colspan=2, rowspan=3, projection='3d')
+    ax_3d_xy = plt.subplot(3,3,3)
+    ax_3d_yz = plt.subplot(3,3,6)
+    ax_3d_xz = plt.subplot(3,3,9)
+    Solution, icol = None, 0
+    for iOrbit, Target_Orbit in enumerate(Target_Orbits):
+        for iRecover, RecoveryStrategy in enumerate(RecoveryStrategyVec):
+            Solution = None
+            DispesrionFactors = DispesrionFactorsType()
+            # DispesrionFactors.FirstStageIsp = 0.98
+            # DispesrionFactors.SecondStageIsp = 0.98
+            # DispesrionFactors.LaunchAltDelta = 0.0
+            LVopt = LVopt_Type.LV_Optimization(DispesrionFactors, LV_Configuration)
 
-            ax_traj.plot(Solution['x4'][:,0]/1000, Solution['x4'][:,1]/1000, color=col, label='Booster Return')
-        ax_traj.set_title('Trajectory')
-        ax_traj.set_ylabel('Altitude [Km]')
-        ax_traj.set_xlabel('Distance [Km]')
-        ax_traj.grid()
-        ax_traj.set_aspect('equal', adjustable='box')
+            try:
+                Solution = LVopt.SolveOptimiztion(RecoveryStrategy=RecoveryStrategy,
+                                                    payload_mass_predefined=payload_mass_predefined,
+                                                    Target_Orbit=Target_Orbit,
+                                                    Plot_interm=Plot_interm,
+                                                    init_guess=Solution)
+            except:
+                print(RecoveryStrategy+' Failed!!!')
+                continue
+            col = color_vec[icol]
+            ax_traj.plot(Solution['x1'][0,:]/1000, Solution['x1'][1,:]/1000, color=col, label='1st Stage')
+            if RecoveryStrategy != 'EXP':
+                if RecoveryStrategy == 'ASDS':
+                    x_earth = np.linspace(0, np.max(Solution['x4'][:,0])*1.1,1000)
+                    z_earth = np.sqrt(R0**2 - x_earth**2) - R0
+                    ax_traj.plot(x_earth/1000, z_earth/1000, 'k--')
 
-        ax_alt.plot(Solution['t1_vec'], Solution['alt1_sol']/1000, color=col, label='1st Stage')
-        ax_alt.plot(Solution['t2_vec'], Solution['alt2_sol']/1000, color=col, label='2nd Stage before fairing separation')
-        ax_alt.plot(Solution['t3_vec'], Solution['alt3_sol']/1000, color=col, label='2nd Stage after fairing separation')
-        if RecoveryStrategy != 'EXP':
-            ax_alt.plot(Solution['t4_vec'], Solution['alt4_sol']/1000, color=col, label='Booster Return')
+                ax_traj.plot(Solution['x4'][:,0]/1000, Solution['x4'][:,1]/1000, color=col, label='Booster Return')
+            ax_traj.set_title('Trajectory')
+            ax_traj.set_ylabel('Altitude [Km]')
+            ax_traj.set_xlabel('Distance [Km]')
+            ax_traj.grid()
+            ax_traj.set_aspect('equal', adjustable='box')
 
-        ax_alt.set_title('Altitude')
-        ax_alt.set_ylabel('Altitude [Km]')
-        ax_alt.set_xlabel('Time [s]')
-        ax_alt.grid()
+            ax_alt.plot(Solution['t1_vec'], Solution['alt1_sol']/1000, color=col, label='1st Stage')
+            ax_alt.plot(Solution['t2_vec'], Solution['alt2_sol']/1000, color=col, label='2nd Stage before fairing separation')
+            ax_alt.plot(Solution['t3_vec'], Solution['alt3_sol']/1000, color=col, label='2nd Stage after fairing separation')
+            if RecoveryStrategy != 'EXP':
+                ax_alt.plot(Solution['t4_vec'], Solution['alt4_sol']/1000, color=col, label='Booster Return')
 
-        ax_incl.plot(Solution['t3_vec'], np.rad2deg(Solution['i3_sol']), color=col, label='2nd Stage after fairing separation')
-        ax_incl.plot([0, Solution['t3_vec'][-1]], [np.rad2deg(Target_Orbit['i']+0.001), np.rad2deg(Target_Orbit['i']+0.001)], 'k--')
-        ax_incl.plot([0, Solution['t3_vec'][-1]], [np.rad2deg(Target_Orbit['i']-0.001), np.rad2deg(Target_Orbit['i']-0.001)], 'k--')
-        ax_incl.plot([0, Solution['t3_vec'][-1]], [np.rad2deg(Target_Orbit['i']), np.rad2deg(Target_Orbit['i'])], 'k--')
-        ax_incl.set_title('Inclination')
-        ax_incl.set_ylabel('Inclination [deg]')
-        ax_incl.set_xlabel('Time [s]')
-        ax_incl.grid()
+            ax_alt.set_title('Altitude')
+            ax_alt.set_ylabel('Altitude [Km]')
+            ax_alt.set_xlabel('Time [s]')
+            ax_alt.grid()
 
-        ax_ap.plot(Solution['t3_vec'], (Solution['perigee3_sol'] - R0)/1000, color=col, label='Perigee')
-        ax_ap.plot(Solution['t3_vec'], (Solution['apogee3_sol'] - R0)/1000, color=col, label='Apogee')
-        ax_ap.plot([0, Solution['t3_vec'][-1]], [(Target_Orbit['apogee'] - R0)/1000, (Target_Orbit['apogee'] - R0)/1000], 'k--')
-        ax_ap.plot([0, Solution['t3_vec'][-1]], [(Target_Orbit['perigee'] - R0)/1000, (Target_Orbit['perigee'] - R0)/1000], 'k--')
-        ax_ap.set_title('Apogee/Perigee Altitude')
-        ax_ap.set_ylabel('Apogee/Perigee [Km]')
-        ax_ap.set_xlabel('Time [s]')
-        ax_ap.grid()
-        ax_ap.set_yscale('symlog', linthresh=100)
+            ax_incl.plot(Solution['t3_vec'], np.rad2deg(Solution['i3_sol']), color=col, label='2nd Stage after fairing separation')
+            ax_incl.plot([0, Solution['t3_vec'][-1]], [np.rad2deg(Target_Orbit['i']+0.001), np.rad2deg(Target_Orbit['i']+0.001)], 'k--')
+            ax_incl.plot([0, Solution['t3_vec'][-1]], [np.rad2deg(Target_Orbit['i']-0.001), np.rad2deg(Target_Orbit['i']-0.001)], 'k--')
+            ax_incl.plot([0, Solution['t3_vec'][-1]], [np.rad2deg(Target_Orbit['i']), np.rad2deg(Target_Orbit['i'])], 'k--')
+            ax_incl.set_title('Inclination')
+            ax_incl.set_ylabel('Inclination [deg]')
+            ax_incl.set_xlabel('Time [s]')
+            ax_incl.grid()
 
-        ax_vel.plot(Solution['t1_vec'], np.linalg.norm(Solution['x1'][2:4,:], axis=0), color=col, label='1st Stage Local')
-        ax_vel.plot(Solution['t2_vec'], np.linalg.norm(Solution['x2'][3:6,:], axis=0), color=col, label='2nd Stage ECI')
-        ax_vel.plot(Solution['t3_vec'], np.linalg.norm(Solution['x3'][3:6,:], axis=0), color=col, label='2nd Stage ECI')
-        if RecoveryStrategy != 'EXP':
-            ax_vel.plot(Solution['t4_vec'], np.linalg.norm(Solution['x4'][:,2:4], axis=1), color=col, label = 'Booster Local')
-        ax_vel.set_title('Velocity')
-        ax_vel.set_ylabel('Velocity [m/s]')
-        ax_vel.set_xlabel('Time [s]')
-        ax_vel.grid()
+            ax_ap.plot(Solution['t3_vec'], (Solution['perigee3_sol'] - R0)/1000, color=col, label='Perigee')
+            ax_ap.plot(Solution['t3_vec'], (Solution['apogee3_sol'] - R0)/1000, color=col, label='Apogee')
+            ax_ap.plot([0, Solution['t3_vec'][-1]], [(Target_Orbit['apogee'] - R0)/1000, (Target_Orbit['apogee'] - R0)/1000], 'k--')
+            ax_ap.plot([0, Solution['t3_vec'][-1]], [(Target_Orbit['perigee'] - R0)/1000, (Target_Orbit['perigee'] - R0)/1000], 'k--')
+            ax_ap.set_title('Apogee/Perigee Altitude')
+            ax_ap.set_ylabel('Apogee/Perigee [Km]')
+            ax_ap.set_xlabel('Time [s]')
+            ax_ap.grid()
+            ax_ap.set_yscale('symlog', linthresh=100)
 
-        ax_throttle.plot(Solution['t1_vec'][:-1], Solution['u1'][0,:], color=col)
-        ax_throttle.plot(Solution['t2_vec'][:-1], np.linalg.norm(Solution['u2'], axis=0), color=col)
-        ax_throttle.plot(Solution['t3_vec'][:-1], np.linalg.norm(Solution['u3'], axis=0), color=col)
-        # if RecoveryStrategy != 'EXP':
-        #     ax_throttle.plot(t4_ballistic_vec, 0*t4_ballistic_vec, label='Ballistic Phase')
-        #     ax_throttle.plot(t4_reentry_vec, np.ones_like(t4_reentry_vec)*u4_reentry_scaled_sol, label='Reentry Phase')
-        #     ax_throttle.plot(t4_landing_vec[:-1], u4_landing_scaled_sol.T, label='Landing Phase')
-        ax_throttle.set_title('Thrust Factor')
-        ax_throttle.set_ylabel('Thrust Factor [-]')
-        ax_throttle.set_xlabel('Time [s]')
-        ax_throttle.grid()
-        ax_throttle.set_ylim(0, 1.1)
-        
-        ax_alpha.plot(Solution['t1_vec'][:-1], np.rad2deg(Solution['u1'][1,:]), color=col)
-        ax_alpha.plot(Solution['t2_vec'][:-1], np.rad2deg(Solution['Alpha2_sol']), color=col)
-        ax_alpha.plot(Solution['t3_vec'][:-1], np.rad2deg(Solution['Alpha3_sol']), color=col)
-        ax_alpha.set_title('Angle of Attack')
-        ax_alpha.set_ylabel('Angle of Attack [deg]')
-        ax_alpha.set_xlabel('Time [s]')
-        ax_alpha.grid()
+            ax_vel.plot(Solution['t1_vec'], np.linalg.norm(Solution['x1'][2:4,:], axis=0), color=col, label='1st Stage Local')
+            ax_vel.plot(Solution['t2_vec'], np.linalg.norm(Solution['x2'][3:6,:], axis=0), color=col, label='2nd Stage ECI')
+            ax_vel.plot(Solution['t3_vec'], np.linalg.norm(Solution['x3'][3:6,:], axis=0), color=col, label='2nd Stage ECI')
+            if RecoveryStrategy != 'EXP':
+                ax_vel.plot(Solution['t4_vec'], np.linalg.norm(Solution['x4'][:,2:4], axis=1), color=col, label = 'Booster Local')
+            ax_vel.set_title('Velocity')
+            ax_vel.set_ylabel('Velocity [m/s]')
+            ax_vel.set_xlabel('Time [s]')
+            ax_vel.grid()
 
-        ax_Isp.plot(Solution['t1_vec'][:-1], Solution['Isp1_sol'], color=col)
-        ax_Isp.plot(Solution['t2_vec'][:-1], Solution['Isp2_sol'], color=col)
-        ax_Isp.plot(Solution['t3_vec'][:-1], Solution['Isp3_sol'], color=col)
-        ax_Isp.set_title('Isp')
-        ax_Isp.set_ylabel('Isp [sec]')
-        ax_Isp.set_xlabel('Time [s]')
-        ax_Isp.grid()
-
-        mass = Solution['payload_mass']
-        ax_mass.plot(Solution['t1_vec'], Solution['x1'][4,:]/1000, color=col, label = f'Payload = {mass:.6}[Kg]')
-        ax_mass.plot(Solution['t2_vec'], Solution['x2'][6,:]/1000, color=col)
-        ax_mass.plot(Solution['t3_vec'], Solution['x3'][6,:]/1000, color=col)
-        if RecoveryStrategy != 'EXP':
-            ax_mass.plot(Solution['t4_vec'], Solution['x4'][:,4]/1000, color=col)
-        # ax_mass.plot([0, t3_vec[-1]], [(payload_mass_sol+booster.FirstStage_EmptyMass)/1000, (payload_mass_sol+booster.FirstStage_EmptyMass)/1000], 'k--')
-        # ax_mass.plot([0, t3_vec[-1]], [(payload_mass_sol+booster.LV_total_mass)/1000, (payload_mass_sol+booster.LV_total_mass)/1000], 'k--')
-        # ax_mass.plot([0, t3_vec[-1]], [(payload_mass_sol+booster.SecondStage_FullMass)/1000, (payload_mass_sol+booster.SecondStage_FullMass)/1000], 'k--')
-        # ax_mass.plot([0, t3_vec[-1]], [(payload_mass_sol+booster.SecondStage_EmptyMass)/1000, (payload_mass_sol+booster.SecondStage_EmptyMass)/1000], 'k--')
-        # ax_mass.plot(t3_vec[-1], (x3_sol[6,rocket_eci.N[1]]-propellent_mass_for_final_dv_sol)/1000, 's', label='Mass After Final dV')
-        # if RecoveryStrategy != 'EXP':
-        #     ax_mass.plot([0, t4_landing_vec[-1,0]], [(booster.EmptyFirstStageMass)/1000, (booster.EmptyFirstStageMass)/1000], 'k--')
-        ax_mass.set_title('Mass')
-        ax_mass.set_ylabel('Mass [Tons]')
-        ax_mass.set_xlabel('Time [s]')
-        ax_mass.grid()
-        ax_mass.legend()
-        
-        ax_acc.plot(Solution['t1_vec'][:-1], Solution['acc1_sol'], color=col)
-        ax_acc.plot(Solution['t2_vec'][:-1], Solution['acc2_sol'], color=col)
-        ax_acc.plot(Solution['t3_vec'][:-1], Solution['acc3_sol'], color=col)
-        if RecoveryStrategy != 'EXP':
-            ax_acc.plot(Solution['t4_vec'], Solution['acc4_sol'],'-.', color=col)
-        ax_acc.set_title('Specific Acceleration')
-        ax_acc.set_ylabel('Specific Acceleration [m/s^2]')
-        ax_acc.set_xlabel('Time [s]')
-        ax_acc.grid()
-
-        ax_q.plot(Solution['t1_vec'], Solution['Qdyn1_sol']/1000.0, color=col, label='1st Stage')
-        if RecoveryStrategy != 'EXP':
-            ax_q.plot(Solution['t4_vec'], Solution['Qdyn4_sol']/1000.0, color=col, label='Booster Return')
-
-            # x4_before_landing_intren_sol = x4_after_reentry_scaled_sol
-            # for i in range(N_before_landing_constraints):
-            #     x4_before_landing_intren_sol = rocket_return.dynamics_kp1(x4_before_landing_intren_sol, 0, dt4_before_landing_sol/N_before_landing_constraints/rocket_return.scaleT)
-            #     x4_before_landing_intren_sol_unscaled = rocket_return.unscale_x(x4_before_landing_intren_sol)
-            #     Qdyn = 0.5 * atmosphere.rho_fun(rocket_return.local_to_alt(x4_before_landing_intren_sol_unscaled)) * (x4_before_landing_intren_sol_unscaled[2]**2 + x4_before_landing_intren_sol_unscaled[3]**2)
-            #     ax_q.plot(t4_reentry_vec[-1] + (i+1)*dt4_before_landing_sol/N_before_landing_constraints, Qdyn/1000.0, 'ro')
-
-        ax_q.set_title('Qynamic Pressure')
-        ax_q.set_ylabel('Qynamic Pressure [KPa]')
-        ax_q.grid()
-
-        # ax_gama = fig.add_subplot(gs[2,3])
-        # ax_gama.plot(t1_vec, np.rad2deg(gama1_sol), label='1st Stage')
-        # ax_gama.plot(t2_vec, np.rad2deg(gama2_sol), label='2nd Stage before fairing separation')
-        # ax_gama.plot(t3_vec, np.rad2deg(gama3_sol), label='2nd Stage after fairing separation') 
-        # ax_gama.set_title('Gama')
-        # ax_gama.set_ylabel('Gama [deg]')
-        # ax_gama.set_xlabel('Time [s]')
-        # ax_gama.grid()
-        # ax_gama.legend(loc='lower center', bbox_to_anchor=(0.5, 1.05))
-
-        # ax_heat = fig.add_subplot(gs[0,3])
-        # # ax_heat.plot(t1_vec, 2*Qdyn1_sol*vel1_sol/1e6.0, label='1st Stage')
-        # if RecoveryStrategy != 'EXP':
-        #     ax_heat.plot(t4_reentry_vec, hflux4_reentry_sol/1000.0, label='Reentry Burn')
-        #     ax_heat.plot(t4_before_landing_vec, hflux4_before_landing_sol/1000.0, label='Landing Burn')
-
-        #     x4_before_landing_intren_sol = x4_after_reentry_scaled_sol
-        #     for i in range(N_before_landing_constraints):
-        #         x4_before_landing_intren_sol = rocket_return.dynamics_kp1(x4_before_landing_intren_sol, 0, dt4_before_landing_sol/N_before_landing_constraints/rocket_return.scaleT)
-        #         x4_before_landing_intren_sol_unscaled = rocket_return.unscale_x(x4_before_landing_intren_sol)
-        #         hflux = k_empirical * np.sqrt(atmosphere.rho_fun(rocket_return.local_to_alt(x4_before_landing_intren_sol_unscaled))) * np.linalg.norm(x4_before_landing_intren_sol_unscaled[2:4])**3
-        #         ax_heat.plot(t4_reentry_vec[-1] + (i+1)*dt4_before_landing_sol/N_before_landing_constraints, hflux/1000.0, 'ro')
-
-        # ax_heat.set_title('Empirical Heat Flux')
-        # ax_heat.set_ylabel('Empirical Heat Flux [KWa/m^2]')
-        # ax_heat.grid()
-
-
-        plt.tight_layout()
-
-        # Calc parking orbit
-        x_parking = Solution['x3'][:,-1].reshape(1,-1)
-        x_parking_scaled = LVopt.eci.scale_x(x_parking[0])
-        dtheta = 0
-        tf = 0
-        while True:
-            x_parking_scaled = LVopt.eci.dynamics_kp1(x_parking_scaled, 0, 1.0/LVopt.eci.scaleT)
-            x_parking = np.vstack((x_parking, LVopt.eci.unscale_x(x_parking_scaled).full().flatten()))
-            tf += 1.0
-            dtheta += np.arccos(np.dot(x_parking[-1,0:3],x_parking[-2,0:3])/(np.linalg.norm(x_parking[-1,0:3])*np.linalg.norm(x_parking[-2,0:3])))
-            if dtheta >= 2*np.pi:
-                break
-
-        r_parking = np.linalg.norm(x_parking[:,0:3], axis=1)
-        i_apogee = np.argmax(r_parking)
-        x_final = x_parking[i_apogee,:].reshape(1,-1)
-        x_final[-1,3:6] = Solution['v3_desired'] * x_final[-1,3:6] / np.linalg.norm(x_final[-1,3:6])
-
-        Parking_apogee = np.linalg.norm(x_parking[np.argmax(r_parking),0:3])
-        Parking_perigee = np.linalg.norm(x_parking[np.argmin(r_parking),0:3])
-
-        
-        dtheta = 0
-        x_final_scaled = LVopt.eci.scale_x(x_final[0])
-        while True:
-            x_final_scaled = LVopt.eci.dynamics_kp1(x_final_scaled, 0, 1.0/LVopt.eci.scaleT)
-            x_final = np.vstack((x_final, LVopt.eci.unscale_x(x_final_scaled).full().flatten()))
-            dtheta += np.arccos(np.dot(x_final[-1,0:3],x_final[-2,0:3])/(np.linalg.norm(x_final[-1,0:3])*np.linalg.norm(x_final[-2,0:3])))
-            if dtheta >= 2*np.pi:
-                break
-        r_final = np.linalg.norm(x_final[:,0:3], axis=1)
-
-        final_apogee = np.linalg.norm(x_final[np.argmax(r_final),0:3])
-        final_perigee = np.linalg.norm(x_final[np.argmin(r_final),0:3])
+            ax_throttle.plot(Solution['t1_vec'][:-1], Solution['u1'][0,:], color=col)
+            ax_throttle.plot(Solution['t2_vec'][:-1], np.linalg.norm(Solution['u2'], axis=0), color=col)
+            ax_throttle.plot(Solution['t3_vec'][:-1], np.linalg.norm(Solution['u3'], axis=0), color=col)
+            # if RecoveryStrategy != 'EXP':
+            #     ax_throttle.plot(t4_ballistic_vec, 0*t4_ballistic_vec, label='Ballistic Phase')
+            #     ax_throttle.plot(t4_reentry_vec, np.ones_like(t4_reentry_vec)*u4_reentry_scaled_sol, label='Reentry Phase')
+            #     ax_throttle.plot(t4_landing_vec[:-1], u4_landing_scaled_sol.T, label='Landing Phase')
+            ax_throttle.set_title('Thrust Factor')
+            ax_throttle.set_ylabel('Thrust Factor [-]')
+            ax_throttle.set_xlabel('Time [s]')
+            ax_throttle.grid()
+            ax_throttle.set_ylim(0, 1.1)
             
+            ax_alpha.plot(Solution['t1_vec'][:-1], np.rad2deg(Solution['u1'][1,:]), color=col)
+            ax_alpha.plot(Solution['t2_vec'][:-1], np.rad2deg(Solution['Alpha2_sol']), color=col)
+            ax_alpha.plot(Solution['t3_vec'][:-1], np.rad2deg(Solution['Alpha3_sol']), color=col)
+            ax_alpha.set_title('Angle of Attack')
+            ax_alpha.set_ylabel('Angle of Attack [deg]')
+            ax_alpha.set_xlabel('Time [s]')
+            ax_alpha.grid()
+
+            ax_Isp.plot(Solution['t1_vec'][:-1], Solution['Isp1_sol'], color=col)
+            ax_Isp.plot(Solution['t2_vec'][:-1], Solution['Isp2_sol'], color=col)
+            ax_Isp.plot(Solution['t3_vec'][:-1], Solution['Isp3_sol'], color=col)
+            ax_Isp.set_title('Isp')
+            ax_Isp.set_ylabel('Isp [sec]')
+            ax_Isp.set_xlabel('Time [s]')
+            ax_Isp.grid()
+
+            mass = Solution['payload_mass']
+            ax_mass.plot(Solution['t1_vec'], Solution['x1'][4,:]/1000, color=col, label = f'Payload = {mass/1000:.4}[Tons]')
+            ax_mass.plot(Solution['t2_vec'], Solution['x2'][6,:]/1000, color=col)
+            ax_mass.plot(Solution['t3_vec'], Solution['x3'][6,:]/1000, color=col)
+            if RecoveryStrategy != 'EXP':
+                ax_mass.plot(Solution['t4_vec'], Solution['x4'][:,4]/1000, color=col)
+            # ax_mass.plot([0, t3_vec[-1]], [(payload_mass_sol+booster.FirstStage_EmptyMass)/1000, (payload_mass_sol+booster.FirstStage_EmptyMass)/1000], 'k--')
+            # ax_mass.plot([0, t3_vec[-1]], [(payload_mass_sol+booster.LV_total_mass)/1000, (payload_mass_sol+booster.LV_total_mass)/1000], 'k--')
+            # ax_mass.plot([0, t3_vec[-1]], [(payload_mass_sol+booster.SecondStage_FullMass)/1000, (payload_mass_sol+booster.SecondStage_FullMass)/1000], 'k--')
+            # ax_mass.plot([0, t3_vec[-1]], [(payload_mass_sol+booster.SecondStage_EmptyMass)/1000, (payload_mass_sol+booster.SecondStage_EmptyMass)/1000], 'k--')
+            # ax_mass.plot(t3_vec[-1], (x3_sol[6,rocket_eci.N[1]]-propellent_mass_for_final_dv_sol)/1000, 's', label='Mass After Final dV')
+            # if RecoveryStrategy != 'EXP':
+            #     ax_mass.plot([0, t4_landing_vec[-1,0]], [(booster.EmptyFirstStageMass)/1000, (booster.EmptyFirstStageMass)/1000], 'k--')
+            ax_mass.set_title('Mass')
+            ax_mass.set_ylabel('Mass [Tons]')
+            ax_mass.set_xlabel('Time [s]')
+            ax_mass.grid()
+            ax_mass.legend()
+            
+            ax_acc.plot(Solution['t1_vec'][:-1], Solution['acc1_sol'], color=col)
+            ax_acc.plot(Solution['t2_vec'][:-1], Solution['acc2_sol'], color=col)
+            ax_acc.plot(Solution['t3_vec'][:-1], Solution['acc3_sol'], color=col)
+            if RecoveryStrategy != 'EXP':
+                ax_acc.plot(Solution['t4_vec'], Solution['acc4_sol'],'-.', color=col)
+            ax_acc.set_title('Specific Acceleration')
+            ax_acc.set_ylabel('Specific Acceleration [m/s^2]')
+            ax_acc.set_xlabel('Time [s]')
+            ax_acc.grid()
+
+            ax_q.plot(Solution['t1_vec'], Solution['Qdyn1_sol']/1000.0, color=col, label='1st Stage')
+            if RecoveryStrategy != 'EXP':
+                ax_q.plot(Solution['t4_vec'], Solution['Qdyn4_sol']/1000.0, color=col, label='Booster Return')
+
+                # x4_before_landing_intren_sol = x4_after_reentry_scaled_sol
+                # for i in range(N_before_landing_constraints):
+                #     x4_before_landing_intren_sol = rocket_return.dynamics_kp1(x4_before_landing_intren_sol, 0, dt4_before_landing_sol/N_before_landing_constraints/rocket_return.scaleT)
+                #     x4_before_landing_intren_sol_unscaled = rocket_return.unscale_x(x4_before_landing_intren_sol)
+                #     Qdyn = 0.5 * atmosphere.rho_fun(rocket_return.local_to_alt(x4_before_landing_intren_sol_unscaled)) * (x4_before_landing_intren_sol_unscaled[2]**2 + x4_before_landing_intren_sol_unscaled[3]**2)
+                #     ax_q.plot(t4_reentry_vec[-1] + (i+1)*dt4_before_landing_sol/N_before_landing_constraints, Qdyn/1000.0, 'ro')
+
+            ax_q.set_title('Qynamic Pressure')
+            ax_q.set_ylabel('Qynamic Pressure [KPa]')
+            ax_q.grid()
+
+            # ax_gama = fig.add_subplot(gs[2,3])
+            # ax_gama.plot(t1_vec, np.rad2deg(gama1_sol), label='1st Stage')
+            # ax_gama.plot(t2_vec, np.rad2deg(gama2_sol), label='2nd Stage before fairing separation')
+            # ax_gama.plot(t3_vec, np.rad2deg(gama3_sol), label='2nd Stage after fairing separation') 
+            # ax_gama.set_title('Gama')
+            # ax_gama.set_ylabel('Gama [deg]')
+            # ax_gama.set_xlabel('Time [s]')
+            # ax_gama.grid()
+            # ax_gama.legend(loc='lower center', bbox_to_anchor=(0.5, 1.05))
+
+            # ax_heat = fig.add_subplot(gs[0,3])
+            # # ax_heat.plot(t1_vec, 2*Qdyn1_sol*vel1_sol/1e6.0, label='1st Stage')
+            # if RecoveryStrategy != 'EXP':
+            #     ax_heat.plot(t4_reentry_vec, hflux4_reentry_sol/1000.0, label='Reentry Burn')
+            #     ax_heat.plot(t4_before_landing_vec, hflux4_before_landing_sol/1000.0, label='Landing Burn')
+
+            #     x4_before_landing_intren_sol = x4_after_reentry_scaled_sol
+            #     for i in range(N_before_landing_constraints):
+            #         x4_before_landing_intren_sol = rocket_return.dynamics_kp1(x4_before_landing_intren_sol, 0, dt4_before_landing_sol/N_before_landing_constraints/rocket_return.scaleT)
+            #         x4_before_landing_intren_sol_unscaled = rocket_return.unscale_x(x4_before_landing_intren_sol)
+            #         hflux = k_empirical * np.sqrt(atmosphere.rho_fun(rocket_return.local_to_alt(x4_before_landing_intren_sol_unscaled))) * np.linalg.norm(x4_before_landing_intren_sol_unscaled[2:4])**3
+            #         ax_heat.plot(t4_reentry_vec[-1] + (i+1)*dt4_before_landing_sol/N_before_landing_constraints, hflux/1000.0, 'ro')
+
+            # ax_heat.set_title('Empirical Heat Flux')
+            # ax_heat.set_ylabel('Empirical Heat Flux [KWa/m^2]')
+            # ax_heat.grid()
 
 
-        phi, theta = np.mgrid[0:np.pi:30j, 0:2*np.pi:30j]
-        x = LVopt.eci.R0 * np.sin(phi) * np.cos(theta)
-        y = LVopt.eci.R0 * np.sin(phi) * np.sin(theta)
-        z = LVopt.eci.R0 * np.cos(phi)
+            # plt.tight_layout()
 
-        # Create equatorial plane (z=0)
-        theta_plane = np.linspace(0, 2*np.pi, 100)
-        r_plane = np.linspace(0, LVopt.eci.R0*1.1, 25)
-        r_grid, theta_grid = np.meshgrid(r_plane, theta_plane)
-        x_plane = r_grid * np.cos(theta_grid)
-        y_plane = r_grid * np.sin(theta_grid)
-        z_plane = np.zeros_like(x_plane)
-        
-        # Plot Earth
-        ax_3d.plot_surface(x, y, z, rstride=2, cstride=2, color='blue', alpha=0.1, edgecolor='none', antialiased=False)
+            # continue
 
-        # Plot equatorial plane
-        ax_3d.plot_surface(x_plane, y_plane, z_plane, color='gray', alpha=0.4)
+            # Calc parking orbit
+            x_parking = Solution['x3'][:,-1].reshape(1,-1)
+            x_parking_scaled = LVopt.eci.scale_x(x_parking[0])
+            dtheta = 0
+            tf = 0
+            while True:
+                x_parking_scaled = LVopt.eci.dynamics_kp1(x_parking_scaled, 0, 10.0/LVopt.eci.scaleT)
+                x_parking = np.vstack((x_parking, LVopt.eci.unscale_x(x_parking_scaled).full().flatten()))
+                tf += 10.0
+                dtheta += np.arccos(np.dot(x_parking[-1,0:3],x_parking[-2,0:3])/(np.linalg.norm(x_parking[-1,0:3])*np.linalg.norm(x_parking[-2,0:3])))
+                if dtheta >= 2*np.pi:
+                    break
 
-        #plot trajectory
-        # ax_3d.plot(Solution['x3'][0,:], Solution['x3'][1,:], Solution['x3'][2,:], 'r')
-        ax_3d.plot(Solution['x2'][0,:], Solution['x2'][1,:], Solution['x2'][2,:], color=col)
-        ax_3d.plot(Solution['x3'][0,:], Solution['x3'][1,:], Solution['x3'][2,:], color=col)
-        ax_3d.plot(x_parking[:,0], x_parking[:,1], x_parking[:,2], color=col, label=f'Parking Orbit (apogee={np.round((np.max(r_parking) - LVopt.eci.R0)/1000)}, perigee={np.round((np.min(r_parking) - LVopt.eci.R0)/1000)})')
-        ax_3d.plot(x_final[:,0], x_final[:,1], x_final[:,2], '--', color=col, label=f'Final Orbit (apogee={np.round((np.max(final_apogee) - LVopt.eci.R0)/1000)}, perigee={np.round((np.min(final_perigee) - LVopt.eci.R0)/1000)})')
-        ax_3d.legend()
+            r_parking = np.linalg.norm(x_parking[:,0:3], axis=1)
+            i_apogee = np.argmax(r_parking)
+            x_final = x_parking[i_apogee,:].reshape(1,-1)
+            x_final[-1,3:6] = Solution['v3_desired'] * x_final[-1,3:6] / np.linalg.norm(x_final[-1,3:6])
 
-        # ECI axes
-        max_range = LVopt.eci.R0 * 2
-        ax_3d.quiver(0, 0, 0, max_range, 0, 0, color='r')
-        ax_3d.quiver(0, 0, 0, 0, max_range, 0, color='g')
-        ax_3d.quiver(0, 0, 0, 0, 0, max_range, color='b')
+            Parking_apogee = np.linalg.norm(x_parking[np.argmax(r_parking),0:3])
+            Parking_perigee = np.linalg.norm(x_parking[np.argmin(r_parking),0:3])
 
-        # Set aspect and limits
-        ax_3d.set_aspect('equal')
-        ax_3d.set_xlabel('X (km)')
-        ax_3d.set_ylabel('Y (km)')
-        ax_3d.set_zlabel('Z (km)')
-        ax_3d.set_title('Earth in ECI Frame with Equatorial Plane')
-        ax_3d.legend()
+            
+            dtheta = 0
+            x_final_scaled = LVopt.eci.scale_x(x_final[0])
+            while True:
+                x_final_scaled = LVopt.eci.dynamics_kp1(x_final_scaled, 0, 10.0/LVopt.eci.scaleT)
+                x_final = np.vstack((x_final, LVopt.eci.unscale_x(x_final_scaled).full().flatten()))
+                dtheta += np.arccos(np.dot(x_final[-1,0:3],x_final[-2,0:3])/(np.linalg.norm(x_final[-1,0:3])*np.linalg.norm(x_final[-2,0:3])))
+                if dtheta >= 2*np.pi:
+                    break
+            r_final = np.linalg.norm(x_final[:,0:3], axis=1)
 
-        # ax_traj3d = plt.subplot(1,2,2, projection='3d')
-        #     #plot trajectory
-        # # ax_traj3d.plot(x1_eci_sol[0,:], x1_eci_sol[1,:], x1_eci_sol[2,:], 'r', label='1st Stage')
-        # ax_traj3d.plot(x2_sol[0,:], x2_sol[1,:], x2_sol[2,:], color=col, label='2nd Stage before fairing separation')
-        # ax_traj3d.plot(x3_sol[0,:], x3_sol[1,:], x3_sol[2,:], color=col, label='2nd Stage after fairing separation')
-        # for i in range(0,u2_sol.shape[1], 5):
-        #     u_vec = u2_sol[:,i] / np.linalg.norm(u2_sol[:,i])*100000
-        #     ax_traj3d.quiver(x2_sol[0,i], x2_sol[1,i], x2_sol[2,i], u_vec[0], u_vec[1], u_vec[2], color='b')
-        # for i in range(0,u3_sol.shape[1], 5):
-        #     u_vec = u3_sol[:,i] / np.linalg.norm(u3_sol[:,i])*100000
-        #     ax_traj3d.quiver(x3_sol[0,i], x3_sol[1,i], x3_sol[2,i], u_vec[0], u_vec[1], u_vec[2], color='b')
-
-        
-        # ax_traj3d.legend()
+            final_apogee = np.linalg.norm(x_final[np.argmax(r_final),0:3])
+            final_perigee = np.linalg.norm(x_final[np.argmin(r_final),0:3])
+                
 
 
-        # with open('GPS III SV01 raw.json', 'r') as f:
-        #     data = json.load(f)
+            phi, theta = np.mgrid[0:np.pi:30j, 0:2*np.pi:30j]
+            x = LVopt.eci.R0 * np.sin(phi) * np.cos(theta)/1e3
+            y = LVopt.eci.R0 * np.sin(phi) * np.sin(theta)/1e3
+            z = LVopt.eci.R0 * np.cos(phi)/1e3
 
-        # with open('stage2 raw.json', 'r') as f:
-        #     data2 = json.load(f)
-        # with open('analysed.json', 'r') as f:
-        #     analyzed = json.load(f)
+            # Create equatorial plane (z=0)
+            theta_plane = np.linspace(0, 2*np.pi, 100)
+            r_plane = np.linspace(0, LVopt.eci.R0*1.1, 25)/1000
+            r_grid, theta_grid = np.meshgrid(r_plane, theta_plane)
+            x_plane = r_grid * np.cos(theta_grid)
+            y_plane = r_grid * np.sin(theta_grid)
+            z_plane = np.zeros_like(x_plane)
+            
+            # Plot Earth
+            ax_3d.plot_surface(x, y, z, rstride=2, cstride=2, color='blue', alpha=0.05, edgecolor='none', antialiased=False)
 
-        # ax_alt.plot(data['time'], data['altitude'],'k--', label='GPS III SV01')
-        # ax_alt.plot(data2['time'], data2['altitude'],'c--', label='Stage 2')
+            # Plot equatorial plane
+            ax_3d.plot_surface(x_plane, y_plane, z_plane, color='gray', alpha=0.4)
 
-        # ax_vel.plot(data['time'], data['velocity'],'k--')
-        # ax_vel.plot(data2['time'], data2['velocity'],'c--')
+            #plot trajectory
+            ax_3d.plot(Solution['x2'][0,:]/1e3, Solution['x2'][1,:]/1e3, Solution['x2'][2,:]/1e3, color=col)
+            ax_3d.plot(Solution['x3'][0,:]/1e3, Solution['x3'][1,:]/1e3, Solution['x3'][2,:]/1e3, color=col)
+            ax_3d.plot(x_parking[:,0]/1e3, x_parking[:,1]/1e3, x_parking[:,2]/1e3, '--', color=col, label=f'Parking Orbit (apogee={np.round((np.max(r_parking) - LVopt.eci.R0)/1000)}, perigee={np.round((np.min(r_parking) - LVopt.eci.R0)/1000)})')
+            ax_3d.plot(x_final[:,0]/1e3, x_final[:,1]/1e3, x_final[:,2]/1e3, color=col, label=f'Final Orbit (apogee={np.round((np.max(final_apogee) - LVopt.eci.R0)/1000)}, perigee={np.round((np.min(final_perigee) - LVopt.eci.R0)/1000)})')
+            ax_3d.legend()
 
-        # ax_q.plot(analyzed['time'], np.array(analyzed['q'])/1000,'k--')
+            # ECI axes
+            max_range = LVopt.eci.R0 * 2/1e3
+            ax_3d.quiver(0, 0, 0, max_range, 0, 0, color='r')
+            ax_3d.quiver(0, 0, 0, 0, max_range, 0, color='g')
+            ax_3d.quiver(0, 0, 0, 0, 0, max_range, color='b')
 
-        # ax_acc.plot(analyzed['time'], analyzed['acceleration'],'k--')
+            ax_3d_xy.plot(Solution['x2'][0,:]/1e3, Solution['x2'][1,:]/1e3, color=col)
+            ax_3d_xy.plot(Solution['x3'][0,:]/1e3, Solution['x3'][1,:]/1e3, color=col)
+            ax_3d_xy.plot(x_parking[:,0]/1e3, x_parking[:,1]/1e3, '--', color=col)
+            ax_3d_xy.plot(x_final[:,0]/1e3, x_final[:,1]/1e3, color=col)
+            ax_3d_xy.plot(LVopt.eci.R0 * np.cos(theta[0,:])/1e3, LVopt.eci.R0/1e3 * np.sin(theta[0,:]), color='k', linewidth=3, alpha=0.3)
+            ax_3d_xy.set_aspect('equal')
+            ax_3d_xy.set_xlabel('X (km)')
+            ax_3d_xy.set_ylabel('Y (km)')
+            ax_3d_xy.grid('on')
+            ax_3d_yz.plot(Solution['x2'][1,:]/1e3, Solution['x2'][2,:]/1e3, color=col)
+            ax_3d_yz.plot(Solution['x3'][1,:]/1e3, Solution['x3'][2,:]/1e3, color=col)
+            ax_3d_yz.plot(x_parking[:,1]/1e3, x_parking[:,2]/1e3, '--', color=col)
+            ax_3d_yz.plot(x_final[:,1]/1e3, x_final[:,2]/1e3, color=col)
+            ax_3d_yz.plot(LVopt.eci.R0 * np.cos(theta[0,:])/1e3, LVopt.eci.R0/1e3 * np.sin(theta[0,:]), color='k', linewidth=3, alpha=0.3)
+            ax_3d_yz.set_aspect('equal')
+            ax_3d_yz.set_xlabel('Y (km)')
+            ax_3d_yz.set_ylabel('Z (km)')
+            ax_3d_yz.grid('on')
+            ax_3d_xz.plot(Solution['x2'][0,:]/1e3, Solution['x2'][2,:]/1e3, color=col)
+            ax_3d_xz.plot(Solution['x3'][0,:]/1e3, Solution['x3'][2,:]/1e3, color=col)
+            ax_3d_xz.plot(x_parking[:,0]/1e3, x_parking[:,2]/1e3, '--', color=col)
+            ax_3d_xz.plot(x_final[:,0]/1e3, x_final[:,2]/1e3, color=col)
+            ax_3d_xz.plot(LVopt.eci.R0 * np.cos(theta[0,:])/1e3, LVopt.eci.R0/1e3 * np.sin(theta[0,:]), color='k', linewidth=3, alpha=0.3)
+            ax_3d_xz.set_aspect('equal')
+            ax_3d_xz.set_xlabel('X (km)')
+            ax_3d_xz.set_ylabel('Z (km)')
+            ax_3d_xz.grid('on')
 
+            # Set aspect and limits
+            ax_3d.set_aspect('equal')
+            ax_3d.set_xlabel('X (km)')
+            ax_3d.set_ylabel('Y (km)')
+            ax_3d.set_zlabel('Z (km)')
+            ax_3d.set_title('Earth in ECI Frame with Equatorial Plane')
+            ax_3d.legend()
+
+            plt.tight_layout()
+
+
+
+            # ax_traj3d = plt.subplot(1,2,2, projection='3d')
+            #     #plot trajectory
+            # # ax_traj3d.plot(x1_eci_sol[0,:], x1_eci_sol[1,:], x1_eci_sol[2,:], 'r', label='1st Stage')
+            # ax_traj3d.plot(x2_sol[0,:], x2_sol[1,:], x2_sol[2,:], color=col, label='2nd Stage before fairing separation')
+            # ax_traj3d.plot(x3_sol[0,:], x3_sol[1,:], x3_sol[2,:], color=col, label='2nd Stage after fairing separation')
+            # for i in range(0,u2_sol.shape[1], 5):
+            #     u_vec = u2_sol[:,i] / np.linalg.norm(u2_sol[:,i])*100000
+            #     ax_traj3d.quiver(x2_sol[0,i], x2_sol[1,i], x2_sol[2,i], u_vec[0], u_vec[1], u_vec[2], color='b')
+            # for i in range(0,u3_sol.shape[1], 5):
+            #     u_vec = u3_sol[:,i] / np.linalg.norm(u3_sol[:,i])*100000
+            #     ax_traj3d.quiver(x3_sol[0,i], x3_sol[1,i], x3_sol[2,i], u_vec[0], u_vec[1], u_vec[2], color='b')
+
+            
+            # ax_traj3d.legend()
+
+
+            # with open('GPS III SV01 raw.json', 'r') as f:
+            #     data = json.load(f)
+
+            # with open('stage2 raw.json', 'r') as f:
+            #     data2 = json.load(f)
+            # with open('analysed.json', 'r') as f:
+            #     analyzed = json.load(f)
+
+            # ax_alt.plot(data['time'], data['altitude'],'k--', label='GPS III SV01')
+            # ax_alt.plot(data2['time'], data2['altitude'],'c--', label='Stage 2')
+
+            # ax_vel.plot(data['time'], data['velocity'],'k--')
+            # ax_vel.plot(data2['time'], data2['velocity'],'c--')
+
+            # ax_q.plot(analyzed['time'], np.array(analyzed['q'])/1000,'k--')
+
+            # ax_acc.plot(analyzed['time'], analyzed['acceleration'],'k--')
+
+            icol += 1
+            icol %= len(color_vec)
     plt.show()
 
