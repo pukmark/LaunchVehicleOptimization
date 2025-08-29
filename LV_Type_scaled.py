@@ -183,7 +183,7 @@ class VLType(PythonMsg):
         # Mass Properties
         self.EmptyFirstStageMass = 275.0 * 10**3      # Super Heavy dry mass [kg]
         self.EmptySecondStageMass = 85.0 * 10**3      # Starship (upper stage) dry mass [kg]
-        self.FirstStagePropellentMass = 3400.0 * 10**3 # Super Heavy propellant [kg]
+        self.FirstStagePropellentMass = 3250.0 * 10**3 # Super Heavy propellant [kg]
         self.SecondStagePropellentMass = 1500.0 * 10**3# Starship propellant [kg]
         self.FairingMass = 0.0
 
@@ -199,8 +199,8 @@ class VLType(PythonMsg):
         self.Booster_Cda2 = 1.8
         self.Booster_CLa = 0.5
         self.Booster_MaxDynamicPressure = 120.0 * 10**3  # [Pa]
-        self.Booster_MaxHeatFlux = 300.0 * 10**3  # [W/m^2]
-        self.Booster_k_empirical = 2.0e-3
+        self.Booster_MaxHeatFlux = 150.0 * 10**3  # [W/m^2]
+        self.Booster_k_empirical = 2.0e-4
 
         # Propulsion Properties
         self.FirstStage_SL_Isp = 327.0  # Raptor 2 sea-level [s]
@@ -213,7 +213,7 @@ class VLType(PythonMsg):
         self.FairingSeparationAltitude = 80.0 * 10**3 # [m]
 
         self.SecondStage_Thrust = 2300.0 * 10**3 * 3 + 2256.3 * 10**3 * 3  # 3 vacuum and 3 SL variants [N]
-        self.SecondStage_Vac_Isp = 0.5*(380.0 + 347.0)
+        self.SecondStage_Vac_Isp = (3*380.0 + 3*347.0)/6
         self.SecondStage_MinThrust_Factor = 0.5
         self.SecondStage_MinThrust_IspFactor = 0.85
 
