@@ -235,7 +235,7 @@ class LV_Optimization(VLType):
             # set the time step constraints
             if RecoveryStrategy == 'RTLS':
                 opti.subject_to(dt4_boostback >= 0.1 / self.boostback.scaleT)
-            opti.subject_to(dt4_ballistic >= 0.1 / self.rocket_return.scaleT)
+            opti.subject_to(dt4_ballistic >= 50.0 / self.rocket_return.scaleT)
             opti.subject_to(dt4_reentry >= 0.1 / self.rocket_return.scaleT)
             opti.subject_to(dt4_before_landing >= 0.1 / self.rocket_return.scaleT)
             opti.subject_to(dt4_landing >= 0.1 / self.rocket_return.scaleT)
@@ -277,6 +277,8 @@ class LV_Optimization(VLType):
                 opti.subject_to(x4_landing[:,k+1] == self.rocket_return.dynamics_kp1(x4_landing[:,k], u4_landing[:,k], dt4_landing))
                 opti.subject_to(u4_landing[0,k] <= 1.0/3.0) 
                 opti.subject_to(u4_landing[0,k] >= 0.75*1.0/3.0*self.rocket_return.EmptyFirstStageMass*self.rocket_return.g0/self.rocket_return.scaleU[0])
+                opti.subject_to(self.rocket_return.dynamic_pressure_fun(x4_landing[:,k+1])/self.rocket_return.Booster_MaxDynamicPressure <= 1.0)
+                opti.subject_to(self.rocket_return.heat_flux_fun(x4_landing[:,k+1])/self.rocket_return.Booster_MaxHeatFlux <= 1.0)
 
             # final state constraints
             x4f_landing_unscaled = self.rocket_return.unscale_x(x4_landing[:,self.rocket_return.N])
@@ -308,9 +310,9 @@ class LV_Optimization(VLType):
         
         opts = {"print_time": 0,  # Print timing, 
                 "ipopt": {
-                "linear_solver": "ma97", "hsllib": "/usr/local/lib/libcoinhsl.so",  # MA97 solver Path to HSL library
+                # "linear_solver": "ma97", "hsllib": "/usr/local/lib/libcoinhsl.so",  # MA97 solver Path to HSL library
                 "mu_strategy": "adaptive",  # "adaptive" or "adaptive" Strategy for updating the barrier parameter
-                # "tol": 1e-5,  # Convergence tolerance
+                "tol": 1e-8,  # Convergence tolerance
                 "max_iter": 750,  # Max iterations
                 "print_level": 0,  # Verbosity level
                 # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter

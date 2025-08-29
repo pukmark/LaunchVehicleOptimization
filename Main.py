@@ -17,11 +17,11 @@ color_vec = ['r','b','g','b','k','y','c','m']
 
 if __name__ == '__main__':
     RecoveryStrategyVec = ['EXP', 'ASDS', 'RTLS'] # 'EXP', 'ASDS', 'RTLS'
-    RecoveryStrategyVec = ['RTLS'] # 'EXP', 'ASDS', 'RTLS'
+    RecoveryStrategyVec = ['ASDS'] # 'EXP', 'ASDS', 'RTLS'
     payload_mass_predefined = -1 # payload mass defined in kg, maximmize the payload mass if set to non-positive value
     Plot_interm = 0
     LV_Configuration = 2 # 1 - Falcon 9, 2 - Starship
-    Plot_Results = 0 # 1 - Plot telemetry, 2- Plot 3d trajectory
+    Plot_Results = 1 # 1 - Plot telemetry, 2- Plot 3d trajectory
 
     Target_Orbits = []
     ### Target orbit parameters for LEO 
@@ -60,7 +60,7 @@ if __name__ == '__main__':
                         "perigee": R0 + 200.0e3,      # perigee [m]
                         "i": np.deg2rad(28.6),})       # inclination [rad]
     
-    # Target_Orbits = [Target_Orbits[-1]]
+    Target_Orbits = [Target_Orbits[0]]
     
     if Plot_Results > 0:
         plt.ioff()
@@ -87,11 +87,10 @@ if __name__ == '__main__':
     
     DispesrionVec, DispesrionParam = np.linspace(0.85,1.15, 13), 'FirstStageIsp'
     # DispesrionVec, DispesrionParam = np.linspace(0.85,1.15, 13), 'SecondStageIsp'
-
-
-
+    
+    # DispesrionVec = np.array([0.9])
     for iOrbit, Target_Orbit in enumerate(Target_Orbits):
-        print('='*40+f"Orbit Name: {Target_Orbit['Name']}"+"="*40)
+        print('='*40+f" Orbit Name: {Target_Orbit['Name']} "+"="*40)
         for iRecover, RecoveryStrategy in enumerate(RecoveryStrategyVec):
             Results = []
             for iVal, DispesrionValue in enumerate(DispesrionVec):
@@ -106,7 +105,7 @@ if __name__ == '__main__':
                 # DispesrionFactors.LaunchAltDelta = 0.0
                 LVopt = LVopt_Type.LV_Optimization(DispesrionFactors, LV_Configuration)
 
-                init_guess = 0.67
+                init_guess = 0.9
                 for _ in range(10):
                     try:
                         Solution = LVopt.SolveOptimiztion(RecoveryStrategy=RecoveryStrategy,
