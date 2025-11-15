@@ -49,9 +49,6 @@ class VLType(PythonMsg):
     atmosphere: Atm_Type = field(default = None)
 
     InitialGuess: dict = field(default = None)
-    
-    dm_RTLS: float = field(default = 28000.0)
-    dm_ASDS: float = field(default = 13000.0)
 
     Solution: dict = field(default = None)
 
@@ -234,8 +231,8 @@ class LV_Optimization(VLType):
 
             # set the time step constraints
             if RecoveryStrategy == 'RTLS':
-                opti.subject_to(dt4_boostback >= 0.1 / self.boostback.scaleT)
-            opti.subject_to(dt4_ballistic >= 50.0 / self.rocket_return.scaleT)
+                opti.subject_to(dt4_boostback >= 1.0 / self.boostback.scaleT)
+            opti.subject_to(dt4_ballistic >= 75.0 / self.rocket_return.scaleT)
             opti.subject_to(dt4_reentry >= 0.1 / self.rocket_return.scaleT)
             opti.subject_to(dt4_before_landing >= 0.1 / self.rocket_return.scaleT)
             opti.subject_to(dt4_landing >= 0.1 / self.rocket_return.scaleT)
@@ -296,8 +293,8 @@ class LV_Optimization(VLType):
         # set the cost function
         gain = 1e-2
         cost = 0.0
-        cost += 0.5*gain*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])) * dt1
-        cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1]) * dt2 + ca.sumsqr(u3[1,1:]-u3[1,:-1]) * dt3)
+        cost += 0.5*gain*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])) 
+        cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]) )
         if RecoveryStrategy != 'EXP':
             cost += 0.5*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) * dt4_landing
         cost += -payload_mass_scaled*100
@@ -310,11 +307,12 @@ class LV_Optimization(VLType):
         
         opts = {"print_time": 0,  # Print timing, 
                 "ipopt": {
-                # "linear_solver": "ma97", "hsllib": "/usr/local/lib/libcoinhsl.so",  # MA97 solver Path to HSL library
+                "linear_solver": "ma97", "hsllib": "/usr/local/lib/libcoinhsl.so",  # MA97 solver Path to HSL library
                 "mu_strategy": "adaptive",  # "adaptive" or "adaptive" Strategy for updating the barrier parameter
-                "tol": 1e-8,  # Convergence tolerance
-                "max_iter": 750,  # Max iterations
+                "tol": 1e-6,  # Convergence tolerance
+                "max_iter": 250,  # Max iterations
                 "print_level": 0,  # Verbosity level
+                'print_frequency_iter': 5,  # print_frequency_iter
                 # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter
                 "timing_statistics": "no", # Enable timing statistics
                 # "nlp_scaling_method": "none", # 'none' 'gradient-based', # Scaling method
@@ -349,7 +347,7 @@ class LV_Optimization(VLType):
 
         if RecoveryStrategy == 'RTLS':
             v3_0_guess = 2300.0
-            # v3_0_guess = 2100.0
+            v3_0_guess = 1500.0
         elif RecoveryStrategy == 'ASDS':
             v3_0_guess = 2400.0
             v3_0_guess = 1750.0
@@ -358,7 +356,10 @@ class LV_Optimization(VLType):
 
         if payload_mass_predefined <= 0.0:
             alpha = ca.exp(ca.fabs(v_parking-v3_0_guess) / (self.eci.SecondStage_Vac_Isp * self.eci.g0))
-            payload_mass_guess = init_guess*(self.eci.SecondStage_FullMass - alpha*self.eci.SecondStage_EmptyMass)/(alpha-1.0)
+            if type(init_guess) == float:
+                payload_mass_guess = init_guess*(self.eci.SecondStage_FullMass - alpha*self.eci.SecondStage_EmptyMass)/(alpha-1.0)
+            else:
+                payload_mass_guess = init_guess['payload_mass']
         else:
             payload_mass_guess = payload_mass_predefined*0.25
         m3_final = (self.eci.SecondStage_EmptyMass + payload_mass_guess)*(1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / (self.eci.SecondStage_Vac_Isp * self.eci.g0)))
@@ -372,7 +373,7 @@ class LV_Optimization(VLType):
         x0_guess = np.array([init_x_guess, init_z_guess, init_vx_guess, init_vz_guess, init_m_guess])
 
         if RecoveryStrategy == 'RTLS':
-            dm = self.booster.FirstStagePropellentMass * 0.11
+            dm = self.booster.FirstStagePropellentMass * 0.12
         elif RecoveryStrategy == 'ASDS':
             dm = self.booster.FirstStagePropellentMass * 0.035
         else:    
@@ -649,6 +650,44 @@ class LV_Optimization(VLType):
             else:
                 opti.set_initial(x4_0, self.rocket_return.scale_x(x4_0_guess))
 
+        if type(init_guess) == dict:
+            opti.set_initial(payload_mass_scaled, init_guess['payload_mass']/self.booster.scaleX[4])
+            opti.set_initial(dt1, init_guess['dt1']/self.booster.scaleT)
+            opti.set_initial(dt2, init_guess['dt2']/self.eci.scaleT)
+            opti.set_initial(dt3, init_guess['dt3']/self.eci.scaleT)
+            opti.set_initial(LaunchAz, init_guess['LaunchAz'])
+            for k in range(init_guess['x1'].shape[1]):
+                opti.set_initial(x1[:,k], self.booster.scale_x(init_guess['x1'][:,k]))
+            for k in range(init_guess['u1'].shape[1]):
+                opti.set_initial(u1[:,k], self.booster.scale_u(init_guess['u1'][:,k]))
+            for k in range(init_guess['x2'].shape[1]):
+                opti.set_initial(x2[:,k], self.eci.scale_x(init_guess['x2'][:,k]))
+            for k in range(init_guess['u2'].shape[1]):
+                opti.set_initial(u2[:,k], self.eci.scale_u(init_guess['u2'][:,k]))
+            for k in range(init_guess['x3'].shape[1]):
+                opti.set_initial(x3[:,k], self.eci.scale_x(init_guess['x3'][:,k]))
+            for k in range(init_guess['u3'].shape[1]):
+                opti.set_initial(u3[:,k], self.eci.scale_u(init_guess['u3'][:,k]))
+            if RecoveryStrategy != 'EXP':
+                opti.set_initial(dt4_ballistic, init_guess['dt4_ballistic']/self.rocket_return.scaleT)
+                opti.set_initial(dt4_reentry, init_guess['dt4_reentry']/self.rocket_return.scaleT)
+                opti.set_initial(dt4_before_landing, init_guess['dt4_before_landing']/self.rocket_return.scaleT)
+                opti.set_initial(dt4_landing, init_guess['dt4_landing']/self.rocket_return.scaleT)
+                opti.set_initial(x4_before_reentry, self.rocket_return.scale_x(init_guess['x4_before_reentry']))
+                opti.set_initial(x4_after_reentryburn, self.rocket_return.scale_x(init_guess['x4_after_reentryburn']))
+                opti.set_initial(u4_reentry, self.rocket_return.scale_u([init_guess['u4_reentry']]))
+                opti.set_initial(x4_before_landing, self.rocket_return.scale_x(init_guess['x4_before_landing']))
+                for k in range(init_guess['x4_landing'].shape[1]):
+                    opti.set_initial(x4_landing[:,k], self.rocket_return.scale_x(init_guess['x4_landing'][:,k]))
+                for k in range(init_guess['u4_landing'].shape[0]):
+                    opti.set_initial(u4_landing[k], self.rocket_return.scale_u([init_guess['u4_landing'][k]]))
+                if RecoveryStrategy == 'RTLS':
+                    opti.set_initial(x4_0, self.boostback.scale_x(init_guess['x4_0']))
+                    opti.set_initial(dt4_boostback, init_guess['dt4_boostback']/self.boostback.scaleT)
+                    opti.set_initial(x4_boostback, self.boostback.scale_x(init_guess['x4_boostback']))
+                    opti.set_initial(u4_boostback, self.boostback.scale_u(init_guess['u4_boostback']))
+                else:
+                    opti.set_initial(x4_0, self.rocket_return.scale_x(init_guess['x4_0']))
         try:
             sol = opti.solve()
 
@@ -1023,6 +1062,9 @@ class LV_Optimization(VLType):
         self.Solution['Qdyn2_sol'] = Qdyn2_sol
         self.Solution['Alpha2_sol'] = Alpha2_sol
         self.Solution['acc2_sol'] = acc2_sol    
+        self.Solution['i2_sol'] = i2_sol
+        self.Solution['apogee2_sol'] = i2_sol
+        self.Solution['perigee2_sol'] = i2_sol
         self.Solution['Isp2_sol'] = Isp2_sol
         self.Solution['alt3_sol'] = alt3_sol
         self.Solution['acc3_sol'] = acc3_sol

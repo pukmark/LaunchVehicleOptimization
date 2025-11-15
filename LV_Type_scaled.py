@@ -39,10 +39,13 @@ class DispesrionFactorsType(PythonMsg):
     SecondStageThrust: int = field(default = 1.0)
     FirstStageCx0: int = field(default = 1.0)
     BoosterStageCx0: int = field(default = 1.0)
-    FirstStageDeltaInertMass: int = field(default = 0.0)
-    SecondStageDeltaInertMass: int = field(default = 0.0)
+    FirstStage_EmptyMass: int = field(default = 0.0)
+    SecondStage_EmptyMass: int = field(default = 0.0)
+    FirstStage_PropMass: int = field(default = 0.0)
+    SecondStage_PropMass: int = field(default = 0.0)
     AtmosphereDensity: int = field(default = 1.0)
     LaunchAltDelta: int = field(default = 0.0)
+    StagePartitionDelta: int = field(default = 0.0)
 
 @dataclass
 class VLType(PythonMsg):
@@ -81,7 +84,7 @@ class VLType(PythonMsg):
     FirstStage_MaxDynamicPressure: float = field(default = 30.0 * 10**3) # [Pa]
     FirstStage_StageSeparationMaxDynamicPressure: float = field(default = 0.5 * 10**3) # [Pa]
 
-    Booster_Cd0: float = field(default = 1.3)
+    Booster_Cd0: float = field(default = 1.0)
     Booster_Cda2: float = field(default = 2.0)
     Booster_CLa: float = field(default = 0.6) # [1/rad]
     Booster_MaxDynamicPressure: float = field(default = 100.0 * 10**3) # [Pa]
@@ -221,6 +224,17 @@ class VLType(PythonMsg):
 
     def ApplyScenarioDispersionToLV(self, DispesrionFactors: DispesrionFactorsType):
 
+        FirstStage_MassRatio = self.EmptyFirstStageMass/self.FirstStagePropellentMass
+        SecondStage_MassRatio = self.EmptySecondStageMass/self.SecondStagePropellentMass
+        TotalProp = self.FirstStagePropellentMass + self.SecondStagePropellentMass
+        NominalPartition = self.FirstStagePropellentMass / TotalProp
+        CurrentPartition = NominalPartition + DispesrionFactors.StagePartitionDelta
+        self.FirstStagePropellentMass = CurrentPartition * TotalProp
+        self.SecondStagePropellentMass = (1-CurrentPartition) * TotalProp
+        self.EmptyFirstStageMass = FirstStage_MassRatio * self.FirstStagePropellentMass
+        self.EmptySecondStageMass = SecondStage_MassRatio * self.SecondStagePropellentMass
+
+
         self.FirstStage_SL_Isp *= DispesrionFactors.FirstStageIsp
         self.FirstStage_Vac_Isp *= DispesrionFactors.FirstStageIsp
         self.SecondStage_Vac_Isp *= DispesrionFactors.SecondStageIsp
@@ -229,8 +243,10 @@ class VLType(PythonMsg):
         self.SecondStage_Thrust *= DispesrionFactors.SecondStageThrust        
         self.FirstStage_Cd0 *= DispesrionFactors.FirstStageCx0
         self.Booster_Cd0 *= DispesrionFactors.BoosterStageCx0
-        self.FirstStage_EmptyMass += DispesrionFactors.FirstStageDeltaInertMass
-        self.SecondStage_EmptyMass += DispesrionFactors.SecondStageDeltaInertMass
+        self.EmptyFirstStageMass += DispesrionFactors.FirstStage_EmptyMass
+        self.EmptySecondStageMass += DispesrionFactors.SecondStage_EmptyMass
+        self.FirstStagePropellentMass += DispesrionFactors.FirstStage_PropMass
+        self.SecondStagePropellentMass += DispesrionFactors.SecondStage_PropMass
         self.LaunchAltitude += DispesrionFactors.LaunchAltDelta
 
         self.__post_init__()
@@ -491,7 +507,7 @@ class LaunchVehicle_ECI(VLType):
 
 @dataclass
 class BoosterReturn_2D(VLType):
-    def __init__(self, atmosphere: Atm_Type.AtmosphereType, LV_Configuration: int, ScenarioDispersion: DispesrionFactorsType, N: int = 10):
+    def __init__(self, atmosphere: Atm_Type.AtmosphereType, LV_Configuration: int, ScenarioDispersion: DispesrionFactorsType, N: int = 20):
         super().__init__(atmosphere=atmosphere)
 
         if LV_Configuration == 2: # Starship database
