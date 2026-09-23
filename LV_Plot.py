@@ -1,7 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('TKAgg')
 import casadi as ca
 
 import LV_Type_scaled as LV_Type
@@ -69,7 +68,7 @@ class LV_plot():
 
     def plot_iteration(self, i, x, Target_Orbit, payload_mass_predefined, optimize_stage_partition:bool = False):
 
-        if i % 1 > 0:
+        if i % 3 > 0:
             return
 
         i0 = 0
@@ -114,7 +113,8 @@ class LV_plot():
             t4_landing = np.array([0,0])
 
         t1_vec = np.linspace(0.0, dt1*self.rocket_booster.N, self.rocket_booster.N+1)
-        t21_vec = t1_vec[-1] + np.linspace(0.0, dt21*self.rocket_eci.N[0], self.rocket_eci.N[0]+1).reshape(-1,1)
+        t21_start = t1_vec[-1] + self.rocket_eci.SecondStage_CoastTimeAfterSep
+        t21_vec = t21_start + np.linspace(0.0, dt21*self.rocket_eci.N[0], self.rocket_eci.N[0]+1).reshape(-1,1)
         t22_vec = t21_vec[-1] + np.linspace(0.0, dt22*self.rocket_eci.N[1], self.rocket_eci.N[1]+1).reshape(-1,1)
         t2_vec = np.vstack((t21_vec[:-1,:],t22_vec)).reshape(-1)
 

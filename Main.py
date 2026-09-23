@@ -2,19 +2,56 @@
 
 import os
 os.system('clear')
+from dataclasses import fields
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
 from concurrent.futures import ProcessPoolExecutor
-matplotlib.use('TKAgg')
 import matplotlib.gridspec as gridspec
 
 import LV_Optimization_Type as LVopt_Type
 from LV_Type_scaled import DispesrionFactorsType
 
+# Global figures/axes used by the plotting helpers
+fig_first_stage = None
+fig_second_stage = None
+fig_return_stage = None
+ax1_traj = ax1_vel = ax1_input = ax1_Isp = ax1_mass = ax1_q = None
+ax2_vel = ax2_input = ax2_mass = ax2_alt = ax2_inc = ax2_ap = None
+ax3_traj = ax3_vel = ax3_alt = ax3_heat = ax3_mass = ax3_q = None
+
+
+def ensure_first_stage_axes():
+    """Lazily create the first-stage plotting axes."""
+    global fig_first_stage, ax1_traj, ax1_vel, ax1_input, ax1_Isp, ax1_mass, ax1_q
+    if ax1_traj is not None:
+        return
+    fig_first_stage, axes = plt.subplots(2, 3, figsize=(15, 10))
+    ax1_traj, ax1_vel, ax1_input = axes[0]
+    ax1_Isp, ax1_mass, ax1_q = axes[1]
+
+
+def ensure_second_stage_axes():
+    """Lazily create the second-stage plotting axes."""
+    global fig_second_stage, ax2_vel, ax2_input, ax2_mass, ax2_alt, ax2_inc, ax2_ap
+    if ax2_vel is not None:
+        return
+    fig_second_stage, axes = plt.subplots(3, 2, figsize=(14, 12))
+    (ax2_vel, ax2_input), (ax2_mass, ax2_alt), (ax2_inc, ax2_ap) = axes
+
+
+def ensure_return_stage_axes():
+    """Lazily create the return-stage plotting axes."""
+    global fig_return_stage, ax3_traj, ax3_vel, ax3_alt, ax3_heat, ax3_mass, ax3_q
+    if ax3_traj is not None:
+        return
+    fig_return_stage, axes = plt.subplots(3, 2, figsize=(14, 12))
+    (ax3_traj, ax3_vel), (ax3_alt, ax3_heat), (ax3_mass, ax3_q) = axes
+
 
 def plot_First_Stage():
+    ensure_first_stage_axes()
 
     ax1_traj.plot(Solution['x1'][0,:]/1000, Solution['x1'][1,:]/1000, color=col, label='1st Stage', linewidth=2)
     ax1_traj.set_title('Trajectory', fontsize=20)
@@ -67,6 +104,7 @@ def plot_First_Stage():
     plt.savefig("FirstStage_Dynamics.png", dpi=300, bbox_inches="tight")
 
 def plot_Second_Stage():
+    ensure_second_stage_axes()
 
     ax2_vel.plot(Solution['t2_vec'], np.linalg.norm(Solution['x2'][3:6,:], axis=0), color=col, linewidth=2)
     ax2_vel.plot(Solution['t3_vec'], np.linalg.norm(Solution['x3'][3:6,:], axis=0), color=col, linewidth=2)
@@ -138,6 +176,7 @@ def plot_Second_Stage():
 
 
 def plot_Return_Stage():
+    ensure_return_stage_axes()
 
     if RecoveryStrategy == 'EXP': return
 
@@ -206,6 +245,10 @@ def run_dispersion_case(i):
     DispesrionVec = DispesrionList[i]
     DispesrionParam = DispesrionParamList[i]
     LV_Configuration = ConfigList[i]
+    # Keep the historical sweep name as an alias for the dataclass field.
+    dispersion_field = {'StagePartition': 'StagePartitionDelta'}.get(DispesrionParam, DispesrionParam)
+    if dispersion_field not in {item.name for item in fields(DispesrionFactorsType)}:
+        raise ValueError(f'Unknown dispersion parameter: {DispesrionParam}')
 
     for iOrbit, Target_Orbit in enumerate(Target_Orbits):
         print('#'+'='*40+f" Orbit Name: {Target_Orbit['Name']} "+"="*40)
@@ -214,15 +257,9 @@ def run_dispersion_case(i):
             init_guess = 0.5
             for iVal, DispesrionValue in enumerate(DispesrionVec):
                 DispesrionFactors = DispesrionFactorsType()
-                if DispesrionParam == 'FirstStageIsp':
-                    DispesrionFactors.FirstStageIsp = DispesrionValue
-                if DispesrionParam == 'SecondStageIsp':
-                    DispesrionFactors.SecondStageIsp = DispesrionValue
-                if DispesrionParam == 'FirstStageThrust':
-                    DispesrionFactors.FirstStageThrust = DispesrionValue
-                if DispesrionParam == 'SecondStageThrust':
-                    DispesrionFactors.SecondStageThrust = DispesrionValue
+                setattr(DispesrionFactors, dispersion_field, float(DispesrionValue))
                 LVopt = LVopt_Type.LV_Optimization(DispesrionFactors, LV_Configuration)
+                Solution = {'success': False, 'return_status': 'Not attempted'}
 
                 for _ in range(5):
                     try:
@@ -236,11 +273,13 @@ def run_dispersion_case(i):
                             break
                         else:
                             init_guess = np.random.uniform(0.2, 0.8)
-                    except:
+                    except Exception as exc:
+                        Solution = {'success': False, 'return_status': str(exc)}
+                        print(f'{RecoveryStrategy} attempt failed: {exc}')
                         init_guess = np.random.uniform(0.2, 0.8)
 
                 else:
-                    print(RecoveryStrategy+' Failed!!!')
+                    print(f"{RecoveryStrategy} failed: {Solution.get('return_status', 'Unknown solver failure')}")
 
                 if Solution['success']:
                     Results.append(Solution['payload_mass'])
@@ -513,8 +552,13 @@ def run_dispersion_case(i):
                 ax_3d_xz.set_ylabel('Z (km)')
                 ax_3d_xz.grid('on')
 
-                # Set aspect and limits
-                ax_3d.set_aspect('equal')
+                # Match box proportions to the axis spans for equal data units.
+                # Older Matplotlib versions only support aspect='auto' in 3D.
+                ax_3d.set_box_aspect([
+                    np.ptp(ax_3d.get_xlim3d()),
+                    np.ptp(ax_3d.get_ylim3d()),
+                    np.ptp(ax_3d.get_zlim3d()),
+                ])
                 ax_3d.set_xlabel('X (km)')
                 ax_3d.set_ylabel('Y (km)')
                 ax_3d.set_zlabel('Z (km)')
@@ -569,7 +613,7 @@ if __name__ == '__main__':
     payload_mass_predefined = -1 # payload mass defined in kg, maximmize the payload mass if set to non-positive value
     Plot_interm = 0
     LV_Configuration = 1 # 1 - Falcon 9, 2 - Starship
-    Plot_Results = 0 # 1 - Plot telemetry, 2- Plot 3d trajectory
+    Plot_Results = 2 # 1 - Plot telemetry, 2- Plot 3d trajectory
 
     ConfigName = 'Falcon9' if LV_Configuration==1 else 'Starship'
 
@@ -593,10 +637,10 @@ if __name__ == '__main__':
     #                     "i": np.deg2rad(98.6),})       # inclination [rad]
     
     ### Target orbit parameters for MEO
-    Target_Orbits.append({"Name": 'MEO',                # Name
-                        "apogee": R0 + 20196.0*1e3,   # semi-major axis
-                        "perigee": R0 + 1193.0*1e3,   # semi-minor axis
-                        "i": np.deg2rad(55.0),})       # inclination [rad]
+    # Target_Orbits.append({"Name": 'MEO',                # Name
+    #                     "apogee": R0 + 20196.0*1e3,   # semi-major axis
+    #                     "perigee": R0 + 1193.0*1e3,   # semi-minor axis
+    #                     "i": np.deg2rad(55.0),})       # inclination [rad]
     
     ### Target orbit parameters for GTO
     # Target_Orbits.append({"Name": 'GTO',                # Name
@@ -642,13 +686,13 @@ if __name__ == '__main__':
     DispesrionParamList.append('FirstStage_EmptyMass')
     ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(-4000,4000, 7))
-    DispesrionParamList.append('SecondStage_EmptyMass')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(-4000,4000, 7))
+    # DispesrionParamList.append('SecondStage_EmptyMass')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(-4000,4000, 9))
-    DispesrionParamList.append('FirstStage_EmptyMass')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(-4000,4000, 9))
+    # DispesrionParamList.append('FirstStage_EmptyMass')
+    # ConfigList.append(2)
 
     # DispesrionList.append(np.linspace(-4000,4000, 9))
     # DispesrionParamList.append('SecondStage_EmptyMass')

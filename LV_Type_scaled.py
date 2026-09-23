@@ -77,35 +77,36 @@ class VLType(PythonMsg):
     #Aerodynamic Properties
     Sref: float = field(default = 0.0)
     FirstStage_CLa: float = field(default = 0.5) # [1/rad]
-    FirstStage_Cd0: float = field(default = 1.0)
+    FirstStage_Cd0: float = field(default = 1.5)
     FirstStage_Cda2: float = field(default = 3.0)
     FirstStage_MaxAlpha: float = field(default = 0.1745) # [rad]
-    FairingSeparationAltitude: float = field(default = 100.0 * 10**3) # [m]
-    FirstStage_MaxDynamicPressure: float = field(default = 30.0 * 10**3) # [Pa]
+    FairingSeparationAltitude: float = field(default = 85.0 * 10**3) # [m]
+    FirstStage_MaxDynamicPressure: float = field(default = 32.0 * 10**3) # [Pa]
     FirstStage_StageSeparationMaxDynamicPressure: float = field(default = 0.5 * 10**3) # [Pa]
 
-    Booster_Cd0: float = field(default = 1.0)
+    Booster_Cd0: float = field(default = 2.0)
     Booster_Cda2: float = field(default = 2.0)
     Booster_CLa: float = field(default = 0.6) # [1/rad]
     Booster_MaxDynamicPressure: float = field(default = 100.0 * 10**3) # [Pa]
-    Booster_MaxHeatFlux: float = field(default = 100.0 * 10**3) # [Pa]
+    Booster_MaxHeatFlux: float = field(default = 110.0 * 10**3) # [Pa]
     Booster_k_empirical: float = field(default = 2.0e-4) # [-]
 
     #Propulsion Properties
     FirstStage_SL_Isp: float = field(default = 282.0) # [s]
     FirstStage_Vac_Isp: float = field(default = 310.0) # [s]
     FirstStage_SL_Thrust: float = field(default = 845.0 * 10**3 * 9) # [N]
-    FirstStage_Vac_Thrust: float = field(default = 914.0* 10**3 * 9) # [N]
-    FirstStage_MinThrust_Factor: float = field(default = 0.5) # [-]
-    FirstStage_MinThrust_IspFactor: float = field(default = 0.975) # [-]
+    FirstStage_Vac_Thrust: float = field(default = 0.93*914.0* 10**3 * 9) # [N]
+    FirstStage_MinThrust_Factor: float = field(default = 0.33) # [-]
+    FirstStage_MinThrust_IspFactor: float = field(default = 0.9) # [-]
     FirstStage_Ae: float = field(default = 43.79) # [m^2]
     
+    SecondStage_CoastTimeAfterSep: float = field(default = 10.0) # [sec]
     SecondStage_Thrust: float = field(default = 981.0 * 10**3) # [N]
     SecondStage_Vac_Isp: float = field(default = 348.0) # [s]
     SecondStage_MinThrust_Factor: float = field(default = 0.5) # [-]
     SecondStage_MinThrust_IspFactor: float = field(default = 0.975) # [-]
 
-    Payload_Max_acc: float = field(default = 4.0*9.81) # [m/s^2]
+    Payload_Max_acc: float = field(default = 3.75*9.81) # [m/s^2]
 
     #Gravity and earth properties
     g0: float = field(default = None)
@@ -299,15 +300,15 @@ class BoosterLaunchVehicle_2D(VLType):
         g_angle = ca.asin(x / (self.R0 + z))
         v2 = vx**2 + vz**2
 
-        Drag = 0.5 * rho * v2 * self.Sref * (self.FirstStage_Cd0*ScenarioDispersion.FirstStageCx0 + self.FirstStage_Cda2 * alpha ** 2)
+        Drag = 0.5 * rho * v2 * self.Sref * (self.FirstStage_Cd0 + self.FirstStage_Cda2 * alpha ** 2)
         Lift = 0.5 * rho * v2 * self.Sref * (self.FirstStage_CLa * alpha)
         gama_v = ca.atan2(vz, vx)
 
-        Thrust = ScenarioDispersion.FirstStageThrust * Tfac * (self.FirstStage_Vac_Thrust - (self.FirstStage_Vac_Thrust - self.FirstStage_SL_Thrust) * pres / atmosphere.p_fun(0))
-        Isp = ScenarioDispersion.FirstStageIsp * (self.FirstStage_Vac_Isp - (self.FirstStage_Vac_Isp - self.FirstStage_SL_Isp) * pres / atmosphere.p_fun(0)) * (1.0 - (1.0 - self.FirstStage_MinThrust_IspFactor) * (1.0 - Tfac) / (1.0 - self.FirstStage_MinThrust_Factor))
+        Thrust = Tfac * (self.FirstStage_Vac_Thrust - (self.FirstStage_Vac_Thrust - self.FirstStage_SL_Thrust) * pres / atmosphere.p_fun(0))
+        Isp = (self.FirstStage_Vac_Isp - (self.FirstStage_Vac_Isp - self.FirstStage_SL_Isp) * pres / atmosphere.p_fun(0)) * (1.0 - (1.0 - self.FirstStage_MinThrust_IspFactor) * (1.0 - Tfac) / (1.0 - self.FirstStage_MinThrust_Factor))
 
         Fx = -Drag * ca.cos(gama_v) - Lift * ca.sin(gama_v) + Thrust * ca.cos(alpha + gama_v)
-        Fz = -Drag * ca.sin(gama_v) - Lift * ca.cos(gama_v) + Thrust * ca.sin(alpha + gama_v)
+        Fz = -Drag * ca.sin(gama_v) + Lift * ca.cos(gama_v) + Thrust * ca.sin(alpha + gama_v)
 
         dx = vx
         dz = vz
@@ -411,14 +412,17 @@ class LaunchVehicle_ECI(VLType):
         # local origin altitude
         R =  self.R0 / np.sqrt(1 - self.e**2 * ca.sin(lat)**2)
 
-        x = (R + self.LaunchAltitude) * ca.cos(lat) * ca.cos(lon)
-        y = (R + self.LaunchAltitude) * ca.cos(lat) * ca.sin(lon)
-        z = ((1 - self.e**2) * R + self.LaunchAltitude) * ca.sin(lat)
+        # Local z already includes launch altitude, so the position origin is
+        # on the reference surface, matching local_to_alt and the 2D dynamics.
+        x = R * ca.cos(lat) * ca.cos(lon)
+        y = R * ca.cos(lat) * ca.sin(lon)
+        z = (1 - self.e**2) * R * ca.sin(lat)
 
         eci_origin =  ca.vertcat(x, y, z)
         # local origin velocity
-        v_x = -self.omega_earth * y
-        v_y = self.omega_earth * x
+        launch_radius = R + self.LaunchAltitude
+        v_x = -self.omega_earth * launch_radius * ca.cos(lat) * ca.sin(lon)
+        v_y = self.omega_earth * launch_radius * ca.cos(lat) * ca.cos(lon)
         v_z = 0.0
         origin_vel_eci = ca.vertcat(v_x, v_y, v_z)
 
@@ -452,57 +456,7 @@ class LaunchVehicle_ECI(VLType):
         self.local_to_eci_func = ca.Function('local_to_eci', [local_pos_m, local_vel_mps, az], [pos_eci, vel_eci])
 
     def local_to_eci_calc(self, p, v, az):
-
-        local_pos_m = p
-        local_vel_mps = v
-        az = az
-
-        # local origin in ECI:
-        lat = np.deg2rad(self.LaunchLatitude)
-        lon = np.deg2rad(self.LaunchLongitude)
-
-        # local origin altitude
-        R =  self.R0 / np.sqrt(1 - self.e**2 * ca.sin(lat)**2)
-
-        x = (R + self.LaunchAltitude) * ca.cos(lat) * ca.cos(lon)
-        y = (R + self.LaunchAltitude) * ca.cos(lat) * ca.sin(lon)
-        z = ((1 - self.e**2) * R + self.LaunchAltitude) * ca.sin(lat)
-
-        eci_origin =  ca.vertcat(x, y, z)
-        # local origin velocity
-        v_x = -self.omega_earth * y
-        v_y = self.omega_earth * x
-        v_z = 0.0
-        origin_vel_eci = ca.vertcat(v_x, v_y, v_z)
-
-        # Build local to ECI rotation matrix
-        # Local Up (Z)
-        z = ca.vertcat(ca.cos(lat) * ca.cos(lon), ca.cos(lat) * ca.sin(lon), ca.sin(lat))
-
-        # Local North
-        n = ca.vertcat(-ca.sin(lat) * ca.cos(lon), -ca.sin(lat) * ca.sin(lon), ca.cos(lat))
-
-        # Local East
-        e = ca.vertcat(-ca.sin(lon), ca.cos(lon), 0.0)
-
-        # X-axis: along azimuth (from North and East)
-        x = ca.cos(az) * n + ca.sin(az) * e
-
-        # Y-axis: complete right-hand rule
-        y = ca.vertcat(z[1]*x[2] - z[2]*x[1], z[2]*x[0] - z[0]*x[2], z[0]*x[1] - z[1]*x[0])
-
-        # Build rotation matrix
-        R_local_to_eci = ca.horzcat(x, y, z)
-
-        # Transform local vectors
-        local_pos_eci = R_local_to_eci @ local_pos_m
-        local_vel_eci = R_local_to_eci @ local_vel_mps
-
-        # Final ECI state
-        pos_eci = eci_origin + local_pos_eci
-        vel_eci = origin_vel_eci + local_vel_eci
-
-        return
+        return self.local_to_eci_func(p, v, az)
 
 
 @dataclass
@@ -542,7 +496,7 @@ class BoosterReturn_2D(VLType):
         Thrust = sTfac * self.scaleU[0]
 
         Alt = ca.norm_2(ca.vertcat(x, self.R0 + z)) - self.R0
-        rho = atmosphere.rho_fun(Alt)
+        rho = atmosphere.rho_fun(Alt) * ScenarioDispersion.AtmosphereDensity
         g = self.g0 * self.R0**2 / (x**2 + (self.R0 + z)**2)
         g_angle = ca.asin(x / (self.R0 + z))
         Drag = 0.5 * rho * (vx**2 + vz**2) * self.Sref * self.Booster_Cd0
@@ -608,12 +562,12 @@ class BoostBackBurn_2D(VLType):
         vx = svx * self.scaleX[2]
         vz = svz * self.scaleX[3]
         m = sm * self.scaleX[4]
-        Tx = sTx * self.scaleU[0] * ScenarioDispersion.FirstStageThrust
-        Tz = sTz * self.scaleU[1] * ScenarioDispersion.FirstStageThrust
+        Tx = sTx * self.scaleU[0]
+        Tz = sTz * self.scaleU[1]
 
         g = self.g0 * self.R0**2 / (x**2 + (self.R0 + z)**2)
         g_angle = ca.asin(x / (self.R0 + z))
-        Isp = self.FirstStage_Vac_Isp * ScenarioDispersion.FirstStageIsp
+        Isp = self.FirstStage_Vac_Isp
 
         dx = vx
         dz = vz

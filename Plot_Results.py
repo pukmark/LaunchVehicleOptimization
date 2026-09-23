@@ -12,12 +12,12 @@ color_vec = ['r','b','g','b','k','y','c','m','olive']
 
 plot_isp = False
 plot_thrust = False
-plot_mass = False
+plot_mass = True
 plot_firstCx0 = False
 plot_boosterCx0 = False
 plot_alt = False
 plot_partition = False
-plot_propmass = True
+plot_propmass = False
 
 
 import matplotlib.pyplot as plt
@@ -486,9 +486,9 @@ Starship_TLI_EXP_LaunchAltDelta=0.001*np.array([57402.658, 59635.840, 61748.090,
 Starship_TLI_ASDS_LaunchAltDelta=0.001*np.array([42514.774, 46241.229, 46900.929, 49420.110, 50994.535, 52569.793])
 Starship_TLI_RTLS_LaunchAltDelta=0.001*np.array([30059.861, 31299.220, 32403.618, 33435.221, 34390.794, 35219.578])
 #======================================== Orbit Name: LEO ========================================
-Falcon9_LEO_EXP_FirstStage_EmptyMass=0.001*np.array([24929.201, 24758.852, 24590.344, 24423.652, 24258.750, 24095.692, 23934.342, 23774.731, 23616.812])
-Falcon9_LEO_ASDS_FirstStage_EmptyMass=0.001*np.array([22071.280, 21894.910, 21536.875, 21380.615, 21136.592, 20899.961, 20669.512, 20443.985, 20222.355])
-Falcon9_LEO_RTLS_FirstStage_EmptyMass=0.001*np.array([18757.516, 18382.631, 18005.132, 17581.418, 17193.287, 16838.623, 16493.686, 16144.107, 15819.443])
+Falcon9_LEO_EXP_FirstStage_EmptyMass=0.001*np.array([24754.01, 24585.49, 24418.34, 24252.67, 24088.73, 23926.56, 23765.98, 23606.94, 23449.54])
+Falcon9_LEO_ASDS_FirstStage_EmptyMass=0.001*np.array([22330.11, 22070.51, 21816.30, 21567.06, 21322.65, 21082.74, 20846.33, 20613.67, 20385.02])
+Falcon9_LEO_RTLS_FirstStage_EmptyMass=0.001*np.array([18985.87, 18709.50, 18444.89, 18182.89, 17927.63, 17678.86, 17419.28, 17179.44, 16941.69])
 #======================================== Orbit Name: MEO ========================================
 Falcon9_MEO_EXP_FirstStage_EmptyMass=0.001*np.array([9473.842, 9389.502, 9306.188, 9223.957, 9142.798, 9062.658, 8983.232, 8904.625, 8827.022])
 Falcon9_MEO_ASDS_FirstStage_EmptyMass=0.001*np.array([7986.680, 7869.428, 7756.537, 7647.094, 7540.683, 7436.870, 7335.234, 7235.130, 7133.140])

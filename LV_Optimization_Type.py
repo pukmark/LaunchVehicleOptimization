@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+import hashlib
+import json
+import os
+from pathlib import Path
 import numpy as np
 import casadi as ca
 import Atmosphere_Type as Atm_Type
@@ -77,7 +81,22 @@ class LV_Optimization(VLType):
                          payload_mass_predefined: float = -1.0, 
                          Target_Orbit = dict, 
                          Plot_interm: bool = False, 
-                         init_guess = None):
+                         print_ipopt: bool = False,
+                         init_guess = None,
+                         ipopt_options = None,
+                         output_dir = 'Results'):
+        if RecoveryStrategy not in {'EXP', 'ASDS', 'RTLS'}:
+            raise ValueError(f'Unknown recovery strategy: {RecoveryStrategy}')
+        if init_guess is None:
+            init_guess = 0.5
+        elif isinstance(init_guess, dict):
+            init_guess = init_guess.copy()
+            if RecoveryStrategy != 'EXP' and init_guess.get('solution_units') != 'SI':
+                # Legacy result files stored these two fields in solver units.
+                init_guess['dt4_landing'] = init_guess['dt4_landing'] * self.rocket_return.scaleT
+                init_guess['u4_reentry'] = float(np.asarray(init_guess['u4_reentry']).item()) * self.rocket_return.scaleU[0]
+
+        Target_Orbit = dict(Target_Orbit)
         
         Target_Orbit["a"] = 0.5 * (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # semi-major axis
         Target_Orbit["e"] = (Target_Orbit["apogee"] - Target_Orbit["perigee"]) / (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # eccentricity    
@@ -136,7 +155,7 @@ class LV_Optimization(VLType):
 
         # set the final state constraints    
         x1f = self.booster.unscale_x(x1[:,self.booster.N])
-        q1f = 0.5 * (x1f[2]**2 + x1f[3]**2) * self.atmosphere.rho_fun(self.booster.local_to_alt(x1f))
+        q1f = self.booster.dynamic_pressure_fun(x1[:,self.booster.N])
         opti.subject_to(q1f/self.booster.FirstStage_StageSeparationMaxDynamicPressure <= 1.0)
         if RecoveryStrategy == 'EXP':
             opti.subject_to(x1f[4] >= self.eci.EmptyFirstStageMass + self.eci.SecondStage_FullMass + payload_mass)
@@ -152,7 +171,10 @@ class LV_Optimization(VLType):
         opti.subject_to(LaunchAz <= np.pi/2)
         eci_pos, eci_vel = self.eci.local_to_eci_func(ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz)
         x2_init = ca.vertcat(eci_pos, eci_vel, self.eci.SecondStage_FullMass + payload_mass)
-        opti.subject_to(x2[:,0] == self.eci.scale_x(x2_init))
+        x2_beforeCoast = self.eci.scale_x(x2_init)
+        x2_afterCoast = self.eci.dynamics_kp1(x2_beforeCoast, 1e-6*np.ones((self.eci.nu,)), self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT)
+        
+        opti.subject_to(x2[:,0] == x2_afterCoast)
         for k in range(self.eci.N[0]):
             # set the dynamics
             opti.subject_to(x2[:,k+1] == self.eci.dynamics_kp1(x2[:,k], u2[:,k], dt2))
@@ -250,12 +272,12 @@ class LV_Optimization(VLType):
             else:
                 opti.subject_to(x4_0 == self.rocket_return.scale_x(x4_init_unscaled))
                 opti.subject_to(x4_before_reentry == self.rocket_return.dynamics_kp1_M50(x4_0, 0, dt4_ballistic))
-            opti.subject_to(self.rocket_return.local_to_alt(self.rocket_return.unscale_x(x4_before_reentry))/50000.0 >= 1.0)
+            opti.subject_to(self.rocket_return.local_to_alt(self.rocket_return.unscale_x(x4_before_reentry))/70000.0 >= 1.0)
 
             # rentry burn
             opti.subject_to(x4_after_reentryburn  == self.rocket_return.dynamics_kp1_M20(x4_before_reentry, u4_reentry, dt4_reentry))
             ### set the thrust constraints
-            opti.subject_to(u4_reentry[0] <= 1.0)
+            opti.subject_to(u4_reentry[0] <= 0.66)
             opti.subject_to(u4_reentry[0] >= self.rocket_return.FirstStage_MinThrust_Factor)
 
             ### After Reentry, before landing burn (ballistic)
@@ -282,7 +304,7 @@ class LV_Optimization(VLType):
             if RecoveryStrategy == 'RTLS':
                 # opti.subject_to(ca.norm_2(x4_landing[0:2,self.rocket_return.N]) == 0.0)
                 opti.subject_to(x4_landing[0,self.rocket_return.N] == 0.0)
-                opti.subject_to(x4_landing[1,self.rocket_return.N] == 0.0)
+                opti.subject_to(x4_landing[1,self.rocket_return.N] == self.rocket_return.LaunchAltitude/self.rocket_return.scaleX[1])
             else:
                 # zero altitude at the end of the flight
                 opti.subject_to(self.rocket_return.local_to_alt(x4f_landing_unscaled) == 0.0) # landing altitude
@@ -297,22 +319,28 @@ class LV_Optimization(VLType):
         cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]) )
         if RecoveryStrategy != 'EXP':
             cost += 0.5*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) * dt4_landing
-        cost += -payload_mass_scaled*100
         if type(payload_mass_scaled) != ca.MX:
             cost += -x3f[6]
+            if RecoveryStrategy != 'EXP':
+                cost += -x4_landing[4,self.rocket_return.N]
+        else:
+            cost += -payload_mass_scaled*100
         opti.minimize(cost)
 
 
         # set the solver
         
-        opts = {"print_time": 0,  # Print timing, 
+        hsl_library = os.environ.get('LV_IPOPT_HSL_LIBRARY', '/usr/local/lib/libcoinhsl.so')
+        linear_solver = os.environ.get('LV_IPOPT_LINEAR_SOLVER', 'ma97' if Path(hsl_library).is_file() else 'mumps')
+        ipopt_print_freq = 5 if print_ipopt is True else 0
+        opts = {"print_time": 0,  # Print timing,
                 "ipopt": {
-                "linear_solver": "ma97", "hsllib": "/usr/local/lib/libcoinhsl.so",  # MA97 solver Path to HSL library
+                "linear_solver": linear_solver,
                 "mu_strategy": "adaptive",  # "adaptive" or "adaptive" Strategy for updating the barrier parameter
                 "tol": 1e-6,  # Convergence tolerance
-                "max_iter": 250,  # Max iterations
-                "print_level": 0,  # Verbosity level
-                'print_frequency_iter': 5,  # print_frequency_iter
+                "max_iter": 500,  # Max iterations
+                "print_level": ipopt_print_freq,  # Verbosity level
+                'print_frequency_iter': 1,  # print_frequency_iter
                 # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter
                 "timing_statistics": "no", # Enable timing statistics
                 # "nlp_scaling_method": "none", # 'none' 'gradient-based', # Scaling method
@@ -328,6 +356,9 @@ class LV_Optimization(VLType):
                 # "bound_relax_factor": 1e-8,  # Bound infeasibility relaxation very tight (prevents jumps)
                 # "bound_push": 1e-8,  # Careful step near bounds
             }}
+        if linear_solver.startswith('ma'):
+            opts['ipopt']['hsllib'] = hsl_library
+        opts['ipopt'].update(ipopt_options or {})
         if Plot_interm:
             LV_plot.plot_init()
             opti.callback(lambda i: LV_plot.plot_iteration(i, opti.debug.value(opti.debug.x), Target_Orbit, payload_mass_predefined))
@@ -390,7 +421,7 @@ class LV_Optimization(VLType):
                     u1_guess[0,k] = 1.0
                 else:
                     u1_guess[0,k] = 0.70
-                if np.atan2(xk[3], xk[2]) > 87.0*np.pi/180.0 and np.linalg.norm(xk[2:4]) > 75.0:
+                if np.arctan2(xk[3], xk[2]) > 87.0*np.pi/180.0 and np.linalg.norm(xk[2:4]) > 75.0:
                     u1_guess[1,k] = -np.deg2rad(1.5) / self.booster.FirstStage_MaxAlpha
                 else:
                     u1_guess[1,k] = 0.0
@@ -419,9 +450,15 @@ class LV_Optimization(VLType):
         x2_guess = np.zeros((self.eci.nx, self.eci.N[0]+1))
         u2_guess = np.zeros((self.eci.nu, self.eci.N[0]))
         x1f_guess = self.booster.unscale_x(x1_guess[:,self.booster.N])
-        pos, vel = self.eci.local_to_eci_func(ca.vertcat(x1f_guess[0], 0.0, x1f_guess[1]), ca.vertcat(x1f_guess[2], 0.0, x1f_guess[3]), LaunchAz_guess)
+        pos, vel = self.eci.local_to_eci_func(
+            ca.vertcat(x1f_guess[0], 0.0, x1f_guess[1]),
+            ca.vertcat(x1f_guess[2], 0.0, x1f_guess[3]), LaunchAz_guess)
         x2_init = ca.vertcat(pos, vel, self.eci.SecondStage_FullMass + payload_mass_guess)
-        x2_guess[:,0] = self.eci.scale_x(x2_init).full().flatten()
+        # Match the constraint: separate, transform to ECI, then coast until ignition.
+        x2_guess[:,0] = self.eci.dynamics_kp1(
+            self.eci.scale_x(x2_init), [0, 0, 0],
+            self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT).full().flatten()
+        alt2_initial_guess = self.eci.eci_to_alt(self.eci.unscale_x(x2_guess[:,0]))
         iter=0
         while iter < 10:
             for k in range(self.eci.N[0]):
@@ -434,7 +471,7 @@ class LV_Optimization(VLType):
             if abs(alt-self.eci.FairingSeparationAltitude) < 100.0:
                 break
             else:
-                dt2_guess = dt2_guess*(self.eci.FairingSeparationAltitude-alt_N1)/ (alt-alt_N1)
+                dt2_guess = dt2_guess*(self.eci.FairingSeparationAltitude-alt2_initial_guess)/ (alt-alt2_initial_guess)
                 iter += 1
 
     # calculate the initial guess for second stage after fairing separation
@@ -651,7 +688,8 @@ class LV_Optimization(VLType):
                 opti.set_initial(x4_0, self.rocket_return.scale_x(x4_0_guess))
 
         if type(init_guess) == dict:
-            opti.set_initial(payload_mass_scaled, init_guess['payload_mass']/self.booster.scaleX[4])
+            if type(payload_mass_scaled) == ca.MX:
+                opti.set_initial(payload_mass_scaled, init_guess['payload_mass']/self.booster.scaleX[4])
             opti.set_initial(dt1, init_guess['dt1']/self.booster.scaleT)
             opti.set_initial(dt2, init_guess['dt2']/self.eci.scaleT)
             opti.set_initial(dt3, init_guess['dt3']/self.eci.scaleT)
@@ -675,7 +713,7 @@ class LV_Optimization(VLType):
                 opti.set_initial(dt4_landing, init_guess['dt4_landing']/self.rocket_return.scaleT)
                 opti.set_initial(x4_before_reentry, self.rocket_return.scale_x(init_guess['x4_before_reentry']))
                 opti.set_initial(x4_after_reentryburn, self.rocket_return.scale_x(init_guess['x4_after_reentryburn']))
-                opti.set_initial(u4_reentry, self.rocket_return.scale_u([init_guess['u4_reentry']]))
+                opti.set_initial(u4_reentry, self.rocket_return.scale_u(np.asarray(init_guess['u4_reentry']).reshape(-1)))
                 opti.set_initial(x4_before_landing, self.rocket_return.scale_x(init_guess['x4_before_landing']))
                 for k in range(init_guess['x4_landing'].shape[1]):
                     opti.set_initial(x4_landing[:,k], self.rocket_return.scale_x(init_guess['x4_landing'][:,k]))
@@ -688,6 +726,16 @@ class LV_Optimization(VLType):
                     opti.set_initial(u4_boostback, self.boostback.scale_u(init_guess['u4_boostback']))
                 else:
                     opti.set_initial(x4_0, self.rocket_return.scale_x(init_guess['x4_0']))
+        dispersion_values = {key: float(value) for key, value in asdict(self.ScenarioDispersion).items()}
+        case_values = {'configuration': self.LV_Configuration, 'dispersion': dispersion_values,
+                       'apogee': float(Target_Orbit['apogee']), 'perigee': float(Target_Orbit['perigee']),
+                       'inclination': float(Target_Orbit['i']), 'payload': float(payload_mass_predefined)}
+        case_id = hashlib.sha256(json.dumps(case_values, sort_keys=True).encode()).hexdigest()[:16]
+        filename = (f"LV_{RecoveryStrategy}_apogee_{0.001*(Target_Orbit['apogee']-self.booster.R0):.0f}_km_"
+                    f"perigee_{0.001*(Target_Orbit['perigee']-self.booster.R0):.0f}km_"
+                    f"inc_{np.rad2deg(Target_Orbit['i']):.1f}deg_"
+                    f"PL_{max(0,payload_mass_predefined):.0f}kg_Config{self.LV_Configuration}_{case_id}")
+        solve_error = None
         try:
             sol = opti.solve()
 
@@ -722,14 +770,9 @@ class LV_Optimization(VLType):
                     u4_boostback_scaled_sol = np.array(sol.value(u4_boostback))
 
 
-            filename = f"LV_{RecoveryStrategy}_apogee_{0.001*(Target_Orbit['apogee']-self.booster.R0):.0f}_km_" \
-                        f"perigee_{0.001*(Target_Orbit['perigee']-self.booster.R0):.0f}km_" \
-                        f"inc_{np.rad2deg(Target_Orbit['i']):.1f}deg_" \
-                        f"PL_{max(0,payload_mass_predefined):.0f}kg"
-            
-
-
-        except:
+        except RuntimeError as exc:
+            solve_error = str(exc)
+            filename += '_Failed'
             u1_scaled_sol = np.array(opti.debug.value(u1))
             x1_scaled_sol = np.array(opti.debug.value(x1))
             dt1_scaled_sol = np.array(opti.debug.value(dt1))
@@ -760,11 +803,6 @@ class LV_Optimization(VLType):
                     x4_boostback_scaled_sol = np.array(opti.debug.value(x4_boostback))
                     u4_boostback_scaled_sol = np.array(opti.debug.value(u4_boostback))
 
-                    filename = f"LV_{RecoveryStrategy}_apogee_{0.001*(Target_Orbit['apogee']-self.booster.R0):.0f}_km_" \
-                        f"perigee_{0.001*(Target_Orbit['perigee']-self.booster.R0):.0f}km_" \
-                        f"inc_{np.rad2deg(Target_Orbit['i']):.1f}deg_" \
-                        f"PL_{max(0,payload_mass_predefined):.0f}kg_Failed"
-                    
         if Plot_interm:
             LV_plot.plot_close()
 
@@ -849,6 +887,9 @@ class LV_Optimization(VLType):
 
         # save the solution
         self.Solution = {}
+        self.Solution['solution_units'] = 'SI'
+        self.Solution['configuration'] = self.LV_Configuration
+        self.Solution['dispersion'] = dispersion_values
         self.Solution['u1'] = u1_sol
         self.Solution['x1'] = x1_sol
         self.Solution['dt1'] = dt1_sol
@@ -865,10 +906,10 @@ class LV_Optimization(VLType):
             self.Solution['dt4_reentry'] = dt4_reentry_sol
             self.Solution['dt4_ballistic'] = dt4_ballistic_sol
             self.Solution['dt4_before_landing'] = dt4_before_landing_sol
-            self.Solution['dt4_landing'] = dt4_landing_scaled_sol
+            self.Solution['dt4_landing'] = dt4_landing_sol
             self.Solution['x4_before_reentry'] = x4_before_reentry_sol
             self.Solution['x4_after_reentryburn'] = x4_after_reentry_sol
-            self.Solution['u4_reentry'] = u4_reentry_scaled_sol
+            self.Solution['u4_reentry'] = float(u4_reentry_sol[0])
             self.Solution['x4_before_landing'] = x4_before_landing_sol
             self.Solution['x4_landing'] = x4_landing_sol
             self.Solution['u4_landing'] = u4_landing_sol
@@ -877,13 +918,9 @@ class LV_Optimization(VLType):
                 self.Solution['x4_boostback'] = x4_boostback_sol
                 self.Solution['u4_boostback'] = u4_boostback_sol
 
-        with open('.//Results//'+filename, 'wb') as f:
-            pickle.dump(self.Solution, f)
-
-
         # detailed solution:
         t1_vec = np.linspace(init_time, init_time+self.booster.N*dt1_sol, self.booster.N+1) + 1.15
-        t2_vec = np.linspace(t1_vec[-1], t1_vec[-1]+self.eci.N[0]*dt2_sol, self.eci.N[0]+1)
+        t2_vec = np.linspace(t1_vec[-1], t1_vec[-1]+self.eci.N[0]*dt2_sol, self.eci.N[0]+1) + self.eci.SecondStage_CoastTimeAfterSep
         t3_vec = np.linspace(t2_vec[-1], t2_vec[-1]+self.eci.N[1]*dt3_sol, self.eci.N[1]+1)
 
         Isp1_sol, acc1_sol = np.zeros((self.booster.N)), np.zeros((self.booster.N))
@@ -897,7 +934,7 @@ class LV_Optimization(VLType):
             if k < self.booster.N:
                 Isp1_sol[k] = self.booster.ISP_calc(x1_scaled_sol[:,k], u1_scaled_sol[:,k]).full().flatten()[0]
                 acc1_sol[k] = self.booster.specific_acc_fun(x1_scaled_sol[:,k], u1_scaled_sol[:,k])
-            Qdyn1_sol[k] = 0.5 * (x1_sol[2,k]**2 + x1_sol[3,k]**2) * self.atmosphere.rho_fun(x1_sol[1,k])
+            Qdyn1_sol[k] = self.booster.dynamic_pressure_fun(x1_scaled_sol[:,k])
             pos, vel = self.eci.local_to_eci_func(ca.vertcat(x1_sol[0,k], 0.0, x1_sol[1,k]), ca.vertcat(x1_sol[2,k], 0.0, x1_sol[3,k]), LaunchAz_sol)
             x1_eci_sol[0:3,k], x1_eci_sol[3:6,k], x1_eci_sol[6,k] = pos.T, vel.T, x1_sol[4,k]
             alt1_sol[k] = np.linalg.norm(pos) - self.eci.R0 / np.sqrt(1.0 - self.eci.e**2 * np.sin(np.deg2rad(self.eci.LaunchLatitude))**2)
@@ -911,7 +948,7 @@ class LV_Optimization(VLType):
             perigee1_sol[k] = a1_sol[k] * (1.0 - np.linalg.norm(e1))
             i1_sol[k] = np.arccos(h1[2] / ca.norm_2(h1))
             gama1_sol[k] = np.arccos(ca.dot(vel, pos) / (ca.norm_2(vel) * ca.norm_2(pos)))
-            gama1_local_sol[k] = np.atan2(x1_sol[3,k], x1_sol[2,k])
+            gama1_local_sol[k] = np.arctan2(x1_sol[3,k], x1_sol[2,k])
 
         self.eci.local_to_eci_calc(ca.vertcat(x1_sol[0,k], 0.0, x1_sol[1,k]), ca.vertcat(x1_sol[2,k], 0.0, x1_sol[3,k]), LaunchAz_sol)
         Isp2_sol, acc2_sol = np.zeros((self.eci.N[0])), np.zeros((self.eci.N[0]))
@@ -980,7 +1017,7 @@ class LV_Optimization(VLType):
                     acc4_boostback_sol[k] = self.boostback.specific_acc_fun(self.boostback.scale_x(x4_boostback_vec_sol[:,k]), u4_boostback_scaled_sol)
                     alt4_boostback_sol[k] = ca.norm_2(ca.vertcat(x4_boostback_vec_sol[0,k], self.rocket_return.R0+x4_boostback_vec_sol[1,k])) - self.rocket_return.R0
                     vel4_boostback_sol[k] = ca.norm_2(ca.vertcat(x4_boostback_vec_sol[2,k], x4_boostback_vec_sol[3,k]))
-                    Qdyn4_boostback_sol[k] = 0.5 * self.atmosphere.rho_fun(alt4_boostback_sol[k]) * vel4_boostback_sol[k]**2
+                    Qdyn4_boostback_sol[k] = 0.5 * (self.atmosphere.rho_fun(alt4_boostback_sol[k]) * self.ScenarioDispersion.AtmosphereDensity) * vel4_boostback_sol[k]**2
             
             N4_ballistic = 25
             x4_ballistic_sol = np.zeros((self.rocket_return.nx, N4_ballistic+1))
@@ -1000,13 +1037,13 @@ class LV_Optimization(VLType):
                 acc4_ballistic_sol[k] = self.rocket_return.specific_acc_fun(self.rocket_return.scale_x(x4_ballistic_sol[:,k]), 0)
                 alt4_ballistic_sol[k] = ca.norm_2(ca.vertcat(x4_ballistic_sol[0,k], self.rocket_return.R0+x4_ballistic_sol[1,k])) - self.rocket_return.R0
                 vel4_ballistic_sol[k] = ca.norm_2(ca.vertcat(x4_ballistic_sol[2,k], x4_ballistic_sol[3,k]))
-                Qdyn4_ballistic_sol[k] = 0.5 * self.atmosphere.rho_fun(alt4_ballistic_sol[k]) * vel4_ballistic_sol[k]**2
+                Qdyn4_ballistic_sol[k] = 0.5 * (self.atmosphere.rho_fun(alt4_ballistic_sol[k]) * self.ScenarioDispersion.AtmosphereDensity) * vel4_ballistic_sol[k]**2
 
             x4_ballistic_M50_sol = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1_M50(self.rocket_return.scale_x(x4_0_sol), 0, dt4_ballistic_sol/self.rocket_return.scaleT)).full().flatten()
             # before reentry burn phase
             alt4_before_reentry_sol = ca.norm_2(ca.vertcat(x4_before_reentry_sol[0], self.rocket_return.R0+x4_before_reentry_sol[1])) - self.rocket_return.R0
             vel4_before_reentry_sol = ca.norm_2(ca.vertcat(x4_before_reentry_sol[2], x4_before_reentry_sol[3]))
-            Qdyn4_before_reentry_sol = 0.5 * self.atmosphere.rho_fun(alt4_before_reentry_sol) * vel4_before_reentry_sol**2
+            Qdyn4_before_reentry_sol = 0.5 * (self.atmosphere.rho_fun(alt4_before_reentry_sol) * self.ScenarioDispersion.AtmosphereDensity) * vel4_before_reentry_sol**2
 
             # reentry phase
             N4_reentry = 25
@@ -1021,8 +1058,8 @@ class LV_Optimization(VLType):
                 acc4_reentry_sol[k] = self.rocket_return.specific_acc_fun(self.rocket_return.scale_x(x4_reentry_sol[:,k]), u4_reentry_scaled_sol)
                 alt4_reentry_sol[k] = ca.norm_2(ca.vertcat(x4_reentry_sol[0,k], self.rocket_return.R0+x4_reentry_sol[1,k])) - self.rocket_return.R0
                 vel4_reentry_sol[k] = ca.norm_2(ca.vertcat(x4_reentry_sol[2,k], x4_reentry_sol[3,k]))
-                Qdyn4_reentry_sol[k] = 0.5 * self.atmosphere.rho_fun(alt4_reentry_sol[k]) * vel4_reentry_sol[k]**2
-                hflux4_reentry_sol[k] = self.rocket_return.Booster_k_empirical*np.sqrt(self.atmosphere.rho_fun(alt4_reentry_sol[k])) * vel4_reentry_sol[k]**3
+                Qdyn4_reentry_sol[k] = 0.5 * (self.atmosphere.rho_fun(alt4_reentry_sol[k]) * self.ScenarioDispersion.AtmosphereDensity) * vel4_reentry_sol[k]**2
+                hflux4_reentry_sol[k] = self.rocket_return.Booster_k_empirical*np.sqrt((self.atmosphere.rho_fun(alt4_reentry_sol[k]) * self.ScenarioDispersion.AtmosphereDensity)) * vel4_reentry_sol[k]**3
 
             # before landing phase
             N4_before_landing = 25
@@ -1037,8 +1074,8 @@ class LV_Optimization(VLType):
                 acc4_before_landing_sol[k] = self.rocket_return.specific_acc_fun(self.rocket_return.scale_x(x4_before_landing_vec_sol[:,k]), 0)
                 alt4_before_landing_sol[k] = self.rocket_return.local_to_alt(x4_before_landing_vec_sol[:,k])
                 vel4_before_landing_sol[k] = ca.norm_2(ca.vertcat(x4_before_landing_vec_sol[2,k], x4_before_landing_vec_sol[3,k]))
-                Qdyn4_before_landing_sol[k] = 0.5 * self.atmosphere.rho_fun(alt4_before_landing_sol[k]) * vel4_before_landing_sol[k]**2
-                hflux4_before_landing_sol[k] = self.rocket_return.Booster_k_empirical * np.sqrt(self.atmosphere.rho_fun(alt4_before_landing_sol[k])) * vel4_before_landing_sol[k]**3
+                Qdyn4_before_landing_sol[k] = 0.5 * (self.atmosphere.rho_fun(alt4_before_landing_sol[k]) * self.ScenarioDispersion.AtmosphereDensity) * vel4_before_landing_sol[k]**2
+                hflux4_before_landing_sol[k] = self.rocket_return.Booster_k_empirical * np.sqrt((self.atmosphere.rho_fun(alt4_before_landing_sol[k]) * self.ScenarioDispersion.AtmosphereDensity)) * vel4_before_landing_sol[k]**3
 
             # landing burn phase
             N4_landing = self.rocket_return.N
@@ -1049,7 +1086,7 @@ class LV_Optimization(VLType):
                 acc4_landing_sol[k] = self.rocket_return.specific_acc_fun(self.rocket_return.scale_x(x4_landing_sol[:,k]), u4_landing_scaled_sol[min(k,N4_landing-1)])
                 alt4_landing_sol[k] = self.rocket_return.local_to_alt(x4_landing_sol[:,k])
                 vel4_landing_sol[k] = ca.norm_2(ca.vertcat(x4_landing_sol[2,k], x4_landing_sol[3,k]))
-                Qdyn4_landing_sol[k] = 0.5 * self.atmosphere.rho_fun(alt4_landing_sol[k]) * vel4_landing_sol[k]**2
+                Qdyn4_landing_sol[k] = 0.5 * (self.atmosphere.rho_fun(alt4_landing_sol[k]) * self.ScenarioDispersion.AtmosphereDensity) * vel4_landing_sol[k]**2
 
         self.Solution['t1_vec'] = t1_vec
         self.Solution['t2_vec'] = t2_vec
@@ -1063,8 +1100,8 @@ class LV_Optimization(VLType):
         self.Solution['Alpha2_sol'] = Alpha2_sol
         self.Solution['acc2_sol'] = acc2_sol    
         self.Solution['i2_sol'] = i2_sol
-        self.Solution['apogee2_sol'] = i2_sol
-        self.Solution['perigee2_sol'] = i2_sol
+        self.Solution['apogee2_sol'] = apogee2_sol
+        self.Solution['perigee2_sol'] = perigee2_sol
         self.Solution['Isp2_sol'] = Isp2_sol
         self.Solution['alt3_sol'] = alt3_sol
         self.Solution['acc3_sol'] = acc3_sol
@@ -1097,5 +1134,14 @@ class LV_Optimization(VLType):
         self.Solution['return_status'] = opti.return_status()
         self.Solution['success'] = opti.stats()['success']
         self.Solution['iter_count'] = opti.stats().get('iter_count')
+        if solve_error is not None:
+            self.Solution['success'] = False
+            self.Solution['solver_error'] = solve_error
+
+        if output_dir is not None:
+            result_directory = Path(output_dir)
+            result_directory.mkdir(parents=True, exist_ok=True)
+            with (result_directory / filename).open('wb') as f:
+                pickle.dump(self.Solution, f)
 
         return self.Solution

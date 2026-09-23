@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Downloaded telemetry videos
+/falcon9_telemetry/*.mp4
