@@ -4,3 +4,4 @@ __pycache__/
 
 # Downloaded telemetry videos
 /falcon9_telemetry/*.mp4
+Results/

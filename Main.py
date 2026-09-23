@@ -241,6 +241,7 @@ color_vec = ['r','b','g','k','y','c','m']
 
 
 def run_dispersion_case(i):
+    """Run one sweep and return summary lines for printing after all sweeps finish."""
     global LVopt, Solution, col, icol, RecoveryStrategy, Target_Orbit
     DispesrionVec = DispesrionList[i]
     DispesrionParam = DispesrionParamList[i]
@@ -250,6 +251,7 @@ def run_dispersion_case(i):
     if dispersion_field not in {item.name for item in fields(DispesrionFactorsType)}:
         raise ValueError(f'Unknown dispersion parameter: {DispesrionParam}')
 
+    result_lines = []
     for iOrbit, Target_Orbit in enumerate(Target_Orbits):
         print('#'+'='*40+f" Orbit Name: {Target_Orbit['Name']} "+"="*40)
         for iRecover, RecoveryStrategy in enumerate(RecoveryStrategyVec):
@@ -287,7 +289,7 @@ def run_dispersion_case(i):
                     Results.append(0.0)
                 if iVal == DispesrionVec.shape[0]-1:
                     ConfigName = 'Falcon9' if LV_Configuration==1 else 'Starship'
-                    print(ConfigName+'_'+Target_Orbit['Name']+'_'+RecoveryStrategy+'_'+DispesrionParam+'=0.001*np.array(['+', '.join(f'{x:.2f}' for x in Results) + '])')
+                    result_lines.append(ConfigName+'_'+Target_Orbit['Name']+'_'+RecoveryStrategy+'_'+DispesrionParam+'=0.001*np.array(['+', '.join(f'{x:.2f}' for x in Results) + '])')
                 # print(f'dV for final orbit: {v3_desired-v3_apogee:.2f} m/s, Propellent mass for final dV: {propellent_mass_for_final_dv3:.2f} kg')
                 # print(f'Final Orbit (Apogee, Perigee, Inclination): {(actual_apogee3 - self.eci.R0)/1000:.2f} Km, {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {np.rad2deg(i3_sol[-1]):.2f} deg')
                 # print(f'Parking Orbit (Apogee, Perigee, Inclination): {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {(perigee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {np.rad2deg(i3_sol[-1]):.2f} deg')
@@ -606,6 +608,9 @@ def run_dispersion_case(i):
                 icol += 1
                 icol %= len(color_vec)
 
+    return result_lines
+
+
 plt.show()
 
 if __name__ == '__main__':
@@ -613,7 +618,7 @@ if __name__ == '__main__':
     payload_mass_predefined = -1 # payload mass defined in kg, maximmize the payload mass if set to non-positive value
     Plot_interm = 0
     LV_Configuration = 1 # 1 - Falcon 9, 2 - Starship
-    Plot_Results = 2 # 1 - Plot telemetry, 2- Plot 3d trajectory
+    Plot_Results = 0 # 1 - Plot telemetry, 2- Plot 3d trajectory
 
     ConfigName = 'Falcon9' if LV_Configuration==1 else 'Starship'
 
@@ -637,10 +642,10 @@ if __name__ == '__main__':
     #                     "i": np.deg2rad(98.6),})       # inclination [rad]
     
     ### Target orbit parameters for MEO
-    # Target_Orbits.append({"Name": 'MEO',                # Name
-    #                     "apogee": R0 + 20196.0*1e3,   # semi-major axis
-    #                     "perigee": R0 + 1193.0*1e3,   # semi-minor axis
-    #                     "i": np.deg2rad(55.0),})       # inclination [rad]
+    Target_Orbits.append({"Name": 'MEO',                # Name
+                        "apogee": R0 + 20196.0*1e3,   # semi-major axis
+                        "perigee": R0 + 1193.0*1e3,   # semi-minor axis
+                        "i": np.deg2rad(55.0),})       # inclination [rad]
     
     ### Target orbit parameters for GTO
     # Target_Orbits.append({"Name": 'GTO',                # Name
@@ -649,10 +654,10 @@ if __name__ == '__main__':
     #                     "i": np.deg2rad(28.6),})         # inclination [rad]
 
     ### Target orbit parameters for TLI
-    # Target_Orbits.append({"Name": 'TLI',                # Name
-    #                     "apogee": 384400e3,           # apogee [m]
-    #                     "perigee": R0 + 200.0e3,      # perigee [m]
-    #                     "i": np.deg2rad(28.6),})       # inclination [rad]
+    Target_Orbits.append({"Name": 'TLI',                # Name
+                        "apogee": 384400e3,           # apogee [m]
+                        "perigee": R0 + 200.0e3,      # perigee [m]
+                        "i": np.deg2rad(28.6),})       # inclination [rad]
     
     # Target_Orbits = [Target_Orbits[0]]
     # RecoveryStrategyVec = ['RTLS'] # 'EXP', 'ASDS', 'RTLS'
@@ -682,21 +687,21 @@ if __name__ == '__main__':
     
     DispesrionList, DispesrionParamList, ConfigList = [], [], []
 
-    DispesrionList.append(np.linspace(-4000,4000, 9))
+    DispesrionList.append(np.linspace(-10000,10000, 9))
     DispesrionParamList.append('FirstStage_EmptyMass')
     ConfigList.append(1)
 
-    # DispesrionList.append(np.linspace(-4000,4000, 7))
-    # DispesrionParamList.append('SecondStage_EmptyMass')
-    # ConfigList.append(1)
+    DispesrionList.append(np.linspace(-3000,10000, 9))
+    DispesrionParamList.append('SecondStage_EmptyMass')
+    ConfigList.append(1)
 
-    # DispesrionList.append(np.linspace(-4000,4000, 9))
-    # DispesrionParamList.append('FirstStage_EmptyMass')
-    # ConfigList.append(2)
+    DispesrionList.append(np.linspace(-10000,10000, 9))
+    DispesrionParamList.append('FirstStage_EmptyMass')
+    ConfigList.append(2)
 
-    # DispesrionList.append(np.linspace(-4000,4000, 9))
-    # DispesrionParamList.append('SecondStage_EmptyMass')
-    # ConfigList.append(2)
+    DispesrionList.append(np.linspace(-10000,10000, 9))
+    DispesrionParamList.append('SecondStage_EmptyMass')
+    ConfigList.append(2)
 
     # DispesrionList.append(np.linspace(-10000,10000, 11))
     # DispesrionParamList.append('FirstStage_PropMass')
@@ -789,13 +794,18 @@ if __name__ == '__main__':
 
     EnableParallelDispersion = True
     use_parallel = EnableParallelDispersion and Plot_Results == 0 and len(DispesrionList) > 1
+    all_result_lines = []
     if use_parallel:
         workers = min(len(DispesrionList), os.cpu_count() or 1)
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            for _ in executor.map(run_dispersion_case, range(len(DispesrionList))):
-                pass
+            for result_lines in executor.map(run_dispersion_case, range(len(DispesrionList))):
+                all_result_lines.extend(result_lines)
     else:
         for i in range(len(DispesrionList)):
-            run_dispersion_case(i)
+            all_result_lines.extend(run_dispersion_case(i))
+
+    # Print in case order only after every sweep and worker has finished.
+    for result_line in all_result_lines:
+        print(result_line)
 
     plt.show()

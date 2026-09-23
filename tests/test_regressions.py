@@ -84,8 +84,8 @@ class SweepTests(unittest.TestCase):
         )
         output = io.StringIO()
         with patch.dict(Main.__dict__, settings), patch.object(Main.LVopt_Type, 'LV_Optimization', solver), contextlib.redirect_stdout(output):
-            Main.run_dispersion_case(0)
-        return output.getvalue()
+            results = Main.run_dispersion_case(0)
+        return results, output.getvalue()
 
     def test_failed_case_does_not_reuse_previous_payload(self):
         class Solver:
@@ -97,10 +97,13 @@ class SweepTests(unittest.TestCase):
                     raise RuntimeError('injected failure')
                 return {'success': True, 'payload_mass': 12345}
 
-        output = self.run_sweep('FirstStage_EmptyMass', [0, 100], Solver)
-        self.assertIn('[12345.00, 0.00]', output)
+        results, output = self.run_sweep('FirstStage_EmptyMass', [0, 100], Solver)
+        self.assertEqual(results, ['Falcon9_test_EXP_FirstStage_EmptyMass=0.001*np.array([12345.00, 0.00])'])
+        self.assertNotIn('np.array(', output)
         self.assertIn('injected failure', output)
-        self.assertIn('[0.00]', self.run_sweep('FirstStage_EmptyMass', [100], Solver))
+        results, output = self.run_sweep('FirstStage_EmptyMass', [100], Solver)
+        self.assertEqual(results, ['Falcon9_test_EXP_FirstStage_EmptyMass=0.001*np.array([0.00])'])
+        self.assertNotIn('np.array(', output)
 
     def test_all_dispersion_fields_and_partition_alias_are_forwarded(self):
         seen = []
