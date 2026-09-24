@@ -52,6 +52,7 @@ class VLType(PythonMsg):
     '''
     base class for creating types and messages in python
     '''
+    # Falcon 9 Database
     N: int = field(default = 60)
     Diameter: float = field(default = 3.66)
 
@@ -93,17 +94,17 @@ class VLType(PythonMsg):
 
     #Propulsion Properties
     FirstStage_SL_Isp: float = field(default = 282.0) # [s]
-    FirstStage_Vac_Isp: float = field(default = 310.0) # [s]
+    FirstStage_Vac_Isp: float = field(default = 305.0) # [s]
     FirstStage_SL_Thrust: float = field(default = 845.0 * 10**3 * 9) # [N]
-    FirstStage_Vac_Thrust: float = field(default = 0.93*914.0* 10**3 * 9) # [N]
-    FirstStage_MinThrust_Factor: float = field(default = 0.33) # [-]
-    FirstStage_MinThrust_IspFactor: float = field(default = 0.9) # [-]
+    FirstStage_Vac_Thrust: float = field(default = 914.0* 10**3 * 9) # [N]
+    FirstStage_MinThrust_Factor: float = field(default = 0.57) # [-]
+    FirstStage_MinThrust_IspFactor: float = field(default = 0.98) # [-]
     FirstStage_Ae: float = field(default = 43.79) # [m^2]
     
     SecondStage_CoastTimeAfterSep: float = field(default = 10.0) # [sec]
     SecondStage_Thrust: float = field(default = 981.0 * 10**3) # [N]
     SecondStage_Vac_Isp: float = field(default = 348.0) # [s]
-    SecondStage_MinThrust_Factor: float = field(default = 0.5) # [-]
+    SecondStage_MinThrust_Factor: float = field(default = 0.638) # [-]
     SecondStage_MinThrust_IspFactor: float = field(default = 0.975) # [-]
 
     Payload_Max_acc: float = field(default = 3.75*9.81) # [m/s^2]
@@ -216,8 +217,9 @@ class VLType(PythonMsg):
         self.FirstStage_Ae = 43.8  # est. total Ae for all engines [m^2]
         self.FairingSeparationAltitude = 80.0 * 10**3 # [m]
 
-        self.SecondStage_Thrust = 2300.0 * 10**3 * 3 + 2256.3 * 10**3 * 3  # 3 vacuum and 3 SL variants [N]
-        self.SecondStage_Vac_Isp = (3*380.0 + 3*347.0)/6
+        self.SecondStage_CoastTimeAfterSep = 0.0
+        self.SecondStage_Thrust = 2300.0 * 10**3 * 3 + 2394.3 * 10**3 * 3  # 3 vacuum and 3 SL variants [N]
+        self.SecondStage_Vac_Isp = (3*self.FirstStage_Vac_Thrust*380.0 + 3*self.SecondStage_Thrust*347.0)/(3*self.FirstStage_Vac_Thrust + 3*self.SecondStage_Thrust)
         self.SecondStage_MinThrust_Factor = 0.5
         self.SecondStage_MinThrust_IspFactor = 0.85
 

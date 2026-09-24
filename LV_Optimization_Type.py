@@ -172,7 +172,7 @@ class LV_Optimization(VLType):
         eci_pos, eci_vel = self.eci.local_to_eci_func(ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz)
         x2_init = ca.vertcat(eci_pos, eci_vel, self.eci.SecondStage_FullMass + payload_mass)
         x2_beforeCoast = self.eci.scale_x(x2_init)
-        x2_afterCoast = self.eci.dynamics_kp1(x2_beforeCoast, 1e-6*np.ones((self.eci.nu,)), self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT)
+        x2_afterCoast = self.eci.dynamics_kp1(x2_beforeCoast, 1e-8*np.ones((self.eci.nu,)), self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT)
         
         opti.subject_to(x2[:,0] == x2_afterCoast)
         for k in range(self.eci.N[0]):
@@ -277,7 +277,7 @@ class LV_Optimization(VLType):
             # rentry burn
             opti.subject_to(x4_after_reentryburn  == self.rocket_return.dynamics_kp1_M20(x4_before_reentry, u4_reentry, dt4_reentry))
             ### set the thrust constraints
-            opti.subject_to(u4_reentry[0] <= 0.66)
+            opti.subject_to(u4_reentry[0] <= 0.8)
             opti.subject_to(u4_reentry[0] >= self.rocket_return.FirstStage_MinThrust_Factor)
 
             ### After Reentry, before landing burn (ballistic)
@@ -313,7 +313,7 @@ class LV_Optimization(VLType):
             opti.subject_to(x4_landing[4,self.rocket_return.N] >= (self.rocket_return.EmptyFirstStageMass)/self.rocket_return.scaleX[4]) # minimal mass at the end of the flight
 
         # set the cost function
-        gain = 1e-2
+        gain = 1e-1
         cost = 0.0
         cost += 0.5*gain*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])) 
         cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]) )
@@ -322,7 +322,7 @@ class LV_Optimization(VLType):
         if type(payload_mass_scaled) != ca.MX:
             cost += -x3f[6]
             if RecoveryStrategy != 'EXP':
-                cost += -x4_landing[4,self.rocket_return.N]
+                cost += -0.01*x4_landing[4,self.rocket_return.N]
         else:
             cost += -payload_mass_scaled*100
         opti.minimize(cost)
@@ -900,6 +900,7 @@ class LV_Optimization(VLType):
         self.Solution['x3'] = x3_sol
         self.Solution['dt3'] = dt3_sol
         self.Solution['payload_mass'] = payload_mass_sol
+        self.Solution['propellant_mass_for_final_dv'] = float(propellent_mass_for_final_dv_sol)
         self.Solution['LaunchAz'] = LaunchAz_sol
         if RecoveryStrategy != 'EXP':
             self.Solution['x4_0'] = x4_0_sol
@@ -919,7 +920,7 @@ class LV_Optimization(VLType):
                 self.Solution['u4_boostback'] = u4_boostback_sol
 
         # detailed solution:
-        t1_vec = np.linspace(init_time, init_time+self.booster.N*dt1_sol, self.booster.N+1) + 1.15
+        t1_vec = np.linspace(init_time, init_time+self.booster.N*dt1_sol, self.booster.N+1)
         t2_vec = np.linspace(t1_vec[-1], t1_vec[-1]+self.eci.N[0]*dt2_sol, self.eci.N[0]+1) + self.eci.SecondStage_CoastTimeAfterSep
         t3_vec = np.linspace(t2_vec[-1], t2_vec[-1]+self.eci.N[1]*dt3_sol, self.eci.N[1]+1)
 

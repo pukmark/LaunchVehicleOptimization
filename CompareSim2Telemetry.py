@@ -28,7 +28,7 @@ R0 = 6_378_137.0  # [m]
 
 # Manual time shift applied to simulated profiles (seconds).
 # Positive values delay the sim timeline; negative values move it earlier.
-SIM_TIME_SHIFT = 0.5
+SIM_TIME_SHIFT = 0.0
 
 
 def _parse_time_str_to_seconds(text: str) -> float:
@@ -72,13 +72,14 @@ def load_telemetry(csv_path: Path) -> pd.DataFrame:
 def run_nominal_simulation():
     """Run LVopt in a Falcon 9 / ASDS / LEO configuration."""
     disp = DispesrionFactorsType()
-    disp.FirstStage_EmptyMass = 4000
-    disp.FirstStage_PropMass = -15000
-    disp.FirstStageThrust = 0.98
-    disp.FirstStageIsp = 0.95
+    disp.FirstStage_EmptyMass = 2500
+    disp.FirstStage_PropMass = -7500
+    disp.FirstStageThrust = 0.96
+    disp.FirstStageIsp = 1.0
     disp.SecondStageIsp = 1.0
-    disp.SecondStageThrust = 0.95
+    disp.SecondStageThrust = 0.90
     disp.SecondStage_EmptyMass = 500
+    disp.SecondStage_PropMass = -500
     lvopt = LVopt_Type.LV_Optimization(disp, LV_Configuration=1)
     
 
@@ -99,6 +100,22 @@ def run_nominal_simulation():
     )
     if not sol.get("success", False):
         raise RuntimeError(f"Simulation failed: {sol.get('return_status')}")
+
+    first_stage_propellant_at_separation = float(sol["x4_0"][4]) - lvopt.rocket_return.EmptyFirstStageMass
+    first_stage_propellant_at_landing = float(sol["x4_landing"][4, -1]) - lvopt.rocket_return.EmptyFirstStageMass
+    # The final upper-stage state includes payload; the fairing is already jettisoned.
+    second_stage_propellant_remaining = (
+        float(sol["x3"][6, -1]) - lvopt.eci.EmptySecondStageMass - float(sol["payload_mass"])
+    )
+    print(f"First-stage propellant remaining at separation: {first_stage_propellant_at_separation:,.1f} kg")
+    print(f"First-stage propellant remaining after landing: {first_stage_propellant_at_landing:,.1f} kg")
+    print(f"Second-stage propellant remaining at final simulated cutoff "
+          f"(before the final orbit-adjustment burn): {second_stage_propellant_remaining:,.1f} kg")
+    second_stage_propellant_after_adjustment = (
+        second_stage_propellant_remaining - sol["propellant_mass_for_final_dv"]
+    )
+    print(f"Second-stage propellant remaining after the orbit-adjustment burn: "
+          f"{second_stage_propellant_after_adjustment:,.1f} kg")
     return lvopt, sol
 
 
@@ -162,13 +179,14 @@ def simulation_profile_to_df(sol: dict, lvopt) -> pd.DataFrame:
 def align_sim_time_by_velocity(sim_df: pd.DataFrame, tel_df: pd.DataFrame):
     """
     Shift sim time so the FIRST simulated point lines up with the telemetry timestamp
-    that has the closest velocity to that simulated first point, searching only
-    before the first telemetry reading above 200 km/h.
+    interpolated at that point's velocity, using the first bracketing pair before
+    the first telemetry reading above 200 km/h. Out-of-range speeds are clamped
+    to the closest available speed; repeated speeds use their first occurrence.
     Returns (aligned_df, applied_shift) where applied_shift is subtracted from sim time.
     """
     sim_vel = sim_df["velocity_kmh"].to_numpy()
     sim_time = sim_df["time_s"].to_numpy()
-    if not np.isfinite(sim_vel[0]):
+    if sim_vel.size == 0 or not np.isfinite(sim_vel[0]) or not np.isfinite(sim_time[0]):
         return sim_df, 0.0
     sim_first_vel = sim_vel[0]
 
@@ -186,8 +204,25 @@ def align_sim_time_by_velocity(sim_df: pd.DataFrame, tel_df: pd.DataFrame):
     if tel_vel.size == 0:
         return sim_df, 0.0
 
-    nearest_idx = int(np.nanargmin(np.abs(tel_vel - sim_first_vel)))
-    target_time = tel_time[nearest_idx]
+    valid = np.isfinite(tel_time)
+    tel_vel, tel_time = tel_vel[valid], tel_time[valid]
+    if tel_vel.size == 0:
+        return sim_df, 0.0
+
+    # Find the first crossing in time order, even if OCR speeds are not monotonic.
+    crossings = np.flatnonzero(
+        ((tel_vel[:-1] <= sim_first_vel) & (sim_first_vel <= tel_vel[1:]))
+        | ((tel_vel[1:] <= sim_first_vel) & (sim_first_vel <= tel_vel[:-1]))
+    )
+    if crossings.size:
+        idx = int(crossings[0])
+        delta_vel = tel_vel[idx + 1] - tel_vel[idx]
+        fraction = (sim_first_vel - tel_vel[idx]) / delta_vel if delta_vel else 0.0
+        target_time = tel_time[idx] + fraction * (tel_time[idx + 1] - tel_time[idx])
+    else:
+        # No bracket: clamp to the available speed range instead of extrapolating.
+        idx = int(np.argmin(tel_vel) if sim_first_vel < tel_vel.min() else np.argmax(tel_vel))
+        target_time = tel_time[idx]
     sim_first_time = sim_time[0]
     shift = sim_first_time - target_time
 
@@ -283,21 +318,21 @@ def compare_and_plot(sim_df: pd.DataFrame, tel_df: pd.DataFrame, stage_label: st
 
     fig, (ax_alt, ax_vel, ax_acc) = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
     ax_alt.plot(sim_df["time_s"], sim_df["altitude_km"], label="Sim (LVopt)", lw=2)
-    ax_alt.plot(tel_df["time_s"], tel_df["altitude_km"], label="Telemetry", lw=2, alpha=0.7)
+    ax_alt.plot(tel_df["time_s"], tel_df["altitude_km"],'-s', label="Telemetry", lw=2, alpha=0.7)
     ax_alt.set_ylabel("Altitude [km]")
     ax_alt.set_title(f"Falcon 9 {stage_label} Altitude")
     ax_alt.grid(True)
     ax_alt.legend()
 
     ax_vel.plot(sim_df["time_s"], sim_df["velocity_kmh"], label="Sim (LVopt)", lw=2)
-    ax_vel.plot(tel_df["time_s"], tel_df["velocity_kmh"], label="Telemetry", lw=2, alpha=0.7)
+    ax_vel.plot(tel_df["time_s"], tel_df["velocity_kmh"],'s-', label="Telemetry", lw=2, alpha=0.7)
     ax_vel.set_ylabel("Velocity [km/h]")
     ax_vel.set_title(f"Falcon 9 {stage_label} Velocity")
     ax_vel.grid(True)
     ax_vel.legend()
 
     ax_acc.plot(sim_df["time_s"], sim_df["accel_g"], label="Sim (LVopt)", lw=2)
-    ax_acc.plot(tel_df["time_s"], tel_df["accel_g"], label="Telemetry", lw=2, alpha=0.7)
+    ax_acc.plot(tel_df["time_s"], tel_df["accel_g"],'s-', label="Telemetry", lw=2, alpha=0.7)
     ax_acc.set_ylabel("Acceleration [g]")
     ax_acc.set_xlabel("Time since liftoff [s]")
     ax_acc.set_title(f"Falcon 9 {stage_label} Acceleration")
