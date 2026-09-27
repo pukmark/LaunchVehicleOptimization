@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from LaunchSites import parse_launch_site
 from dataclasses import dataclass, field
 import numpy as np
 import scipy as sp
@@ -84,6 +85,7 @@ class VLType(PythonMsg):
     FairingSeparationAltitude: float = field(default = 85.0 * 10**3) # [m]
     FirstStage_MaxDynamicPressure: float = field(default = 32.0 * 10**3) # [Pa]
     FirstStage_StageSeparationMaxDynamicPressure: float = field(default = 0.5 * 10**3) # [Pa]
+    FirstStage_MaxQdynAlpha: float = field(default = 5.0 * 10**3) # [Pa]
 
     Booster_Cd0: float = field(default = 2.0)
     Booster_Cda2: float = field(default = 2.0)
@@ -146,6 +148,12 @@ class VLType(PythonMsg):
         self.TotalPropellentMass = self.FirstStagePropellentMass + self.SecondStagePropellentMass
         self.Sref = np.pi * (self.Diameter/2)**2
         self.g0 = self.mu / self.R0**2
+
+    def ApplyLaunchSite(self, launch_site=None):
+        site = parse_launch_site(launch_site)
+        self.LaunchLatitude = site["latitude"]
+        self.LaunchLongitude = site["longitude"]
+        self.LaunchAltitude = site["altitude"]
 
     def RK4(self, f, x, u, h, M = 1):
         hM = h/M
@@ -259,13 +267,14 @@ class BoosterLaunchVehicle_2D(VLType):
     def __init__(self, atmosphere: Atm_Type.AtmosphereType,
                        LV_Configuration: int, 
                        ScenarioDispersion: DispesrionFactorsType, 
-                       N: int = 60):
+                       N: int = 60, launch_site=None):
         super().__init__()
         self.N = N
         self.atmosphere = atmosphere
         if LV_Configuration == 2: # Starship database
             self.StarShipDatabase()
 
+        self.ApplyLaunchSite(launch_site)
         self.ApplyScenarioDispersionToLV(ScenarioDispersion)
         
         self.scaleX = [1e5, 1e5, 1e3, 1e3, 1e5]
@@ -335,11 +344,12 @@ class BoosterLaunchVehicle_2D(VLType):
 
 @dataclass
 class LaunchVehicle_ECI(VLType):
-    def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int, N = [10, 60]):
+    def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int, N = [10, 60], launch_site=None):
         super().__init__()
 
         if LV_Configuration == 2: # Starship database
             self.StarShipDatabase()
+        self.ApplyLaunchSite(launch_site)
         self.ApplyScenarioDispersionToLV(ScenarioDispersion)
 
         self.N = N
@@ -463,11 +473,12 @@ class LaunchVehicle_ECI(VLType):
 
 @dataclass
 class BoosterReturn_2D(VLType):
-    def __init__(self, atmosphere: Atm_Type.AtmosphereType, LV_Configuration: int, ScenarioDispersion: DispesrionFactorsType, N: int = 20):
+    def __init__(self, atmosphere: Atm_Type.AtmosphereType, LV_Configuration: int, ScenarioDispersion: DispesrionFactorsType, N: int = 20, launch_site=None):
         super().__init__(atmosphere=atmosphere)
 
         if LV_Configuration == 2: # Starship database
             self.StarShipDatabase()
+        self.ApplyLaunchSite(launch_site)
         self.ApplyScenarioDispersionToLV(ScenarioDispersion)
 
         self.N = N
@@ -534,11 +545,12 @@ class BoosterReturn_2D(VLType):
 
 @dataclass
 class BoostBackBurn_2D(VLType):
-    def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int):
+    def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int, launch_site=None):
         super().__init__()
 
         if LV_Configuration == 2: # Starship database
             self.StarShipDatabase()
+        self.ApplyLaunchSite(launch_site)
         self.ApplyScenarioDispersionToLV(ScenarioDispersion)
 
         self.scaleX = [1e5, 1e5, 1e3, 1e3, 3e4]  # x, z, vx, vz, m

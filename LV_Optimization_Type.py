@@ -11,6 +11,7 @@ import Atmosphere_Type as Atm_Type
 import LV_Type_scaled as LV_Type
 import LV_Plot as LVp
 import pickle
+from LaunchSites import parse_launch_site
 
 @dataclass
 class PythonMsg:
@@ -58,24 +59,26 @@ class VLType(PythonMsg):
 
     ScenarioDispersion: LV_Type.DispesrionFactorsType = field(default = None)
     LV_Configuration: int = field(default=1)
+    launch_site: dict = field(default=None)
 
 @dataclass
 class LV_Optimization(VLType):
     def __init__(self, ScenarioDispersion: LV_Type.DispesrionFactorsType, 
-                         LV_Configuration: int = 1):
+                         LV_Configuration: int = 1, launch_site=None):
         super().__init__()
 
         self.ScenarioDispersion = ScenarioDispersion
         self.LV_Configuration = LV_Configuration
+        self.launch_site = parse_launch_site(launch_site)
 
         # Initialize Atmosphere:
         self.atmosphere = Atm_Type.AtmosphereType()
 
         # Initialize the rocket models
-        self.booster = LV_Type.BoosterLaunchVehicle_2D(self.atmosphere, LV_Configuration, ScenarioDispersion)
-        self.boostback = LV_Type.BoostBackBurn_2D(ScenarioDispersion, LV_Configuration)
-        self.eci = LV_Type.LaunchVehicle_ECI(ScenarioDispersion, LV_Configuration)
-        self.rocket_return = LV_Type.BoosterReturn_2D(self.atmosphere, LV_Configuration, ScenarioDispersion)
+        self.booster = LV_Type.BoosterLaunchVehicle_2D(self.atmosphere, LV_Configuration, ScenarioDispersion, launch_site=self.launch_site)
+        self.boostback = LV_Type.BoostBackBurn_2D(ScenarioDispersion, LV_Configuration, launch_site=self.launch_site)
+        self.eci = LV_Type.LaunchVehicle_ECI(ScenarioDispersion, LV_Configuration, launch_site=self.launch_site)
+        self.rocket_return = LV_Type.BoosterReturn_2D(self.atmosphere, LV_Configuration, ScenarioDispersion, launch_site=self.launch_site)
 
     def SolveOptimiztion(self, RecoveryStrategy: list = 'EXP',
                          payload_mass_predefined: float = -1.0, 
@@ -150,7 +153,7 @@ class LV_Optimization(VLType):
             q = self.booster.dynamic_pressure_fun(x1[:,k])
 
             opti.subject_to(q/self.booster.FirstStage_MaxDynamicPressure <= 1.0) # dynamic pressure limit
-            opti.subject_to((uk[1] * q / 1e4)**2 <= 1.0) # alpha * dynamic pressure limit
+            opti.subject_to((uk[1] * q / self.booster.FirstStage_MaxQdynAlpha)**2 <= 1.0) # alpha * dynamic pressure limit
             opti.subject_to(self.booster.specific_acc_fun(x1[:,k], u1[:,k])/self.booster.Payload_Max_acc <= 1.0)
 
         # set the final state constraints    
@@ -230,7 +233,15 @@ class LV_Optimization(VLType):
         opti.subject_to(x3[6,self.eci.N[1]] >= x3f_mass_scaled)
         opti.subject_to(apogee/Target_Orbit["perigee"] == 1.0)
         opti.subject_to(perigee/(self.eci.R0 + self.eci.ParkingOrbit_PerigeeAlt) >= 1.0)
-        opti.subject_to(i/Target_Orbit["i"] == 1.0)
+        if Target_Orbit["i"] == 0.0 or Target_Orbit["i"] == np.pi:
+            # Equatorial planes require both horizontal angular-momentum
+            # components to vanish, without dividing by zero or differentiating
+            # acos at its singular endpoints. The sign selects pro/retrograde.
+            h_scaled = h / np.sqrt(self.eci.mu * self.eci.R0)
+            opti.subject_to(h_scaled[:2] == 0.0)
+            opti.subject_to(h_scaled[2] >= 0.0 if Target_Orbit["i"] == 0.0 else h_scaled[2] <= 0.0)
+        else:
+            opti.subject_to(i/Target_Orbit["i"] == 1.0)
 
 
     # Phase 4 - Booster Return:
@@ -315,10 +326,11 @@ class LV_Optimization(VLType):
         # set the cost function
         gain = 1e-1
         cost = 0.0
+        # cost += 0.5*20*ca.sumsqr(np.linspace(0,1,self.booster.N, (self.booster.N,1))**2*(u1[0,:]-0.75).T) 
         cost += 0.5*gain*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])) 
         cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]) )
         if RecoveryStrategy != 'EXP':
-            cost += 0.5*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) * dt4_landing
+            cost += 0.5*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) 
         if type(payload_mass_scaled) != ca.MX:
             cost += -x3f[6]
             if RecoveryStrategy != 'EXP':
@@ -728,6 +740,7 @@ class LV_Optimization(VLType):
                     opti.set_initial(x4_0, self.rocket_return.scale_x(init_guess['x4_0']))
         dispersion_values = {key: float(value) for key, value in asdict(self.ScenarioDispersion).items()}
         case_values = {'configuration': self.LV_Configuration, 'dispersion': dispersion_values,
+                       'launch_site': self.launch_site,
                        'apogee': float(Target_Orbit['apogee']), 'perigee': float(Target_Orbit['perigee']),
                        'inclination': float(Target_Orbit['i']), 'payload': float(payload_mass_predefined)}
         case_id = hashlib.sha256(json.dumps(case_values, sort_keys=True).encode()).hexdigest()[:16]
@@ -889,6 +902,7 @@ class LV_Optimization(VLType):
         self.Solution = {}
         self.Solution['solution_units'] = 'SI'
         self.Solution['configuration'] = self.LV_Configuration
+        self.Solution['launch_site'] = dict(self.launch_site)
         self.Solution['dispersion'] = dispersion_values
         self.Solution['u1'] = u1_sol
         self.Solution['x1'] = x1_sol
@@ -1139,10 +1153,10 @@ class LV_Optimization(VLType):
             self.Solution['success'] = False
             self.Solution['solver_error'] = solve_error
 
-        if output_dir is not None:
-            result_directory = Path(output_dir)
-            result_directory.mkdir(parents=True, exist_ok=True)
-            with (result_directory / filename).open('wb') as f:
-                pickle.dump(self.Solution, f)
+        # if output_dir is not None:
+        #     result_directory = Path(output_dir)
+        #     result_directory.mkdir(parents=True, exist_ok=True)
+        #     with (result_directory / filename).open('wb') as f:
+        #         pickle.dump(self.Solution, f)
 
         return self.Solution

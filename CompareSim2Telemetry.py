@@ -74,10 +74,10 @@ def run_nominal_simulation():
     disp = DispesrionFactorsType()
     disp.FirstStage_EmptyMass = 2500
     disp.FirstStage_PropMass = -7500
-    disp.FirstStageThrust = 0.96
-    disp.FirstStageIsp = 1.0
-    disp.SecondStageIsp = 1.0
-    disp.SecondStageThrust = 0.90
+    # disp.FirstStageThrust = 0.96
+    # disp.FirstStageIsp = 1.0
+    # disp.SecondStageIsp = 1.0
+    # disp.SecondStageThrust = 0.90
     disp.SecondStage_EmptyMass = 500
     disp.SecondStage_PropMass = -500
     lvopt = LVopt_Type.LV_Optimization(disp, LV_Configuration=1)
@@ -85,8 +85,8 @@ def run_nominal_simulation():
 
     target_orbit = {
         "Name": "LEO",
-        "apogee": R0 + 248_000.0,
-        "perigee": R0 + 264_000.0,
+        "apogee": R0 + 264_000.0,
+        "perigee": R0 + 248_000.0,
         "i": np.deg2rad(70.0),
     }
 
