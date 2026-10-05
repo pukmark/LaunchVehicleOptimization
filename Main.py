@@ -269,6 +269,7 @@ def run_dispersion_case(i):
                                                             payload_mass_predefined=payload_mass_predefined,
                                                             Target_Orbit=Target_Orbit,
                                                             Plot_interm=Plot_interm,
+                                                            print_ipopt = True,
                                                             init_guess=init_guess)
                         if Solution['success']:
                             init_guess = Solution
@@ -288,7 +289,7 @@ def run_dispersion_case(i):
                 else:
                     Results.append(0.0)
                 if iVal == DispesrionVec.shape[0]-1:
-                    ConfigName = 'Falcon9' if LV_Configuration==1 else 'Starship'
+                    ConfigName = {1: 'Falcon9', 2: 'Starship', 3: 'StarshipV3'}[LV_Configuration]
                     result_lines.append(ConfigName+'_'+Target_Orbit['Name']+'_'+RecoveryStrategy+'_'+DispesrionParam+'=0.001*np.array(['+', '.join(f'{x:.2f}' for x in Results) + '])')
                 # print(f'dV for final orbit: {v3_desired-v3_apogee:.2f} m/s, Propellent mass for final dV: {propellent_mass_for_final_dv3:.2f} kg')
                 # print(f'Final Orbit (Apogee, Perigee, Inclination): {(actual_apogee3 - self.eci.R0)/1000:.2f} Km, {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {np.rad2deg(i3_sol[-1]):.2f} deg')
@@ -615,17 +616,18 @@ plt.show()
 
 if __name__ == '__main__':
     RecoveryStrategyVec = ['EXP', 'ASDS', 'RTLS'] # 'EXP', 'ASDS', 'RTLS'
+    RecoveryStrategyVec = ['ASDS'] # 'EXP', 'ASDS', 'RTLS'
     payload_mass_predefined = -1 # payload mass defined in kg, maximmize the payload mass if set to non-positive value
     Plot_interm = 0
-    LV_Configuration = 1 # 1 - Falcon 9, 2 - Starship
-    Plot_Results = 0 # 1 - Plot telemetry, 2- Plot 3d trajectory
+    LV_Configuration = 1 # 1 - Falcon 9, 2 - Starship, 3 - Starship V3
+    Plot_Results = 2 # 1 - Plot telemetry, 2- Plot 3d trajectory
 
-    ConfigName = 'Falcon9' if LV_Configuration==1 else 'Starship'
+    ConfigName = {1: 'Falcon9', 2: 'Starship', 3: 'StarshipV3'}[LV_Configuration]
 
     Target_Orbits = []
     ### Target orbit parameters for LEO 
     Target_Orbits.append({"Name": 'LEO',            # Name
-                        "apogee": R0 + 200.0e3,     # semi-major axis
+                        "apogee": R0 + 300.0e3,     # semi-major axis
                         "perigee": R0 + 200.0e3,    # semi-minor axis
                         "i": np.deg2rad(28.6),})    # inclination [rad]
 
@@ -642,10 +644,10 @@ if __name__ == '__main__':
     #                     "i": np.deg2rad(98.6),})       # inclination [rad]
     
     ### Target orbit parameters for MEO
-    Target_Orbits.append({"Name": 'MEO',                # Name
-                        "apogee": R0 + 20196.0*1e3,   # semi-major axis
-                        "perigee": R0 + 1193.0*1e3,   # semi-minor axis
-                        "i": np.deg2rad(55.0),})       # inclination [rad]
+    # Target_Orbits.append({"Name": 'MEO',                # Name
+    #                     "apogee": R0 + 20196.0*1e3,   # semi-major axis
+    #                     "perigee": R0 + 1193.0*1e3,   # semi-minor axis
+    #                     "i": np.deg2rad(55.0),})       # inclination [rad]
     
     ### Target orbit parameters for GTO
     # Target_Orbits.append({"Name": 'GTO',                # Name
@@ -654,10 +656,10 @@ if __name__ == '__main__':
     #                     "i": np.deg2rad(28.6),})         # inclination [rad]
 
     ### Target orbit parameters for TLI
-    Target_Orbits.append({"Name": 'TLI',                # Name
-                        "apogee": 384400e3,           # apogee [m]
-                        "perigee": R0 + 200.0e3,      # perigee [m]
-                        "i": np.deg2rad(28.6),})       # inclination [rad]
+    # Target_Orbits.append({"Name": 'TLI',                # Name
+    #                     "apogee": 384400e3,           # apogee [m]
+    #                     "perigee": R0 + 200.0e3,      # perigee [m]
+    #                     "i": np.deg2rad(28.6),})       # inclination [rad]
     
     # Target_Orbits = [Target_Orbits[0]]
     # RecoveryStrategyVec = ['RTLS'] # 'EXP', 'ASDS', 'RTLS'
@@ -687,103 +689,104 @@ if __name__ == '__main__':
     
     DispesrionList, DispesrionParamList, ConfigList = [], [], []
 
-    DispesrionList.append(np.linspace(-10000,10000, 9))
+    # DispesrionList.append(np.linspace(-10000,10000, 9))
+    DispesrionList.append(np.array([[0]]))
     DispesrionParamList.append('FirstStage_EmptyMass')
     ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(-3000,10000, 9))
-    DispesrionParamList.append('SecondStage_EmptyMass')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(-3000,10000, 9))
+    # DispesrionParamList.append('SecondStage_EmptyMass')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(-10000,10000, 9))
-    DispesrionParamList.append('FirstStage_EmptyMass')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(-10000,10000, 9))
+    # DispesrionParamList.append('FirstStage_EmptyMass')
+    # ConfigList.append(2)
 
-    DispesrionList.append(np.linspace(-10000,10000, 9))
-    DispesrionParamList.append('SecondStage_EmptyMass')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(-10000,10000, 9))
+    # DispesrionParamList.append('SecondStage_EmptyMass')
+    # ConfigList.append(2)
 
-    DispesrionList.append(np.linspace(-10000,10000, 11))
-    DispesrionParamList.append('FirstStage_PropMass')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(-10000,10000, 11))
+    # DispesrionParamList.append('FirstStage_PropMass')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(-10000,10000, 11))
-    DispesrionParamList.append('SecondStage_PropMass')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(-10000,10000, 11))
+    # DispesrionParamList.append('SecondStage_PropMass')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(-10000,10000, 11))
-    DispesrionParamList.append('FirstStage_PropMass')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(-10000,10000, 11))
+    # DispesrionParamList.append('FirstStage_PropMass')
+    # ConfigList.append(2)
 
-    DispesrionList.append(np.linspace(-10000,10000, 11))
-    DispesrionParamList.append('SecondStage_PropMass')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(-10000,10000, 11))
+    # DispesrionParamList.append('SecondStage_PropMass')
+    # ConfigList.append(2)
 
-    DispesrionList.append(np.linspace(0.5,2.0, 7))
-    DispesrionParamList.append('FirstStageCx0')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(0.5,2.0, 7))
+    # DispesrionParamList.append('FirstStageCx0')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(0.5,2.0, 7))
-    DispesrionParamList.append('FirstStageCx0')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(0.5,2.0, 7))
+    # DispesrionParamList.append('FirstStageCx0')
+    # ConfigList.append(2)
 
-    DispesrionList.append(np.linspace(0.5,2.0, 7))
-    DispesrionParamList.append('BoosterStageCx0')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(0.5,2.0, 7))
+    # DispesrionParamList.append('BoosterStageCx0')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(0.5,2.0, 7))
-    DispesrionParamList.append('BoosterStageCx0')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(0.5,2.0, 7))
+    # DispesrionParamList.append('BoosterStageCx0')
+    # ConfigList.append(2)
 
-    ### Engine Isp
-    DispesrionList.append(np.linspace(0.85,1.15, 13))
-    DispesrionParamList.append('FirstStageIsp')
-    ConfigList.append(1)
+    # ### Engine Isp
+    # DispesrionList.append(np.linspace(0.85,1.15, 13))
+    # DispesrionParamList.append('FirstStageIsp')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(0.85,1.15, 13))
-    DispesrionParamList.append('SecondStageIsp')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(0.85,1.15, 13))
+    # DispesrionParamList.append('SecondStageIsp')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(0.85,1.15, 13))
-    DispesrionParamList.append('FirstStageIsp')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(0.85,1.15, 13))
+    # DispesrionParamList.append('FirstStageIsp')
+    # ConfigList.append(2)
 
-    DispesrionList.append(np.linspace(0.85,1.15, 13))
-    DispesrionParamList.append('SecondStageIsp')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(0.85,1.15, 13))
+    # DispesrionParamList.append('SecondStageIsp')
+    # ConfigList.append(2)
 
-    ### Engine Thrust
-    DispesrionList.append(np.linspace(0.9,1.15, 11))
-    DispesrionParamList.append('FirstStageThrust')
-    ConfigList.append(1)
+    # ### Engine Thrust
+    # DispesrionList.append(np.linspace(0.9,1.15, 11))
+    # DispesrionParamList.append('FirstStageThrust')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(0.85,1.15, 13))
-    DispesrionParamList.append('SecondStageThrust')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(0.85,1.15, 13))
+    # DispesrionParamList.append('SecondStageThrust')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(0.9,1.15, 11))
-    DispesrionParamList.append('FirstStageThrust')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(0.9,1.15, 11))
+    # DispesrionParamList.append('FirstStageThrust')
+    # ConfigList.append(2)
 
-    DispesrionList.append(np.linspace(0.85,1.15, 13))
-    DispesrionParamList.append('SecondStageThrust')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(0.85,1.15, 13))
+    # DispesrionParamList.append('SecondStageThrust')
+    # ConfigList.append(2)
 
-    DispesrionList.append(np.linspace(0.0, 5000.0, 6))
-    DispesrionParamList.append('LaunchAltDelta')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(0.0, 5000.0, 6))
+    # DispesrionParamList.append('LaunchAltDelta')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(0.0, 5000.0, 6))
-    DispesrionParamList.append('LaunchAltDelta')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(0.0, 5000.0, 6))
+    # DispesrionParamList.append('LaunchAltDelta')
+    # ConfigList.append(2)
 
-    DispesrionList.append(np.linspace(-0.05, 0.05, 11))
-    DispesrionParamList.append('StagePartition')
-    ConfigList.append(1)
+    # DispesrionList.append(np.linspace(-0.05, 0.05, 11))
+    # DispesrionParamList.append('StagePartition')
+    # ConfigList.append(1)
 
-    DispesrionList.append(np.linspace(-0.05, 0.05, 11))
-    DispesrionParamList.append('StagePartition')
-    ConfigList.append(2)
+    # DispesrionList.append(np.linspace(-0.05, 0.05, 11))
+    # DispesrionParamList.append('StagePartition')
+    # ConfigList.append(2)
 
 
     # DispesrionList = np.array([[0]])

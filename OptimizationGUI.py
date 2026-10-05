@@ -23,6 +23,8 @@ import numpy as np
 from DispersionFit import DEFAULT_PARAMETERS, default_fit_bounds, fit_report
 from LaunchSites import LAUNCH_SITES, DEFAULT_LAUNCH_SITE, launch_site_inputs, parse_launch_site
 from GUIState import read_gui_state, write_gui_state
+from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
+                                vehicle_editor_values, vehicle_from_editor, vehicle_name)
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from TelemetryFrames import local_to_ecef_velocity, eci_to_ecef_velocity
 from TelemetryCSV import (load_telemetry_csv, overlay_telemetry, phase_group,
@@ -32,7 +34,7 @@ from TelemetryCSV import (load_telemetry_csv, overlay_telemetry, phase_group,
 PROJECT_DIR = Path(__file__).resolve().parent
 RECOVERY = {"EXP — Expendable": "EXP", "ASDS — Drone ship": "ASDS",
             "RTLS — Return to launch site": "RTLS"}
-VEHICLES = {"Falcon 9": 1, "Starship": 2}
+VEHICLES = BUILTIN_VEHICLES
 RESULT_TABS = ("First stage", "S1 details", "Second stage", "S2 propulsion", "S2 orbit", "Booster")
 MULTIPLIERS = {"FirstStageIsp", "SecondStageIsp", "FirstStageThrust",
                "SecondStageThrust", "FirstStageCx0", "BoosterStageCx0", "AtmosphereDensity"}
@@ -70,6 +72,35 @@ def field_unit(name):
     return "Δ m" if name == "LaunchAltDelta" else "Δ fraction"
 
 
+def nominal_dispersion_values(configuration=1, launch_altitude=0.):
+    """Display the vehicle quantities before applying any dispersion."""
+    model = VLType()
+    model.ApplyVehicleConfiguration(configuration)
+    def number(value):
+        return f"{value:,.3f}".rstrip('0').rstrip('.')
+    tonne_force = 1000. * 9.80665
+    try:
+        altitude = float(launch_altitude)
+    except (TypeError, ValueError):
+        altitude = np.nan
+    return {
+        'FirstStageIsp': f"SL {number(model.FirstStage_SL_Isp)} / vac {number(model.FirstStage_Vac_Isp)} s",
+        'SecondStageIsp': f"{number(model.SecondStage_Vac_Isp)} s",
+        'FirstStageThrust': (f"SL {number(model.FirstStage_SL_Thrust / tonne_force)} / "
+                             f"vac {number(model.FirstStage_Vac_Thrust / tonne_force)} tf"),
+        'SecondStageThrust': f"{number(model.SecondStage_Thrust / tonne_force)} tf",
+        'FirstStageCx0': number(model.FirstStage_Cd0),
+        'BoosterStageCx0': number(model.Booster_Cd0),
+        'FirstStage_EmptyMass': f"{number(model.EmptyFirstStageMass / 1000.)} t",
+        'SecondStage_EmptyMass': f"{number(model.EmptySecondStageMass / 1000.)} t",
+        'FirstStage_PropMass': f"{number(model.FirstStagePropellentMass / 1000.)} t",
+        'SecondStage_PropMass': f"{number(model.SecondStagePropellentMass / 1000.)} t",
+        'AtmosphereDensity': '1 × density profile',
+        'LaunchAltDelta': f"{number(altitude)} m" if np.isfinite(altitude) else '— m',
+        'StagePartitionDelta': f"{model.FirstStagePropellentMass / model.TotalPropellentMass:.4f} S1 fraction",
+    }
+
+
 def parse_dispersion(values, configuration=1):
     """Validate the entire form before launching a potentially long solve."""
     parsed = {}
@@ -85,10 +116,7 @@ def parse_dispersion(values, configuration=1):
         parsed[item.name] = value
     dispersion = DispesrionFactorsType(**parsed)
     model = VLType()
-    if configuration == 2:
-        model.StarShipDatabase()
-    elif configuration != 1:
-        raise ValueError("Unknown vehicle configuration.")
+    model.ApplyVehicleConfiguration(configuration)
     partition = model.FirstStagePropellentMass / model.TotalPropellentMass
     if not 0 < partition + dispersion.StagePartitionDelta < 1:
         raise ValueError("StagePartitionDelta must leave propellant in both stages.")
@@ -150,7 +178,7 @@ def nominal_request(values, configuration=1, recovery="EXP", orbit_values=None, 
     return {
         "launch_site": site,
         "dispersion": asdict(dispersion),
-        "configuration": configuration,
+        "configuration": deepcopy(configuration),
         "recovery": recovery,
         "target_orbit": parse_target_orbit(orbit_values),
         "payload_mass_predefined": parse_payload_mass(payload_mass),
@@ -195,8 +223,7 @@ def second_stage_propellant_remaining(solution, request=None):
     request = request or {}
     model = VLType()
     configuration = solution.get("configuration", request.get("configuration", 1))
-    if configuration == 2:
-        model.StarShipDatabase()
+    model.ApplyVehicleConfiguration(configuration)
     dispersion = solution.get("dispersion", request.get("dispersion", {}))
     model.ApplyScenarioDispersionToLV(DispesrionFactorsType(**dispersion))
     remaining = (float(np.asarray(solution["x3"])[6, -1])
@@ -365,8 +392,7 @@ def draw_phase(figure, phase, solution, target, *, color="tab:blue", case_label=
         line(4, t, s["acc4_sol"], "Specific acceleration", "Acceleration [m/s²]", label="Specific acceleration")
         line(5, t, s["Qdyn4_sol"] / 1000, "Dynamic pressure", "Pressure [kPa]")
         model = VLType()
-        if s.get("configuration", 1) == 2:
-            model.StarShipDatabase()
+        model.ApplyVehicleConfiguration(s.get("configuration", 1))
         loads = aerodynamic_loads(np.asarray(s["alt4_sol"]).ravel(), np.linalg.norm(x[:, 2:4], axis=1),
                                   density_factor=s.get("dispersion", {}).get("AtmosphereDensity", 1.0),
                                   heat_coefficient=model.Booster_k_empirical)
@@ -413,6 +439,7 @@ class OptimizationApp:
         self.cases = [ComparisonCase(f"Case {i + 1}", color) for i, color in
                       enumerate(("#0072B2", "#D55E00", "#009E73"))]
         self.selected_case = 0
+        self.vehicles = vehicle_catalog()
         self.running_case = None
         self.loading_case = False
         self.submitted_inputs = None
@@ -421,6 +448,7 @@ class OptimizationApp:
         self.telemetry_shift = 0.0
         self.controls = []
         self.variables = {}
+        self.dispersion_labels = {}
         self.figures, self.canvases, self.tabs = {}, {}, {}
 
         root.title("Launch Vehicle Optimization")
@@ -535,11 +563,16 @@ class OptimizationApp:
         settings.columnconfigure(1, weight=1)
         self.vehicle = tk.StringVar(value="Falcon 9")
         self.recovery = tk.StringVar(value=next(iter(RECOVERY)))
-        for row, (label, variable, choices) in enumerate((("Vehicle", self.vehicle, VEHICLES), ("Recovery", self.recovery, RECOVERY))):
+        for row, (label, variable, choices) in enumerate((("Vehicle", self.vehicle, self.vehicles), ("Recovery", self.recovery, RECOVERY))):
             ttk.Label(settings, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
             combo = ttk.Combobox(settings, textvariable=variable, values=list(choices), state="readonly", width=28)
             combo.grid(row=row, column=1, sticky="ew", pady=4)
+            if row == 0:
+                self.vehicle_combo = combo
             self.controls.append((combo, "readonly"))
+        self.new_vehicle_button = ttk.Button(settings, text="New vehicle…", command=self.open_vehicle_dialog)
+        self.new_vehicle_button.grid(row=0, column=2, sticky="e", padx=(6, 0))
+        self.controls.append((self.new_vehicle_button, "normal"))
         orbit_form = ttk.LabelFrame(settings, text="Target orbit", padding=6)
         orbit_form.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         orbit_form.columnconfigure(1, weight=1)
@@ -601,7 +634,9 @@ class OptimizationApp:
         entries.columnconfigure(1, weight=1)
         defaults = asdict(DispesrionFactorsType())
         for row, (name, default) in enumerate(defaults.items()):
-            ttk.Label(entries, text=name).grid(row=row, column=0, sticky="w", padx=4, pady=8)
+            label = ttk.Label(entries, wraplength=235, justify="left")
+            label.grid(row=row, column=0, sticky="w", padx=4, pady=8)
+            self.dispersion_labels[name] = label
             variable = tk.StringVar(value=str(default))
             entry = ttk.Entry(entries, textvariable=variable, width=10)
             entry.grid(row=row, column=1, sticky="ew", padx=4, pady=8)
@@ -610,27 +645,37 @@ class OptimizationApp:
             self.controls.append((entry, "normal"))
             variable.trace_add("write", self.inputs_changed)
         self.vehicle.trace_add("write", self.inputs_changed)
+        self.vehicle.trace_add("write", self.refresh_dispersion_nominals)
+        self.site_variables['altitude'].trace_add("write", self.refresh_dispersion_nominals)
+        self.refresh_dispersion_nominals()
         self.recovery.trace_add("write", self.inputs_changed)
 
         footer = ttk.Frame(right, padding=(12, 10, 0, 0))
         footer.grid(row=3, column=0, sticky="ew")
         footer.columnconfigure(0, weight=1)
+        footer.columnconfigure(1, weight=1)
+        self.save_state_button = ttk.Button(footer, text="Save state…", command=self.save_state_file)
+        self.save_state_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.load_state_button = ttk.Button(footer, text="Load state…", command=self.load_state_file)
+        self.load_state_button.grid(row=0, column=1, sticky="ew")
         reset = ttk.Button(footer, text="Reset dispersion to defaults", command=self.reset_defaults)
-        reset.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        reset.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=(6, 0))
         self.reset_gui_button = ttk.Button(footer, text="Reset GUI", command=self.reset_gui)
-        self.reset_gui_button.grid(row=0, column=1, sticky="ew")
+        self.reset_gui_button.grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        self.controls.append((self.save_state_button, "normal"))
+        self.controls.append((self.load_state_button, "normal"))
         self.controls.append((self.reset_gui_button, "normal"))
         self.controls.append((reset, "normal"))
         self.status = tk.StringVar(value="Ready — nominal dispersion values loaded.")
-        ttk.Label(footer, textvariable=self.status, wraplength=360).grid(row=1, column=0, columnspan=2, sticky="w", pady=10)
+        ttk.Label(footer, textvariable=self.status, wraplength=360).grid(row=2, column=0, columnspan=2, sticky="w", pady=10)
         self.progress = ttk.Progressbar(footer, mode="indeterminate")
-        self.progress.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        self.progress.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         self.cancel_button = ttk.Button(footer, text="Cancel", command=self.cancel, state="disabled")
-        self.cancel_button.grid(row=3, column=0, sticky="w", padx=(0, 8))
+        self.cancel_button.grid(row=4, column=0, sticky="w", padx=(0, 8))
         self.run_button = ttk.Button(footer, text="Run Case 1", style="Run.TButton", command=self.run)
-        self.run_button.grid(row=3, column=1, sticky="e")
+        self.run_button.grid(row=4, column=1, sticky="e")
         self.fit_button = ttk.Button(footer, text="Fit dispersion to telemetry…", command=self.open_fit_dialog, state="disabled")
-        self.fit_button.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.fit_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.restore_state()
         self.update_case_labels()
         self.restoring_state = False
@@ -668,10 +713,8 @@ class OptimizationApp:
             self.root.after_cancel(self.save_id)
         self.save_id = self.root.after(500, self.save_state)
 
-    def save_state(self):
-        if self.save_id is not None:
-            self.root.after_cancel(self.save_id)
-            self.save_id = None
+    def state_snapshot(self):
+        """Capture every restorable GUI setting and completed result."""
         self.cases[self.selected_case].draft = self.capture_inputs()
         selected_tab = self.notebook.tab(self.notebook.select(), "text")
         cases = []
@@ -683,20 +726,63 @@ class OptimizationApp:
                           "computed_inputs": case.computed_inputs, "request": case.request,
                           "result": case.result, "run_dir": str(case.run_dir) if case.run_dir else None,
                           "state": state, "fit_report": case.fit_report, "fit_settings": case.fit_settings})
-        snapshot = {"cases": cases, "selected_case": self.selected_case,
-                    "telemetry": {"path": str(self.telemetry.path.resolve()) if self.telemetry else None,
-                                  "color": self.telemetry_color, "visible": self.telemetry_visible.get(),
-                                  "primary": self.telemetry_primary.get(), "shift": self.telemetry_shift,
-                                  "shift_input": self.telemetry_shift_input.get()},
-                    "layout": {"geometry": self.root.geometry(), "tab": selected_tab,
-                               "zoomed": self.window_zoomed(), "sash": self.panes.sashpos(0)}}
+        return {"cases": cases, "selected_case": self.selected_case,
+                "custom_vehicles": [value for value in self.vehicles.values() if isinstance(value, dict)],
+                "telemetry": {"path": str(self.telemetry.path.resolve()) if self.telemetry else None,
+                              "color": self.telemetry_color, "visible": self.telemetry_visible.get(),
+                              "primary": self.telemetry_primary.get(), "shift": self.telemetry_shift,
+                              "shift_input": self.telemetry_shift_input.get()},
+                "layout": {"geometry": self.root.geometry(), "tab": selected_tab,
+                           "zoomed": self.window_zoomed(), "sash": self.panes.sashpos(0)}}
+
+    def save_state(self, path=None):
+        if self.save_id is not None:
+            self.root.after_cancel(self.save_id)
+            self.save_id = None
+        target = Path(path) if path is not None else self.state_path
         try:
-            write_gui_state(self.state_path, snapshot)
+            write_gui_state(target, self.state_snapshot())
         except (OSError, ValueError, TypeError) as exc:
             self.status.set(f"Could not save GUI settings: {exc}")
-            self.append_log(f"\nCould not save GUI settings to {self.state_path}: {exc}\n")
+            self.append_log(f"\nCould not save GUI settings to {target}: {exc}\n")
             return False
         return True
+
+    def save_state_file(self):
+        from tkinter import filedialog
+        if self.process is not None:
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Save GUI state", defaultextension=".json",
+            initialdir=str(self.output_root), initialfile="launch_optimization_state.json",
+            filetypes=(("GUI state", "*.json"), ("All files", "*.*")))
+        if not path:
+            return
+        if self.save_state(path):
+            # Keep automatic startup restore synchronized with the exported file.
+            self.save_state()
+            self.status.set(f"GUI state saved to {path}")
+
+    def load_state_file(self):
+        from tkinter import filedialog, messagebox
+        if self.process is not None:
+            return
+        # Flush the exact current state so a failed import can be rolled back.
+        if not self.save_state():
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Load GUI state", initialdir=str(self.output_root),
+            filetypes=(("GUI state", "*.json"), ("All files", "*.*")))
+        if not path:
+            return
+        if not self.restore_state(path, reset_on_error=False):
+            error = self.status.get()
+            self.restore_state()
+            self.status.set(error)
+            messagebox.showerror("Could not load GUI state", error, parent=self.root)
+            return
+        self.save_state()
+        self.status.set(f"GUI state loaded from {path}")
 
     def window_zoomed(self, value=None):
         import tkinter as tk
@@ -711,17 +797,22 @@ class OptimizationApp:
         except tk.TclError:
             return False  # Some window managers do not support maximization.
 
-    def restore_state(self):
-        if not self.state_path.exists():
-            return
+    def restore_state(self, path=None, reset_on_error=True):
+        source_path = Path(path) if path is not None else self.state_path
+        if not source_path.exists():
+            return False
         notes = []
+        restoring = self.restoring_state
+        self.restoring_state = True
         try:
-            state = read_gui_state(self.state_path)
+            state = read_gui_state(source_path)
+            self.vehicles = vehicle_catalog(state.get('custom_vehicles', []))
+            self.vehicle_combo.configure(values=list(self.vehicles))
             for index, saved in enumerate(state["cases"]):
                 case = self.cases[index]
                 draft = default_case_inputs()
                 source = saved.get("draft", {})
-                for key, options in (("vehicle", VEHICLES), ("recovery", RECOVERY)):
+                for key, options in (("vehicle", self.vehicles), ("recovery", RECOVERY)):
                     if source.get(key) in options:
                         draft[key] = source[key]
                 if isinstance(source.get("payload_mass"), str):
@@ -753,6 +844,7 @@ class OptimizationApp:
             index = state.get("selected_case", 0)
             self.select_case(index if type(index) is int and 0 <= index < 3 else 0)
             telemetry = state.get("telemetry", {})
+            self.telemetry = None
             self.telemetry_color = telemetry.get("color", "#CC79A7")
             self.root.winfo_rgb(self.telemetry_color)
             self.telemetry_color_button.configure(background=self.telemetry_color)
@@ -784,12 +876,19 @@ class OptimizationApp:
                 self.notebook.select(self.tabs[tab])
             self.status.set("GUI settings and completed cases restored." if not notes else notes[0])
         except Exception as exc:
-            # A damaged or obsolete snapshot must not prevent the GUI starting.
-            self.reset_gui(save=False)
-            notes.append(f"Could not restore GUI settings; defaults loaded: {exc}")
+            if reset_on_error:
+                # A damaged or obsolete startup snapshot must not prevent launch.
+                self.reset_gui(save=False)
+                notes.append(f"Could not restore GUI settings; defaults loaded: {exc}")
+            else:
+                notes.append(f"Could not load GUI state: {exc}")
             self.status.set(notes[-1])
+            return False
+        finally:
+            self.restoring_state = restoring
         for note in notes:
             self.append_log(note + "\n")
+        return True
 
     def reset_gui(self, save=True):
         if self.process is not None:
@@ -854,6 +953,11 @@ class OptimizationApp:
                 "launch_site": dict(name=self.launch_site.get(), **{k: v.get() for k, v in self.site_variables.items()}),
                 "dispersion": {k: v.get() for k, v in self.variables.items()},
                 "orbit": {k: v.get() for k, v in self.orbit_variables.items()}}
+
+    def refresh_dispersion_nominals(self, *args):
+        values = nominal_dispersion_values(self.vehicles[self.vehicle.get()], self.site_variables['altitude'].get())
+        for name, label in self.dispersion_labels.items():
+            label.configure(text=f"{name} ({values[name]})")
 
     def inputs_changed(self, *args):
         if self.loading_case or not hasattr(self, "status"):
@@ -1050,7 +1154,7 @@ class OptimizationApp:
         summaries = []
         for case in displayed:
             orbit = case.request["target_orbit"]
-            vehicle = next(k for k, v in VEHICLES.items() if v == case.request["configuration"])
+            vehicle = vehicle_name(case.request["configuration"])
             site = parse_launch_site(case.request.get("launch_site"))
             summaries.append(f"{case.name} · {vehicle} · {site['name']} · {case.request['recovery']} · "
                              f"{(orbit['apogee'] - 6378137) / 1000:g} × "
@@ -1106,7 +1210,7 @@ class OptimizationApp:
             return
         try:
             request = nominal_request({k: v.get() for k, v in self.variables.items()},
-                                      VEHICLES[self.vehicle.get()], RECOVERY[self.recovery.get()],
+                                      self.vehicles[self.vehicle.get()], RECOVERY[self.recovery.get()],
                                       {k: v.get() for k, v in self.orbit_variables.items()},
                                       payload_mass=self.payload_mass.get(),
                                       launch_site=self.capture_inputs()["launch_site"])
@@ -1257,8 +1361,101 @@ class OptimizationApp:
 
     def form_request(self):
         draft = self.capture_inputs()
-        return nominal_request(draft['dispersion'], VEHICLES[draft['vehicle']], RECOVERY[draft['recovery']],
+        return nominal_request(draft['dispersion'], self.vehicles[draft['vehicle']], RECOVERY[draft['recovery']],
                                draft['orbit'], draft['payload_mass'], draft['launch_site'])
+
+    def add_vehicle(self, definition):
+        definitions = [value for value in self.vehicles.values() if isinstance(value, dict)]
+        catalog = vehicle_catalog([*definitions, definition])
+        name = definition['name'].strip()
+        self.vehicles = catalog
+        self.vehicle_combo.configure(values=list(catalog))
+        self.vehicle.set(name)
+        self.status.set(f"Created {name}. Run the selected case to simulate it.")
+        self.schedule_save()
+
+    def open_vehicle_dialog(self):
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+        if self.process is not None:
+            return
+        selected = self.vehicle.get()
+        configuration = self.vehicles[selected]
+        defaults = vehicle_editor_values(configuration)
+        model = VLType()
+        model.ApplyVehicleConfiguration(configuration)
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"New vehicle from {selected}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry('760x640')
+        dialog.minsize(620, 480)
+        panel = ttk.Frame(dialog, padding=12)
+        panel.pack(fill='both', expand=True)
+        name_row = ttk.Frame(panel)
+        name_row.pack(fill='x')
+        ttk.Label(name_row, text='Vehicle name').pack(side='left', padx=(0, 8))
+        name = f"{selected} copy"
+        number = 2
+        while name.casefold() in {key.casefold() for key in self.vehicles}:
+            name = f"{selected} copy {number}"
+            number += 1
+        name_input = tk.StringVar(value=name)
+        name_entry = ttk.Entry(name_row, textvariable=name_input)
+        name_entry.pack(side='left', fill='x', expand=True)
+        ttk.Label(panel, text=(f"Initial values: {selected}, before dispersion. "
+                  "t = metric tons; tf = metric ton-force; s = seconds. "
+                  "Launch site, target orbit, and payload use the selected case's settings."),
+                  wraplength=710).pack(fill='x', pady=10)
+        notebook = ttk.Notebook(panel)
+        notebook.pack(fill='both', expand=True)
+        variables = {}
+        for group, parameters in VEHICLE_PARAMETER_GROUPS.items():
+            tab = ttk.Frame(notebook)
+            notebook.add(tab, text={'Ascent aerodynamics': 'Ascent aero', 'Booster recovery': 'Recovery'}.get(group, group))
+            canvas = tk.Canvas(tab, highlightthickness=0)
+            scrollbar = ttk.Scrollbar(tab, orient='vertical', command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            scrollbar.pack(side='right', fill='y')
+            canvas.pack(side='left', fill='both', expand=True)
+            fields_panel = ttk.Frame(canvas, padding=8)
+            window = canvas.create_window((0, 0), window=fields_panel, anchor='nw')
+            fields_panel.bind('<Configure>', lambda event, c=canvas: c.configure(scrollregion=c.bbox('all')))
+            canvas.bind('<Configure>', lambda event, c=canvas, w=window: c.itemconfigure(w, width=event.width))
+            fields_panel.columnconfigure(1, weight=1)
+            for row, (key, label, unit, _) in enumerate(parameters):
+                ttk.Label(fields_panel, text=label).grid(row=row, column=0, sticky='w', padx=4, pady=6)
+                variable = tk.StringVar(value=defaults[key])
+                ttk.Entry(fields_panel, textvariable=variable, width=20).grid(
+                    row=row, column=1, sticky='ew', padx=8, pady=6)
+                ttk.Label(fields_panel, text=unit).grid(row=row, column=2, sticky='w', padx=4)
+                variables[key] = variable
+        reference = ttk.Frame(notebook, padding=12)
+        notebook.add(reference, text='Context')
+        context = (
+            f"Earth reference radius: {model.R0:,.3f} m\n"
+            f"Earth gravitational parameter: {model.mu:.8g} m³/s²\n"
+            f"Earth rotation: {model.omega_earth:.8g} rad/s\n"
+            f"Earth eccentricity: {model.e:g}\n"
+            f"Reference gravity: {model.g0:.6g} m/s²\n\n"
+            "Reference area, total mass, stage masses, and propellant partition are calculated from your entries.\n\n"
+            "The Earth atmosphere, flight equations, recovery engine fractions, and solver discretization use "
+            "the existing simulation model. Launch coordinates, orbit, payload, and dispersion are set in the main window."
+        )
+        ttk.Label(reference, text=context, wraplength=680, justify='left').pack(anchor='nw')
+        footer = ttk.Frame(panel)
+        footer.pack(fill='x', pady=(10, 0))
+        def create():
+            try:
+                definition = vehicle_from_editor(name_input.get(), {key: value.get() for key, value in variables.items()})
+                self.add_vehicle(definition)
+            except ValueError as exc:
+                messagebox.showerror('Invalid vehicle', str(exc), parent=dialog)
+                return
+            dialog.destroy()
+        ttk.Button(footer, text='Cancel', command=dialog.destroy).pack(side='left')
+        ttk.Button(footer, text='Create vehicle', command=create).pack(side='right')
+        name_entry.focus_set()
 
     def open_fit_dialog(self):
         import tkinter as tk
@@ -1273,6 +1470,7 @@ class OptimizationApp:
         source = self.cases[self.selected_case]
         saved = source.fit_settings or {}
         bounds = default_fit_bounds(request)
+        nominal_values = nominal_dispersion_values(request['configuration'], request['launch_site']['altitude'])
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Fit {source.name} to telemetry")
         dialog.transient(self.root)
@@ -1281,20 +1479,20 @@ class OptimizationApp:
         panel.pack(fill="both", expand=True)
         ttk.Label(panel, text="Choose factors and absolute bounds. Each candidate is synchronized before scoring.",
                   wraplength=630).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
-        for column, title in enumerate(("Fit factor", "Current", "Lower bound", "Upper bound")):
+        for column, title in enumerate(("Fit factor", "Initial guess", "Lower bound", "Upper bound")):
             ttk.Label(panel, text=title).grid(row=1, column=column, sticky="w", padx=4)
         selected, lows, highs = {}, {}, {}
         for row, (name, pair) in enumerate(bounds.items(), start=2):
             selected[name] = tk.BooleanVar(value=name in saved.get('parameters', DEFAULT_PARAMETERS))
-            pair = saved.get('bounds', {}).get(name, pair)
             lows[name], highs[name] = tk.StringVar(value=str(pair[0])), tk.StringVar(value=str(pair[1]))
-            ttk.Checkbutton(panel, text=name, variable=selected[name]).grid(row=row, column=0, sticky="w", padx=4, pady=2)
+            ttk.Checkbutton(panel, text=f"{name}\nNominal: {nominal_values[name]}",
+                            variable=selected[name]).grid(row=row, column=0, sticky="w", padx=4, pady=2)
             ttk.Label(panel, text=f"{request['dispersion'][name]:g}").grid(row=row, column=1, sticky="e", padx=8)
             ttk.Entry(panel, textvariable=lows[name], width=12).grid(row=row, column=2, padx=4)
             ttk.Entry(panel, textvariable=highs[name], width=12).grid(row=row, column=3, padx=4)
         row = 2 + len(bounds)
         settings = {}
-        for key, label, default in (("max_evaluations", "Maximum solver evaluations", 80),
+        for key, label, default in (("max_evaluations", "Maximum solver evaluations", 100),
                                     ("altitude_scale", "Altitude error scale [m]", 1000),
                                     ("speed_scale", "Speed error scale [m/s]", 25),
                                     ("regularization", "Penalty for parameter changes", .01)):
@@ -1310,7 +1508,10 @@ class OptimizationApp:
             row=row, column=2, columnspan=2, sticky="ew", padx=4)
         row += 1
         ttk.Label(panel, wraplength=630, text=("The destination case receives the best fit when the search ends. "
+                  "Bounds open at their nominal defaults; the initial guess uses the selected case's current values. "
+                  "Nominal units: s = seconds, t = metric tons, tf = metric ton-force; SL = sea level, vac = vacuum. "
                   "Payload is held fixed; maximize mode uses the current result's payload or a preliminary nominal solve. "
+                  "ASDS and RTLS also fit available booster return altitude/speed, including deceleration. "
                   "Cancel retains the best completed comparison.")).grid(row=row, column=0, columnspan=4, sticky="w", pady=8)
         def remember(*args):
             source.fit_settings = dict(parameters=[name for name in selected if selected[name].get()],

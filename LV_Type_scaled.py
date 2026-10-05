@@ -6,6 +6,7 @@ import numpy as np
 import scipy as sp
 import casadi as ca
 import Atmosphere_Type as Atm_Type
+from VehicleDefinitions import validate_vehicle_definition
 
 @dataclass
 class PythonMsg:
@@ -83,14 +84,14 @@ class VLType(PythonMsg):
     FirstStage_Cda2: float = field(default = 3.0)
     FirstStage_MaxAlpha: float = field(default = 0.1745) # [rad]
     FairingSeparationAltitude: float = field(default = 85.0 * 10**3) # [m]
-    FirstStage_MaxDynamicPressure: float = field(default = 32.0 * 10**3) # [Pa]
+    FirstStage_MaxDynamicPressure: float = field(default = 30.0 * 10**3) # [Pa]
     FirstStage_StageSeparationMaxDynamicPressure: float = field(default = 0.5 * 10**3) # [Pa]
     FirstStage_MaxQdynAlpha: float = field(default = 5.0 * 10**3) # [Pa]
 
     Booster_Cd0: float = field(default = 2.0)
     Booster_Cda2: float = field(default = 2.0)
     Booster_CLa: float = field(default = 0.6) # [1/rad]
-    Booster_MaxDynamicPressure: float = field(default = 100.0 * 10**3) # [Pa]
+    Booster_MaxDynamicPressure: float = field(default = 50.0 * 10**3) # [Pa]
     Booster_MaxHeatFlux: float = field(default = 110.0 * 10**3) # [Pa]
     Booster_k_empirical: float = field(default = 2.0e-4) # [-]
 
@@ -230,8 +231,50 @@ class VLType(PythonMsg):
         self.SecondStage_Vac_Isp = (3*self.FirstStage_Vac_Thrust*380.0 + 3*self.SecondStage_Thrust*347.0)/(3*self.FirstStage_Vac_Thrust + 3*self.SecondStage_Thrust)
         self.SecondStage_MinThrust_Factor = 0.5
         self.SecondStage_MinThrust_IspFactor = 0.85
+        self.SecondStage_CoastTimeAfterSep: 1.0 # [sec]
+
 
         self.__post_init__()
+
+    def StarShipV3Database(self):
+        """Apply the Starship V3 vehicle assumptions.
+
+        SpaceX publishes V3 propellant capacity and total thrust, but not dry
+        mass, aerodynamic coefficients, or specific impulse. Start with the
+        existing Starship assumptions for those values and replace the
+        published V3 quantities.
+        """
+        self.StarShipDatabase()
+
+        # Starship V3 published capacities.
+        self.FirstStagePropellentMass = 3650.0 * 10**3
+        self.SecondStagePropellentMass = 1600.0 * 10**3
+
+        # Raptor 3/Starship V3 published thrust. tf is converted to newtons
+        # with standard gravity; vacuum booster thrust uses 33 x 275 tf.
+        tonne_force = 1000.0 * 9.80665
+        self.FirstStage_SL_Thrust = 8240.0 * tonne_force
+        self.FirstStage_Vac_Thrust = 33.0 * 275.0 * tonne_force
+        self.SecondStage_Thrust = 1614.0 * tonne_force
+
+        self.__post_init__()
+
+    def ApplyVehicleConfiguration(self, LV_Configuration: int):
+        if isinstance(LV_Configuration, dict):
+            definition = validate_vehicle_definition(LV_Configuration)
+            for name, value in definition['parameters'].items():
+                setattr(self, name, value)
+            self.__post_init__()
+            return
+        if LV_Configuration == 1:
+            return
+        if LV_Configuration == 2:
+            self.StarShipDatabase()
+            return
+        if LV_Configuration == 3:
+            self.StarShipV3Database()
+            return
+        raise ValueError(f"Unknown launch vehicle configuration: {LV_Configuration}")
 
     def ApplyScenarioDispersionToLV(self, DispesrionFactors: DispesrionFactorsType):
 
@@ -271,8 +314,7 @@ class BoosterLaunchVehicle_2D(VLType):
         super().__init__()
         self.N = N
         self.atmosphere = atmosphere
-        if LV_Configuration == 2: # Starship database
-            self.StarShipDatabase()
+        self.ApplyVehicleConfiguration(LV_Configuration)
 
         self.ApplyLaunchSite(launch_site)
         self.ApplyScenarioDispersionToLV(ScenarioDispersion)
@@ -347,8 +389,7 @@ class LaunchVehicle_ECI(VLType):
     def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int, N = [10, 60], launch_site=None):
         super().__init__()
 
-        if LV_Configuration == 2: # Starship database
-            self.StarShipDatabase()
+        self.ApplyVehicleConfiguration(LV_Configuration)
         self.ApplyLaunchSite(launch_site)
         self.ApplyScenarioDispersionToLV(ScenarioDispersion)
 
@@ -476,8 +517,7 @@ class BoosterReturn_2D(VLType):
     def __init__(self, atmosphere: Atm_Type.AtmosphereType, LV_Configuration: int, ScenarioDispersion: DispesrionFactorsType, N: int = 20, launch_site=None):
         super().__init__(atmosphere=atmosphere)
 
-        if LV_Configuration == 2: # Starship database
-            self.StarShipDatabase()
+        self.ApplyVehicleConfiguration(LV_Configuration)
         self.ApplyLaunchSite(launch_site)
         self.ApplyScenarioDispersionToLV(ScenarioDispersion)
 
@@ -548,8 +588,7 @@ class BoostBackBurn_2D(VLType):
     def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int, launch_site=None):
         super().__init__()
 
-        if LV_Configuration == 2: # Starship database
-            self.StarShipDatabase()
+        self.ApplyVehicleConfiguration(LV_Configuration)
         self.ApplyLaunchSite(launch_site)
         self.ApplyScenarioDispersionToLV(ScenarioDispersion)
 

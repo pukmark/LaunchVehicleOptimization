@@ -29,7 +29,7 @@ class LaunchSiteTests(unittest.TestCase):
 
     def test_all_models_receive_site_before_symbolic_transforms(self):
         for name in ('Vandenberg', 'Equator', 'North Pole', 'Custom'):
-            for configuration in (1, 2):
+            for configuration in (1, 2, 3):
                 with self.subTest(site=name, configuration=configuration):
                     site = parse_launch_site(dict(launch_site_inputs(name), altitude='1000'))
                     model = LV_Optimization(DispesrionFactorsType(LaunchAltDelta=25), configuration, launch_site=site)

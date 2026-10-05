@@ -20,7 +20,7 @@ from OptimizationGUI import (
     DispesrionFactorsType, OptimizationApp, draw_phase, nominal_request,
     parse_dispersion, parse_target_orbit, run_optimization, worker,
     orbital_diagnostics, thrust_velocity_angle, second_stage_propellant_remaining,
-    default_case_inputs, RECOVERY, stage_two_speed_acceleration,
+    default_case_inputs, RECOVERY, VEHICLES, VLType, stage_two_speed_acceleration,
 )
 
 
@@ -42,6 +42,19 @@ class DispersionFormTests(unittest.TestCase):
                             ("SecondStage_PropMass", "-10000000")):
             with self.subTest(name=name, value=value), self.assertRaises(ValueError):
                 parse_dispersion(dict(asdict(DispesrionFactorsType()), **{name: value}))
+
+    def test_starship_v3_configuration(self):
+        self.assertEqual(VEHICLES["Starship V3"], 3)
+        request = nominal_request(asdict(DispesrionFactorsType()), configuration=3)
+        self.assertEqual(request["configuration"], 3)
+        model = VLType()
+        model.ApplyVehicleConfiguration(3)
+        self.assertEqual(model.FirstStagePropellentMass, 3650e3)
+        self.assertEqual(model.SecondStagePropellentMass, 1600e3)
+        self.assertAlmostEqual(model.FirstStage_SL_Thrust, 8240e3 * 9.80665)
+        self.assertAlmostEqual(model.SecondStage_Thrust, 1614e3 * 9.80665)
+        with self.assertRaisesRegex(ValueError, "Unknown launch vehicle configuration"):
+            model.ApplyVehicleConfiguration(4)
 
     def test_solver_receives_snapshot_and_nominal_target(self):
         request = nominal_request(asdict(DispesrionFactorsType(FirstStageThrust=1.02)), 2, "RTLS")
@@ -104,7 +117,8 @@ class DispersionFormTests(unittest.TestCase):
 class RemainingPropellantTests(unittest.TestCase):
     def test_payload_separation_subtracts_dispersed_dry_mass_and_final_burn(self):
         for configuration, dry, first_prop, second_prop in ((1, 4000, 395700, 92670),
-                                                            (2, 85000, 3250000, 1500000)):
+                                                            (2, 85000, 3250000, 1500000),
+                                                            (3, 85000, 3650000, 1600000)):
             with self.subTest(configuration=configuration):
                 partition_delta, dry_offset = 0.02, 500
                 expected_dry = dry * (1 - partition_delta * (first_prop + second_prop) / second_prop) + dry_offset
@@ -251,6 +265,29 @@ class ResultRenderingTests(unittest.TestCase):
         self.addCleanup(cleanup)
         return OptimizationApp(root, output_root=directory)
 
+    def test_custom_vehicle_selection_and_library_survive_restart(self):
+        from VehicleDefinitions import vehicle_editor_values, vehicle_from_editor
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(directory)
+            app.vehicle.set('Starship V3')
+            definition = vehicle_from_editor('Research rocket', vehicle_editor_values(3))
+            app.add_vehicle(definition)
+            self.assertEqual(app.vehicle.get(), 'Research rocket')
+            self.assertEqual(app.form_request()['configuration'], definition)
+            self.assertIn('3,650 t', app.dispersion_labels['FirstStage_PropMass']['text'])
+            app.select_case(1)
+            self.assertEqual(app.vehicle.get(), 'Falcon 9')
+            app.close()
+            restored = self.make_app(directory)
+            self.assertEqual(restored.vehicles['Research rocket'], definition)
+            self.assertIn('Research rocket', restored.vehicle_combo['values'])
+            restored.select_case(0)
+            self.assertEqual(restored.vehicle.get(), 'Research rocket')
+            self.assertEqual(restored.form_request()['configuration'], definition)
+            restored.reset_gui()
+            self.assertEqual(restored.vehicle.get(), 'Falcon 9')
+            self.assertIn('Research rocket', restored.vehicles)
+
     def test_close_reopen_restores_cases_telemetry_and_display(self):
         from TelemetryCSV import load_telemetry_csv
         with tempfile.TemporaryDirectory() as directory:
@@ -298,6 +335,39 @@ class ResultRenderingTests(unittest.TestCase):
             self.assertEqual(restored.notebook.tab(restored.notebook.select(), "text"), "S2 orbit")
             self.assertTrue(restored.figures["Second stage"].axes[0].lines)
             self.assertEqual(restored.notebook.tab(restored.tabs["Booster"], "state"), "normal")
+
+    def test_manual_state_file_save_load_and_failed_load_rollback(self):
+        from GUIState import read_gui_state
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(directory)
+            exported = Path(directory) / "saved_state.json"
+            app.payload_mass.set("12345")
+            app.vehicle.set("Starship V3")
+            app.select_case(1)
+            app.orbit_variables["apogee"].set("450")
+            with patch("tkinter.filedialog.asksaveasfilename", return_value=str(exported)):
+                app.save_state_file()
+            self.assertTrue(exported.exists())
+            self.assertEqual(read_gui_state(exported)["cases"][0]["draft"]["payload_mass"], "12345")
+
+            app.select_case(0)
+            app.payload_mass.set("999")
+            with patch("tkinter.filedialog.askopenfilename", return_value=str(exported)):
+                app.load_state_file()
+            self.assertEqual(app.selected_case, 1)
+            app.select_case(0)
+            self.assertEqual(app.payload_mass.get(), "12345")
+            self.assertEqual(app.vehicle.get(), "Starship V3")
+            self.assertEqual(read_gui_state(app.state_path)["selected_case"], 1)
+
+            corrupt = Path(directory) / "corrupt.json"
+            corrupt.write_text("{broken")
+            app.payload_mass.set("54321")
+            with (patch("tkinter.filedialog.askopenfilename", return_value=str(corrupt)),
+                  patch("tkinter.messagebox.showerror") as error):
+                app.load_state_file()
+            self.assertEqual(app.payload_mass.get(), "54321")
+            error.assert_called_once()
 
     def test_reset_gui_persists_defaults_and_keeps_run_files(self):
         with tempfile.TemporaryDirectory() as directory:

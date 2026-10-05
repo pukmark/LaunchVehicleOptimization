@@ -43,6 +43,26 @@ the bottom right. The selected orbit is saved with the run and used in the
 result plots. Multipliers are marked `×`; mass and
 altitude offsets use kg and m, and stage partition is a fractional offset.
 **Reset dispersion to defaults** restores the nominal factors.
+Each dispersion name shows its nominal vehicle quantity in the main panel and
+fit dialog: Isp in seconds (`s`), thrust in metric ton-force (`tf`), and mass in
+metric tons (`t`). First-stage propulsion shows both sea-level (SL) and vacuum
+values. These annotations follow the selected vehicle and launch-site altitude;
+the editable factors and mass offsets retain their existing units.
+
+Click **New vehicle…** beside the vehicle selector to create a vehicle from the
+currently selected vehicle's nominal parameters. The editor includes geometry,
+dry/propellant/fairing masses, sea-level and vacuum propulsion, aerodynamic
+coefficients and limits, booster recovery loads, and flight limits. Enter masses
+in metric tons, thrust in metric ton-force, and Isp in seconds. Give the vehicle
+a unique name and click **Create vehicle** to add it to the selector and select
+it for the active case. Existing cases retain their own vehicle selections.
+Custom vehicles can also be used as templates for another new vehicle.
+
+Vehicle definitions are saved with the GUI state and included in optimization
+and telemetry-fit requests and results. The editor's **Context** tab shows the
+fixed Earth environment and explains which quantities are calculated. Launch
+site, target orbit, payload, and dispersion remain case settings; the existing
+flight equations and recovery engine fractions also apply to custom vehicles.
 
 **Launch site** is saved independently for each case. Presets include Kennedy
 Space Center (the original nominal location), Vandenberg, Starbase (Boca Chica),
@@ -85,6 +105,11 @@ if that file has moved, select it again with **Load telemetry CSV…**. Closing 
 optimization cancels the active solve and retains the previous completed result;
 reopening never starts an optimization automatically.
 
+Use **Save state…** to export the same complete snapshot to a chosen JSON file,
+and **Load state…** to restore it later. Loading a state file also updates the
+automatic startup snapshot. A corrupt or incompatible file leaves the current
+GUI state unchanged.
+
 **Reset GUI** restores all three cases and display settings to their defaults and
 clears the current plots and telemetry selection. The reset is saved immediately.
 Previously saved optimization run folders remain on disk. **Reset dispersion to
@@ -96,6 +121,10 @@ absolute lower/upper bounds, solver-evaluation budget (80 by default), altitude
 and speed error scales, and the destination case. Thrust and Isp multipliers for
 both ascent stages are selected initially. The default destination is an empty
 comparison slot, so the source case remains available alongside the fit.
+Each time the dialog opens, lower and upper bounds reset to the vehicle's nominal
+defaults. The initial dispersion guess uses the selected case's current values;
+its computed trajectory, when available, supplies the solver's initial guess.
+Bounds can be edited for that search and must contain the initial values.
 
 Every successful candidate is synchronized independently **before comparison**:
 the first simulated stage-one speed is matched to the first rising interpolated
@@ -109,8 +138,20 @@ maximize mode uses the source case's computed payload, or runs a preliminary
 nominal optimization to determine it. It then uses bounded Powell search,
 robust normalized altitude/speed errors balanced across channels and phases,
 and a configurable penalty for changes from the starting factors. Comparison
-samples are fixed from baseline overlap (with a small boundary margin). Missing
-coverage is penalized; below 90% coverage in any channel the candidate is rejected.
+samples are fixed from baseline overlap (with a small boundary margin). First-
+and second-stage comparisons use only times with positive telemetry acceleration
+(`dv/dt > 0`, backward differences of ECEF speed). The same time mask applies to
+ascent altitude and speed; zero/negative acceleration and missing speed intervals
+are excluded. This omits cutoff and coast samples before
+second-stage ignition. Each stage needs speed telemetry to select its samples.
+For **ASDS and RTLS**, available booster altitude and speed telemetry after
+separation also contribute to the score, covering the return trajectory through
+landing (including RTLS boostback). Booster samples include coasting and
+deceleration; either altitude or speed can be used independently. **EXP** excludes
+booster telemetry. All phases use the same per-candidate synchronization, which
+still requires first- or second-stage speed telemetry. Booster errors receive the
+same phase weighting as each ascent stage and appear in the fit report.
+Missing coverage is penalized; below 90% coverage in any channel the candidate is rejected.
 Derived acceleration, pressure, and heat flux are not included in the score.
 
 The GUI stays responsive, displays evaluation progress and best score, and saves
@@ -266,7 +307,8 @@ curves cover both sides of fairing separation. Specific acceleration excludes
 gravity; orbital diagnostics use the model's Earth gravitational parameter.
 Undefined angles at zero speed or zero thrust appear as gaps in the curves.
 
-The vehicle selector also supports Starship. Each tab has Matplotlib controls
+The vehicle selector also supports Starship and Starship V3 (configuration 3).
+Each tab has Matplotlib controls
 for zooming, panning, and saving plots. Settings are locked during a run; the
 solver runs in a separate process, with live output and a **Cancel** button.
 Only converged solutions are plotted; failed runs display their solver status.

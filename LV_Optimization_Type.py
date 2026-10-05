@@ -324,19 +324,19 @@ class LV_Optimization(VLType):
             opti.subject_to(x4_landing[4,self.rocket_return.N] >= (self.rocket_return.EmptyFirstStageMass)/self.rocket_return.scaleX[4]) # minimal mass at the end of the flight
 
         # set the cost function
-        gain = 1e-1
+        gain = 1e-2
         cost = 0.0
         # cost += 0.5*20*ca.sumsqr(np.linspace(0,1,self.booster.N, (self.booster.N,1))**2*(u1[0,:]-0.75).T) 
         cost += 0.5*gain*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])) 
         cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]) )
         if RecoveryStrategy != 'EXP':
-            cost += 0.5*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) 
+            cost += 0.05*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) 
         if type(payload_mass_scaled) != ca.MX:
             cost += -x3f[6]
             if RecoveryStrategy != 'EXP':
                 cost += -0.01*x4_landing[4,self.rocket_return.N]
         else:
-            cost += -payload_mass_scaled*100
+            cost += -payload_mass_scaled*10
         opti.minimize(cost)
 
 
@@ -744,10 +744,11 @@ class LV_Optimization(VLType):
                        'apogee': float(Target_Orbit['apogee']), 'perigee': float(Target_Orbit['perigee']),
                        'inclination': float(Target_Orbit['i']), 'payload': float(payload_mass_predefined)}
         case_id = hashlib.sha256(json.dumps(case_values, sort_keys=True).encode()).hexdigest()[:16]
+        configuration_tag = 'Custom' if isinstance(self.LV_Configuration, dict) else self.LV_Configuration
         filename = (f"LV_{RecoveryStrategy}_apogee_{0.001*(Target_Orbit['apogee']-self.booster.R0):.0f}_km_"
                     f"perigee_{0.001*(Target_Orbit['perigee']-self.booster.R0):.0f}km_"
                     f"inc_{np.rad2deg(Target_Orbit['i']):.1f}deg_"
-                    f"PL_{max(0,payload_mass_predefined):.0f}kg_Config{self.LV_Configuration}_{case_id}")
+                    f"PL_{max(0,payload_mass_predefined):.0f}kg_Config{configuration_tag}_{case_id}")
         solve_error = None
         try:
             sol = opti.solve()

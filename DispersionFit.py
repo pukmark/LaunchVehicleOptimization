@@ -16,23 +16,23 @@ from scipy.optimize import minimize
 
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from LaunchSites import parse_launch_site
-from TelemetryCSV import TelemetryData, load_telemetry_csv, interpolate_speed_time
+from TelemetryCSV import TelemetryData, load_telemetry_csv, interpolate_speed_time, numerical_acceleration
 from TelemetryFrames import eci_to_ecef_velocity
 
-DEFAULT_PARAMETERS = ('FirstStageThrust', 'FirstStageIsp', 'SecondStageThrust', 'SecondStageIsp')
+DEFAULT_PARAMETERS = ('FirstStageThrust', 'FirstStageIsp', 'SecondStageThrust', 'SecondStageIsp','FirstStageCx0', 'BoosterStageCx0','FirstStage_EmptyMass','SecondStage_EmptyMass','FirstStage_PropMass','SecondStage_PropMass')
 MULTIPLIERS = {'FirstStageThrust', 'FirstStageIsp', 'SecondStageThrust', 'SecondStageIsp',
                'FirstStageCx0', 'BoosterStageCx0', 'AtmosphereDensity'}
 
 
 def default_fit_bounds(request):
+    """Nominal bounds for the vehicle, independent of the starting factors."""
     model = VLType()
-    if request.get('configuration', 1) == 2:
-        model.StarShipDatabase()
-    values = dict(asdict(DispesrionFactorsType()), **request['dispersion'])
-    widths = {'FirstStage_EmptyMass': .05 * model.EmptyFirstStageMass,
-              'SecondStage_EmptyMass': .05 * model.EmptySecondStageMass,
-              'FirstStage_PropMass': .05 * model.FirstStagePropellentMass,
-              'SecondStage_PropMass': .05 * model.SecondStagePropellentMass,
+    model.ApplyVehicleConfiguration(request.get('configuration', 1))
+    values = asdict(DispesrionFactorsType())
+    widths = {'FirstStage_EmptyMass': .02 * model.EmptyFirstStageMass,
+              'SecondStage_EmptyMass': .02 * model.EmptySecondStageMass,
+              'FirstStage_PropMass': .02 * model.FirstStagePropellentMass,
+              'SecondStage_PropMass': .02 * model.SecondStagePropellentMass,
               'LaunchAltDelta': 100., 'StagePartitionDelta': .02}
     result = {}
     for name, value in values.items():
@@ -48,10 +48,7 @@ def _validate_request(request):
         if not np.isfinite(value) or name in MULTIPLIERS and value <= 0:
             raise ValueError(f'Invalid dispersion value: {name}')
     model = VLType()
-    if request['configuration'] == 2:
-        model.StarShipDatabase()
-    elif request['configuration'] != 1:
-        raise ValueError('Unknown vehicle configuration.')
+    model.ApplyVehicleConfiguration(request['configuration'])
     partition = model.FirstStagePropellentMass / model.TotalPropellentMass + dispersion.StagePartitionDelta
     if not 0 < partition < 1:
         raise ValueError('Stage partition must leave propellant in both stages.')
@@ -91,6 +88,8 @@ def simulation_channels(solution, phase):
         altitude = np.asarray(solution['alt1_sol']).ravel()
         speed = np.linalg.norm(np.asarray(solution['x1'])[2:4], axis=0)
     elif phase == 'booster':
+        if not all(key in solution for key in ('t4_vec', 'alt4_sol', 'x4')):
+            raise ValueError('Incomplete booster simulation.')
         t = np.asarray(solution['t4_vec']).ravel()
         altitude = np.asarray(solution['alt4_sol']).ravel()
         speed = np.linalg.norm(np.asarray(solution['x4'])[:, 2:4], axis=1)
@@ -130,14 +129,23 @@ def synchronize_candidate(solution, telemetry, primary_group='Stage 1 / booster'
     raise ValueError('Fitting needs first- or second-stage speed telemetry for synchronization.')
 
 
-def _comparison_samples(solution, telemetry, primary_group, synchronization, windows=None):
+def _comparison_samples(solution, telemetry, primary_group, synchronization, windows=None, *, recovery='EXP'):
     samples = []
-    for phase in ('stage1', 'stage2', 'booster'):
-        if phase == 'booster' and 'x4' not in solution:
-            continue
+    phases = ('stage1', 'stage2') if recovery == 'EXP' else ('stage1', 'stage2', 'booster')
+    for phase in phases:
         channels = telemetry.channels(phase, primary_group)
-        if not any(key in channels for key in ('altitude', 'speed')):
-            continue
+        if phase == 'booster':
+            if not any(key in channels for key in ('altitude', 'speed')):
+                continue
+            # Return burns decelerate the booster. Fit the entire return history,
+            # including coasts, and allow independently measured altitude/speed.
+            eligible = np.ones(len(telemetry.time), dtype=bool)
+        else:
+            if 'speed' not in channels:
+                continue
+            # Use signed ECEF speed acceleration for both ascent stages, rather
+            # than an accelerometer's thrust/proper acceleration. Keep gaps.
+            eligible = numerical_acceleration(telemetry.time, channels['speed']) > 0
         t, _ = simulation_channels(solution, phase)
         # Fix the sample set once, using baseline overlap. A small margin avoids
         # making a slightly different synchronization fail at the first sample.
@@ -145,12 +153,14 @@ def _comparison_samples(solution, telemetry, primary_group, synchronization, win
         low, high = t[0] + margin, t[-1] - margin
         if windows and phase in windows:
             low, high = windows[phase]
+            if phase == 'booster':
+                low, high = max(low, t[0]), min(high, t[-1])
         shifted_time = telemetry.time + synchronization['shift']
         for channel in ('altitude', 'speed'):
             if channel not in channels:
                 continue
             values = np.asarray(channels[channel]) * (1000 if channel == 'altitude' else 1)
-            valid = (np.isfinite(values) & np.isfinite(shifted_time)
+            valid = (eligible & np.isfinite(values) & np.isfinite(shifted_time)
                      & (shifted_time >= low) & (shifted_time <= high))
             if channel == 'speed':
                 valid &= values >= 0
@@ -164,7 +174,9 @@ def _comparison_samples(solution, telemetry, primary_group, synchronization, win
                 samples.append({'phase': phase, 'channel': channel, 'time': unique,
                                 'values': observations})
     if not samples:
-        raise ValueError('No overlapping altitude/speed telemetry with at least three distinct times.')
+        raise ValueError('No overlapping positive-acceleration first/second-stage telemetry'
+                         + (' or booster return telemetry' if recovery != 'EXP' else '')
+                         + ' with at least three distinct times.')
     return samples
 
 
@@ -214,6 +226,9 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
     nominal solve. All subsequent candidates use that SAME fixed payload.
     Bounds contain absolute factor/offset values. Progress and checkpoint hooks
     run after evaluations; cancellation is checked between solver calls.
+    Non-EXP recovery includes available post-separation booster altitude/speed,
+    without the positive-acceleration filter used for ascent. All phases share
+    the first-/second-stage synchronization and fixed baseline sample windows.
     """
     telemetry = load_telemetry_csv(telemetry) if isinstance(telemetry, (str, Path)) else telemetry
     request = deepcopy(base_request)
@@ -306,7 +321,8 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
                 raise ValueError(f"Solver did not converge: {solution.get('return_status', 'unknown')}")
             if samples is None:
                 synchronization = synchronize_candidate(solution, telemetry, primary_group)
-                samples = _comparison_samples(solution, telemetry, primary_group, synchronization, windows)
+                samples = _comparison_samples(solution, telemetry, primary_group, synchronization,
+                                              windows, recovery=request['recovery'])
             metrics = score_candidate(solution, telemetry, samples, primary_group, altitude_scale, speed_scale)
             penalty = float(regularization * np.mean((normalized - initial)**2))
             score = metrics['score'] + penalty
