@@ -2,8 +2,10 @@
 
 import argparse
 from contextlib import contextmanager
+import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import cv2
@@ -14,20 +16,24 @@ import pytesseract
 
 
 # ========== USER SETTINGS ==========
-VIDEO_URL = "https://x.com/i/broadcasts/1zqKVdlVyaYJB"  # X (Twitter) stream
+# VIDEO_URL = "https://x.com/i/broadcasts/1zqKVdlVyaYJB"  # X (Twitter) stream
+VIDEO_URL = "https://x.com/i/broadcasts/1vAxRDjaXwyGl"  # X (Twitter) stream SPHEREx
 OUTPUT_DIR = Path("falcon9_telemetry")
-VIDEO_FILENAME = OUTPUT_DIR / "falcon9_Starlink_LEO.mp4"
+VIDEO_FILENAME = OUTPUT_DIR / "falcon9_SPHEREx_SSO.mp4"
 
 # How many frames per second to sample (effective)
 SAMPLE_FPS = 1.0  # samples per second
 
-# Optional: start processing at an offset into the video (seconds).
+# Optional: download and process from this broadcast timestamp (seconds).
 # Set to None to process from the beginning.
-START_TIME_SEC = 10*60+4  # skip the prelaunch portion of this broadcast
-# Optional: stop processing at an offset into the video (seconds).
+START_TIME_SEC = 57*60+20  # skip the prelaunch portion of this broadcast
+# Optional: download and process through this broadcast timestamp (seconds).
 # Set to None to process through the end.
-END_TIME_SEC = START_TIME_SEC + 8*60+46
-START_SEP_SEC = START_TIME_SEC + 2*60+31  # video time ending stage 1; stage 2/booster start here
+END_TIME_SEC = START_TIME_SEC + 8*60+22
+START_SEP_SEC = START_TIME_SEC + 2*60+20  # video time ending stage 1; stage 2/booster start here
+# Original video time when the broadcast switches to stage two after landing.
+# Set this per broadcast, or pass --landing / --phase3-start. None disables it.
+START_PHASE3_SEC = None
 
 # EXP: expendable; ASDS: drone ship; RTLS: return to launch site.
 # EXP broadcasts have no booster telemetry after separation.
@@ -41,30 +47,50 @@ ROI_REFERENCE_SIZE = (3840, 2160)  # width, height
 # Start with something like lower-left box; adjust after preview (see function show_sample_frame)
 TELEMETRY_ROI_PHASE1 = {
     # Bottom-left widget: SPEED only (km/h).
-    "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # (y1, x1), (y2, x2) -- tune via show_sample_frame
+    "speed": {"yx1": (644*3, 74*3), "yx2": (671*3, 150*3)},   # (y1, x1), (y2, x2) -- tune via show_sample_frame
     # Dedicated altitude widget (km).
-    "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # tune visually
+    "altitude": {"yx1": (644*3, 172*3), "yx2": (671*3, 254*3)},  # tune visually
     # Bottom-right widget: ACCELERATION only (g).
-    "acceleration": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # tune visually
+    # "acceleration": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # tune visually
     # Bottom-center timer: T-/T+ hh:mm:ss. Sized to avoid the subtitle line below.
-    "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},  # tune visually
+    "time":  {"yx1": (654*3, 591*3), "yx2": (686*3, 733*3)},  # tune visually
 }
+
+# TELEMETRY_ROI_PHASE1 = {
+#     # Bottom-left widget: SPEED only (km/h).
+#     "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # (y1, x1), (y2, x2) -- tune via show_sample_frame
+#     # Dedicated altitude widget (km).
+#     "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # tune visually
+#     # Bottom-right widget: ACCELERATION only (g).
+#     "acceleration": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # tune visually
+#     # Bottom-center timer: T-/T+ hh:mm:ss. Sized to avoid the subtitle line below.
+#     "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},  # tune visually
+# }
 
 # Phase 2 ROIs (after START_SEP_SEC). Tune these visually.
-TELEMETRY_ROI_PHASE2 = {
-    "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # speed widget unchanged
-    "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # booster return altitude (if present)
-    "velocity2": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # acceleration widget now shows stage 2 velocity
-    "altitude2": {"yx1": (647*3, 1138*3), "yx2": (671*3, 1215*3)},    # stage 2 altitude widget
-    "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},       # time widget unchanged
-}
-
 # TELEMETRY_ROI_PHASE2 = {
-#     "velocity2": {"yx1": (647*3, 60*3), "yx2": (671*3, 140*3)},   # speed widget unchanged
-#     "altitude2": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # stage 1 altitude (if present)
-#     "acceleration2": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # acceleration widget now shows stage 2 velocity
+#     "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # speed widget unchanged
+#     "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # booster return altitude (if present)
+#     "velocity2": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # acceleration widget now shows stage 2 velocity
+#     "altitude2": {"yx1": (647*3, 1138*3), "yx2": (671*3, 1215*3)},    # stage 2 altitude widget
 #     "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},       # time widget unchanged
 # }
+
+TELEMETRY_ROI_PHASE2 = {
+    "speed": {"yx1": (644*3, 74*3), "yx2": (671*3, 150*3)},   # speed widget unchanged
+    "altitude": {"yx1": (644*3, 172*3), "yx2": (671*3, 254*3)},  # booster return altitude (if present)
+    "velocity2": {"yx1": (644*3, 1018*3), "yx2": (670*3, 1100*3)},  # acceleration widget now shows stage 2 velocity
+    "altitude2": {"yx1": (644*3, 1138*3), "yx2": (670*3, 1200*3)},    # stage 2 altitude widget
+    "time":  {"yx1": (654*3, 591*3), "yx2": (686*3, 733*3)},       # time widget unchanged
+}
+
+# Phase 3: stage two continues after booster landing. Default crops use the
+# left-side speed/altitude widgets; tune them for this broadcast with --preview.
+TELEMETRY_ROI_PHASE3 = {
+    "velocity2": {"yx1": (644*3, 74*3), "yx2": (671*3, 150*3)},
+    "altitude2": {"yx1": (644*3, 172*3), "yx2": (671*3, 254*3)},
+    "time": {"yx1": (654*3, 591*3), "yx2": (686*3, 733*3)},
+}
 
 # ROI preview styling
 ROI_BORDER_COLOR = (0, 255, 0)   # BGR
@@ -107,25 +133,65 @@ def ensure_output_dir():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def download_video():
-    """
-    Download the video using yt-dlp (supports X/Twitter).
-    """
-    if VIDEO_FILENAME.exists():
-        print(f"[INFO] Video already exists: {VIDEO_FILENAME}")
-        return
+def video_clip_info(video_path):
+    """Read the original broadcast interval of a downloaded clip, if present."""
+    metadata_path = Path(video_path).with_suffix(Path(video_path).suffix + ".clip.json")
+    if not metadata_path.exists():
+        return None  # Existing local/full videos retain their original clock.
+    try:
+        info = json.loads(metadata_path.read_text())
+        start, end = info['start'], info['end']
+        if (not np.isfinite(start) or start < 0
+                or end is not None and (not np.isfinite(end) or end <= start)):
+            raise ValueError
+        return info
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid video clip metadata: {metadata_path}") from exc
 
-    VIDEO_FILENAME.parent.mkdir(parents=True, exist_ok=True)
+
+def download_video(start_time_sec=START_TIME_SEC, end_time_sec=END_TIME_SEC):
+    """Save only the requested broadcast interval and return its time offset.
+
+    A sidecar records the clip's original clock for cached downloads and later
+    extraction. Existing videos without that sidecar are treated as full videos.
+    """
+    start = 0. if start_time_sec is None else float(start_time_sec)
+    end = None if end_time_sec is None else float(end_time_sec)
+    if not np.isfinite(start) or start < 0:
+        raise ValueError("Download start time must be finite and nonnegative.")
+    if end is not None and (not np.isfinite(end) or end <= start):
+        raise ValueError("Download end time must be finite and greater than start time.")
+    video_path = Path(VIDEO_FILENAME)
+    if video_path.exists():
+        info = video_clip_info(video_path)
+        if info is not None:
+            if (info.get('url') != VIDEO_URL or start < info['start']
+                    or info['end'] is not None and (end is None or end > info['end'])):
+                raise ValueError(f"{video_path} contains a different broadcast or time range. "
+                                 "Choose another VIDEO_FILENAME for the requested clip.")
+        print(f"[INFO] Video already exists: {video_path}")
+        return float(info['start']) if info else 0.
+
+    video_path.parent.mkdir(parents=True, exist_ok=True)
     # Use best mp4 format
     cmd = [
-        "yt-dlp",
+        sys.executable, "-m", "yt_dlp",
+        "--no-playlist",
         "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/mp4",
         "--merge-output-format", "mp4",
-        "-o", str(VIDEO_FILENAME),
-        VIDEO_URL,
+        "-o", str(video_path),
     ]
+    if start > 0 or end is not None:
+        stop = "inf" if end is None else f"{end:g}"
+        cmd += ["--download-sections", f"*{start:g}-{stop}", "--force-keyframes-at-cuts"]
+    cmd.append(VIDEO_URL)
     run_cmd(cmd)
-    print(f"[INFO] Downloaded video to {VIDEO_FILENAME}")
+    if not video_path.exists():
+        raise RuntimeError(f"Downloader did not create the requested video: {video_path}")
+    metadata_path = video_path.with_suffix(video_path.suffix + ".clip.json")
+    metadata_path.write_text(json.dumps({'url': VIDEO_URL, 'start': start, 'end': end}, indent=2))
+    print(f"[INFO] Downloaded broadcast {start:g}–{end if end is not None else 'end'} s to {video_path}")
+    return start
 
 
 def scaled_rois(frame_shape, rois):
@@ -155,19 +221,32 @@ def normalize_recovery_mode(recovery_mode):
     return recovery_mode.strip().upper()
 
 
-def rois_at_time(frame_shape, time_sec, separation_sec, recovery_mode=None):
-    """Select active gauges; EXP has only stage 2 gauges after separation."""
+def validate_phase_times(separation_sec, landing_sec):
+    for label, value in (("Separation", separation_sec), ("Phase 3 start", landing_sec)):
+        if value is not None and (not np.isfinite(value) or value < 0):
+            raise ValueError(f"{label} time must be finite and nonnegative.")
+    if landing_sec is not None and separation_sec is not None and landing_sec < separation_sec:
+        raise ValueError("Phase 3 start time cannot precede stage separation.")
+
+
+def rois_at_time(frame_shape, time_sec, separation_sec, recovery_mode=None, *, landing_sec=START_PHASE3_SEC):
+    """Select ascent, concurrent upper-stage/return, or post-landing gauges."""
     recovery_mode = normalize_recovery_mode(recovery_mode)
-    rois = (TELEMETRY_ROI_PHASE2 if separation_sec is not None and time_sec >= separation_sec
-            else TELEMETRY_ROI_PHASE1)
+    if landing_sec is not None and time_sec >= landing_sec:
+        rois = TELEMETRY_ROI_PHASE3
+    elif separation_sec is not None and time_sec >= separation_sec:
+        rois = TELEMETRY_ROI_PHASE2
+    else:
+        rois = TELEMETRY_ROI_PHASE1
     if rois is TELEMETRY_ROI_PHASE2 and recovery_mode == "EXP":
         rois = {name: roi for name, roi in rois.items() if name not in ("speed", "altitude")}
     return scaled_rois(frame_shape, rois)
 
 
 def show_sample_frame(start_time_sec=None, *, video_path=None, separation_sec=START_SEP_SEC,
-                      recovery_mode=None):
+                      recovery_mode=None, video_time_offset=0., landing_sec=START_PHASE3_SEC):
     """Preview scaled crop rectangles for the selected video time."""
+    validate_phase_times(separation_sec, landing_sec)
     video_path = VIDEO_FILENAME if video_path is None else Path(video_path)
     cap = cv2.VideoCapture(str(video_path))
     try:
@@ -185,7 +264,8 @@ def show_sample_frame(start_time_sec=None, *, video_path=None, separation_sec=ST
 
     h, w = frame.shape[:2]
     print(f"[INFO] Frame resolution: {w}x{h}")
-    rois = rois_at_time(frame.shape, start_time_sec or 0, separation_sec, recovery_mode)
+    rois = rois_at_time(frame.shape, (start_time_sec or 0) + video_time_offset,
+                       separation_sec, recovery_mode, landing_sec=landing_sec)
     for name, roi in rois.items():
         y1, x1 = roi["yx1"]
         y2, x2 = roi["yx2"]
@@ -467,11 +547,12 @@ PHASE_COLUMNS = {
 }
 
 
-def phase_metrics(parsed_data, time_sec, separation_sec, recovery_mode):
+def phase_metrics(parsed_data, time_sec, separation_sec, recovery_mode, *, landing_sec=START_PHASE3_SEC):
     """Route gauges into the three CSV phase groups, leaving inactive ones blank."""
     after_separation = separation_sec is not None and time_sec >= separation_sec
-    phases = ('stage2',) if after_separation else ('stage1',)
-    if after_separation and normalize_recovery_mode(recovery_mode) != 'EXP':
+    after_landing = landing_sec is not None and time_sec >= landing_sec
+    phases = ('stage2',) if after_separation or after_landing else ('stage1',)
+    if after_separation and not after_landing and normalize_recovery_mode(recovery_mode) != 'EXP':
         phases += ('booster',)
     values = dict.fromkeys(METRIC_SOURCES)
     for phase in phases:
@@ -632,7 +713,7 @@ def clean_telemetry_rows(rows):
 def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
                              video_path=None, output_dir=None, sample_fps=None,
                              separation_sec=START_SEP_SEC, debug=None, save_raw=False,
-                             recovery_mode=None):
+                             recovery_mode=None, video_time_offset=0., landing_sec=START_PHASE3_SEC):
     """Extract an inclusive video segment into three numbered phase groups.
 
     Sample times are anchored to the requested start frame without accumulating
@@ -641,10 +722,15 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
     for diagnosis. Every active gauge is checked against its last valid readings;
     failed checks pause for a manual reading in the terminal before continuing.
     Stage one ends at separation_sec; upper stage and booster then share rows.
+    At landing_sec, phase 3 switches to upper-stage gauges only and stops booster
+    readings and correction prompts. Its measurements still populate stage two.
     EXP skips booster gauges after separation, leaving phase-three values blank.
+    Start/end seek within the local file. video_time_offset restores a downloaded
+    clip's broadcast timestamps for phase routing, sanity checks and CSV output.
     """
     recovery_mode = normalize_recovery_mode(recovery_mode)
-    video_path = VIDEO_FILENAME if video_path is None else Path(video_path)
+    validate_phase_times(separation_sec, landing_sec)
+    video_path = Path(VIDEO_FILENAME if video_path is None else video_path)
     output_dir = OUTPUT_DIR if output_dir is None else Path(output_dir)
     sample_fps = SAMPLE_FPS if sample_fps is None else sample_fps
     debug = DEBUG_SHOW_SAMPLES if debug is None else debug
@@ -652,7 +738,7 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
     if not np.isfinite(sample_fps) or sample_fps <= 0:
         raise ValueError("Sample FPS must be finite and greater than zero.")
     for label, value in (("Start", start_time_sec), ("End", end_time_sec),
-                         ("Separation", separation_sec)):
+                         ("Separation", separation_sec), ("Video offset", video_time_offset)):
         if value is not None and (not np.isfinite(value) or value < 0):
             raise ValueError(f"{label} time must be finite and nonnegative.")
     if end_time_sec is not None and end_time_sec < start_time_sec:
@@ -691,8 +777,9 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
                 ok, frame = cap.retrieve()
                 if not ok or frame is None:
                     raise RuntimeError(f"Could not decode sampled frame {frame_idx}.")
-                time_sec = frame_idx / fps
-                current_rois = rois_at_time(frame.shape, time_sec, separation_sec, recovery_mode)
+                time_sec = frame_idx / fps + video_time_offset
+                current_rois = rois_at_time(frame.shape, time_sec, separation_sec, recovery_mode,
+                                            landing_sec=landing_sec)
                 roi_images, roi_texts, parsed_data = {}, {}, {}
                 for name, roi in current_rois.items():
                     y1, x1 = roi["yx1"]
@@ -710,7 +797,8 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
                                           roi_images=roi_images)
                 row = {"frame_idx": frame_idx, "t_video_sec": time_sec,
                        "time_str_primary": parsed_data.get("time", {}).get("time_str")}
-                row.update(phase_metrics(parsed_data, time_sec, separation_sec, recovery_mode))
+                row.update(phase_metrics(parsed_data, time_sec, separation_sec, recovery_mode,
+                                         landing_sec=landing_sec))
                 row.update({f"raw_{name}": text for name, text in roi_texts.items()})
                 rows.append(row)
                 sample_idx += 1
@@ -733,13 +821,13 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
     df = pd.DataFrame(rows, columns=CSV_COLUMNS)
     if save_raw:
         output_dir.mkdir(parents=True, exist_ok=True)
-        raw_path = output_dir / "falcon9_telemetry_COSMO_SSO_raw.csv"
+        raw_path = output_dir / f"{video_path.stem}_raw.csv"
         pd.DataFrame(rows).to_csv(raw_path, index=False)
         print(f"[INFO] Saved raw OCR to: {raw_path}")
     if df.empty:
         raise RuntimeError("No valid telemetry found; preview the crops and check the broadcast layout.")
     output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = VIDEO_FILENAME[:-4] + ".csv"
+    csv_path = output_dir / video_path.with_suffix(".csv").name
     df.to_csv(csv_path, index=False)
     print(f"[INFO] Saved {len(df)} telemetry rows to: {csv_path}")
     return df
@@ -808,12 +896,14 @@ def plot_extracted_data(df, *, output_dir=None, show=True):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video", default=VIDEO_FILENAME)
+    parser.add_argument("--video", type=Path, help="Existing local video; otherwise download the configured broadcast interval")
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
-    parser.add_argument("--start", type=float, default=START_TIME_SEC, help="Video start time in seconds")
-    parser.add_argument("--end", type=float, default=END_TIME_SEC, help="Video end time in seconds")
+    parser.add_argument("--start", "--t1", type=float, default=START_TIME_SEC, help="Original broadcast start time in seconds")
+    parser.add_argument("--end", "--t2", type=float, default=END_TIME_SEC, help="Original broadcast end time in seconds")
     parser.add_argument("--separation", type=float, default=START_SEP_SEC,
                         help="Video time ending stage 1 and starting upper-stage/booster columns")
+    parser.add_argument("--landing", "--phase3-start", type=float, default=START_PHASE3_SEC,
+                        help="Original video time when phase 3 begins after booster landing (seconds)")
     parser.add_argument("--sample-fps", type=float, default=SAMPLE_FPS)
     parser.add_argument("--recovery-mode", "--recovery", type=str.upper,
                         choices=RECOVERY_MODES, default=RECOVERY_MODE,
@@ -823,16 +913,26 @@ def main(argv=None):
     parser.add_argument("--save-raw", action="store_true", help="Also save raw OCR readings")
     parser.add_argument("--no-plot", default=True, action="store_true", help="Skip plotting for headless runs")
     args = parser.parse_args(argv)
+    validate_phase_times(args.separation, args.landing)
     if args.video is None:
-        download_video()
+        offset = download_video(args.start, args.end)
+        video_path = Path(VIDEO_FILENAME)
+    else:
+        video_path = args.video
+        info = video_clip_info(video_path)
+        offset = float(info['start']) if info else 0.
+    start = (0. if args.start is None else args.start) - offset
+    end = None if args.end is None else args.end - offset
+    if start < 0:
+        raise ValueError(f"Requested start is before the beginning of this clip ({offset:g} s).")
     if args.preview:
-        show_sample_frame(args.start, video_path=args.video, separation_sec=args.separation,
-                          recovery_mode=args.recovery_mode)
+        show_sample_frame(start, video_path=video_path, separation_sec=args.separation,
+                          recovery_mode=args.recovery_mode, video_time_offset=offset, landing_sec=args.landing)
         return
-    df = extract_telemetry_to_csv(args.start, args.end, video_path=args.video,
+    df = extract_telemetry_to_csv(start, end, video_path=video_path,
                                   output_dir=args.output_dir, sample_fps=args.sample_fps,
                                   separation_sec=args.separation, debug=args.debug, save_raw=args.save_raw,
-                                  recovery_mode=args.recovery_mode)
+                                  recovery_mode=args.recovery_mode, video_time_offset=offset, landing_sec=args.landing)
     if not args.no_plot:
         plot_extracted_data(df, output_dir=args.output_dir)
 

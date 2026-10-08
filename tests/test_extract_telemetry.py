@@ -1,11 +1,12 @@
 """Sanity checks and interactive corrections without video, OCR, or GUI."""
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 import numpy as np
@@ -151,13 +152,146 @@ class RecoveryModeTests(unittest.TestCase):
 
     def test_cli_passes_mode_to_extraction_and_preview(self):
         with patch.object(extract, "extract_telemetry_to_csv") as run:
-            extract.main(["--recovery-mode", "exp"])
+            extract.main(["--video", "local.mp4", "--recovery-mode", "exp"])
             self.assertEqual(run.call_args.kwargs["recovery_mode"], "EXP")
         with patch.object(extract, "show_sample_frame") as preview, \
              patch.object(extract, "extract_telemetry_to_csv") as run:
-            extract.main(["--recovery", "EXP", "--preview"])
+            extract.main(["--video", "local.mp4", "--recovery", "EXP", "--preview"])
             self.assertEqual(preview.call_args.kwargs["recovery_mode"], "EXP")
             run.assert_not_called()
+
+
+class Phase3Tests(unittest.TestCase):
+    def test_switches_to_stage2_only_layout_exactly_at_landing(self):
+        shape = (720, 1280, 3)
+        for mode in extract.RECOVERY_MODES:
+            with self.subTest(mode=mode):
+                before = extract.rois_at_time(shape, 1.9, 1, mode, landing_sec=2)
+                after = extract.rois_at_time(shape, 2, 1, mode, landing_sec=2)
+                self.assertEqual(after, extract.scaled_rois(shape, extract.TELEMETRY_ROI_PHASE3))
+                self.assertEqual(set(after), {'velocity2', 'altitude2', 'time'})
+                self.assertNotEqual(before['velocity2'], after['velocity2'])
+                if mode != 'EXP':
+                    self.assertIn('speed', before)
+                    self.assertIn('altitude', before)
+                self.assertEqual(set(extract.rois_at_time(shape, .9, 1, mode, landing_sec=2)),
+                                 {'speed', 'altitude', 'acceleration', 'time'})
+
+    def test_unconfigured_phase3_preserves_existing_return_layout(self):
+        rois = extract.rois_at_time((720, 1280, 3), 1000, 1, 'ASDS', landing_sec=None)
+        self.assertEqual(set(rois), {'speed', 'altitude', 'velocity2', 'altitude2', 'time'})
+
+    def test_phase3_measurements_stay_in_stage2_columns(self):
+        parsed = sample()
+        parsed.update(velocity2={'velocity': 20000}, altitude2={'altitude': 200})
+        values = extract.phase_metrics(parsed, 2, 1, 'ASDS', landing_sec=2)
+        self.assertEqual(values['velocity2_kmh'], 20000)
+        self.assertEqual(values['altitude2_km'], 200)
+        for column in (*extract.PHASE_COLUMNS['stage1'], *extract.PHASE_COLUMNS['booster']):
+            self.assertIsNone(values[column])
+
+    def test_invalid_landing_times_fail_before_opening_video_or_downloading(self):
+        with patch.object(extract.cv2, 'VideoCapture') as capture, \
+             patch.object(extract, 'download_video') as download:
+            for landing in (-1, .5, np.nan, np.inf):
+                with self.subTest(landing=landing):
+                    with self.assertRaisesRegex(ValueError, 'Phase 3'):
+                        extract.extract_telemetry_to_csv(separation_sec=1, landing_sec=landing)
+                    with self.assertRaisesRegex(ValueError, 'Phase 3'):
+                        extract.show_sample_frame(separation_sec=1, landing_sec=landing)
+                    with self.assertRaisesRegex(ValueError, 'Phase 3'):
+                        extract.main(['--separation', '1', '--landing', str(landing)])
+            capture.assert_not_called()
+            download.assert_not_called()
+
+    def test_cli_passes_landing_time_to_extraction_and_preview(self):
+        with patch.object(extract, 'extract_telemetry_to_csv') as run:
+            extract.main(['--video', 'local.mp4', '--landing', '900'])
+            self.assertEqual(run.call_args.kwargs['landing_sec'], 900.)
+        with patch.object(extract, 'show_sample_frame') as preview:
+            extract.main(['--video', 'local.mp4', '--phase3-start', '900', '--preview'])
+            self.assertEqual(preview.call_args.kwargs['landing_sec'], 900.)
+
+
+class DownloadTests(unittest.TestCase):
+    def test_downloads_only_requested_interval_and_records_original_clock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'broadcast.mp4'
+            with patch.object(extract, 'VIDEO_FILENAME', path), \
+                 patch.object(extract, 'run_cmd', side_effect=lambda command: path.write_bytes(b'clip')) as run, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(extract.download_video(604, 1130), 604.)
+                command = run.call_args.args[0]
+                self.assertEqual(command[command.index('--download-sections')+1], '*604-1130')
+                self.assertIn('--force-keyframes-at-cuts', command)
+                self.assertEqual(command[command.index('-o')+1], str(path))
+                self.assertEqual(extract.video_clip_info(path),
+                                 {'url': extract.VIDEO_URL, 'start': 604., 'end': 1130.})
+                # A subset of a cached clip must keep the clip's original offset.
+                self.assertEqual(extract.download_video(610, 1120), 604.)
+                run.assert_called_once()
+                for start, end in ((600, 1130), (604, 1131), (604, None)):
+                    with self.subTest(start=start, end=end), self.assertRaisesRegex(ValueError, 'another VIDEO_FILENAME'):
+                        extract.download_video(start, end)
+                self.assertEqual(path.read_bytes(), b'clip')
+
+    def test_unbounded_and_whole_video_ranges(self):
+        for start, end, section in ((None, 10, '*0-10'), (10, None, '*10-inf'), (None, None, None)):
+            with self.subTest(start=start, end=end), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'broadcast.mp4'
+                with patch.object(extract, 'VIDEO_FILENAME', path), \
+                     patch.object(extract, 'run_cmd', side_effect=lambda command: path.write_bytes(b'clip')) as run, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(extract.download_video(start, end), start or 0.)
+                    command = run.call_args.args[0]
+                    if section is None:
+                        self.assertNotIn('--download-sections', command)
+                    else:
+                        self.assertEqual(command[command.index('--download-sections')+1], section)
+
+    def test_existing_full_video_is_reused_without_changing_its_clock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'full.mp4'
+            path.write_bytes(b'original video')
+            with patch.object(extract, 'VIDEO_FILENAME', path), patch.object(extract, 'run_cmd') as run, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(extract.download_video(604, 1130), 0.)
+                run.assert_not_called()
+                self.assertEqual(path.read_bytes(), b'original video')
+
+    def test_invalid_intervals_fail_before_downloading(self):
+        with patch.object(extract, 'run_cmd') as run:
+            for start, end in ((-1, 10), (np.nan, 10), (np.inf, 10),
+                               (10, 9), (10, 10), (10, np.nan), (10, np.inf)):
+                with self.subTest(start=start, end=end), self.assertRaisesRegex(ValueError, 'Download'):
+                    extract.download_video(start, end)
+            run.assert_not_called()
+
+    def test_cli_download_range_and_preview_use_local_seek_and_original_phase_clock(self):
+        with patch.object(extract, 'download_video', return_value=604.) as download, \
+             patch.object(extract, 'extract_telemetry_to_csv') as run:
+            extract.main(['--t1', '604', '--t2', '1130', '--separation', '755'])
+            download.assert_called_once_with(604., 1130.)
+            self.assertEqual(run.call_args.args, (0., 526.))
+            self.assertEqual(run.call_args.kwargs['video_time_offset'], 604.)
+            self.assertEqual(run.call_args.kwargs['separation_sec'], 755.)
+        with patch.object(extract, 'download_video', return_value=604.), \
+             patch.object(extract, 'show_sample_frame') as preview:
+            extract.main(['--t1', '604', '--t2', '1130', '--separation', '755', '--preview'])
+            self.assertEqual(preview.call_args.args, (0.,))
+            self.assertEqual(preview.call_args.kwargs['video_time_offset'], 604.)
+            self.assertEqual(preview.call_args.kwargs['separation_sec'], 755.)
+
+    def test_cli_reopens_cached_clip_with_original_broadcast_times(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'clip.mp4'
+            path.with_suffix('.mp4.clip.json').write_text(json.dumps({'start': 604., 'end': 1130.}))
+            with patch.object(extract, 'download_video') as download, \
+                 patch.object(extract, 'extract_telemetry_to_csv') as run:
+                extract.main(['--video', str(path), '--start', '610', '--end', '1120'])
+                download.assert_not_called()
+                self.assertEqual(run.call_args.args, (6., 516.))
+                self.assertEqual(run.call_args.kwargs['video_time_offset'], 604.)
 
 
 class FakeCapture:
@@ -193,6 +327,21 @@ class WindowTestCase(unittest.TestCase):
 
 
 class CorrectionPreviewTests(WindowTestCase):
+    def test_post_landing_preview_uses_original_clock_and_only_stage2_crops(self):
+        cap = Mock()
+        cap.isOpened.return_value = True
+        cap.read.return_value = (True, np.zeros((720, 1280, 3), dtype=np.uint8))
+        with patch.object(extract.cv2, 'VideoCapture', return_value=cap), \
+             patch.object(extract.cv2, 'putText') as labels, \
+             patch.object(extract.cv2, 'destroyAllWindows'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            extract.show_sample_frame(2, video_path='clip.mp4', separation_sec=601,
+                                      landing_sec=602, video_time_offset=600)
+            self.assertEqual([call.args[1] for call in labels.call_args_list],
+                             ['velocity2', 'altitude2', 'time'])
+            cap.set.assert_called_once_with(extract.cv2.CAP_PROP_POS_MSEC, 2000)
+            cap.release.assert_called_once()
+
     def test_shows_matching_crop_before_each_prompt_and_keeps_it_for_retries(self):
         data = {origin: extract.parse_telemetry_text("bad", origin)
                 for origin in ("speed", "altitude")}
@@ -233,6 +382,51 @@ class CorrectionPreviewTests(WindowTestCase):
 
 
 class ExtractionTests(WindowTestCase):
+    def test_post_landing_clip_continues_upper_stage_without_booster_ocr_or_prompts(self):
+        for mode in extract.RECOVERY_MODES:
+            with self.subTest(mode=mode):
+                cap = FakeCapture(4)
+                def gauge(_image, origin):
+                    if cap.position >= 3 and origin in ('speed', 'altitude', 'acceleration'):
+                        self.fail('Attempted OCR of a gauge absent after booster landing')
+                    return str(1000+10*cap.position) if origin == 'velocity2' else '1'
+                with tempfile.TemporaryDirectory() as directory, \
+                     patch.object(extract.cv2, 'VideoCapture', return_value=cap), \
+                     patch.object(extract, 'ocr_gauge_robust', side_effect=gauge), \
+                     patch.object(extract, 'ocr_time_robust', side_effect=[f'00:00:0{i}' for i in range(4)]), \
+                     patch('builtins.input', side_effect=AssertionError('unexpected prompt')), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    result = extract.extract_telemetry_to_csv(
+                        0, 3, video_path=Path(directory)/'clip.mp4', output_dir=directory, debug=False,
+                        separation_sec=601, landing_sec=602, video_time_offset=600, recovery_mode=mode)
+                    self.assertEqual(result['t_video_sec'].tolist(), [600., 601., 602., 603.])
+                    np.testing.assert_allclose(result['velocity2_kmh'], [np.nan, 1020, 1030, 1040], equal_nan=True)
+                    self.assertTrue(result.loc[2:, list(extract.PHASE_COLUMNS['booster'])].isna().all().all())
+                    self.assertTrue(result.loc[1:, list(extract.PHASE_COLUMNS['stage1'])].isna().all().all())
+                    if mode != 'EXP':
+                        self.assertEqual(result.loc[1, 'velocity3_kmh'], 1.)
+                    else:
+                        self.assertTrue(result[list(extract.PHASE_COLUMNS['booster'])].isna().all().all())
+                self.assertTrue(cap.released)
+
+    def test_downloaded_clip_preserves_csv_timestamps_and_stage_separation(self):
+        cap = FakeCapture(4)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(extract.cv2, 'VideoCapture', return_value=cap), \
+             patch.object(extract, 'ocr_gauge_robust', return_value='1'), \
+             patch.object(extract, 'ocr_time_robust', side_effect=[f'00:00:0{i}' for i in range(4)]), \
+             patch('builtins.input', side_effect=AssertionError('unexpected prompt')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            video = Path(directory) / 'clip.mp4'
+            result = extract.extract_telemetry_to_csv(0, 3, video_path=video, output_dir=directory,
+                                                       debug=False, separation_sec=606, video_time_offset=604)
+            self.assertEqual(result['t_video_sec'].tolist(), [604., 605., 606., 607.])
+            np.testing.assert_allclose(result['velocity1_kmh'], [1, 1, np.nan, np.nan], equal_nan=True)
+            np.testing.assert_allclose(result['velocity3_kmh'], [np.nan, np.nan, 1, 1], equal_nan=True)
+            self.assertTrue((Path(directory) / 'clip.csv').exists())
+            self.assertEqual(cap.position, 4)
+        self.assertTrue(cap.released)
+
     def test_three_phase_csv_routes_at_separation_and_round_trips_to_loader(self):
         from TelemetryCSV import load_telemetry_csv
         for mode in ('ASDS', 'RTLS'):

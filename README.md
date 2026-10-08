@@ -304,6 +304,17 @@ after it populate groups 2 and 3 concurrently. Inactive groups stay blank;
 EXP leaves group 3 blank throughout. The extraction preview plots show separate
 stage-one, upper-stage, and booster velocity/altitude curves.
 
+`TELEMETRY_ROI_PHASE3` defines the upper-stage-only layout after booster landing.
+Set `START_PHASE3_SEC` or pass `--landing SECONDS` (alias `--phase3-start`) to
+switch layouts at that original broadcast timestamp. It defaults to `None`
+until the landing/layout-change time is configured. At and after this time,
+only `velocity2`, `altitude2`, and `time` are read; upper-stage measurements
+continue in `velocity2_kmh` / `altitude2_km`, and booster columns stay blank.
+Absent booster gauges no longer cause OCR correction prompts. Phase 3 defaults
+to the left-side speed/altitude crops; tune its independent ROI coordinates
+for the broadcast. `--preview --start SECONDS --landing SECONDS` uses the same
+layout selection as extraction. Landing time must not precede separation.
+
 The GUI automatically selects **Phase columns** for these files. The loader,
 plots, synchronization, and fit use the numbered columns directly, so stage-one
 readings never fill gaps in the upper-stage or booster histories. Fitting uses
@@ -434,3 +445,25 @@ broadcast layout still requires tuning the ROI settings. `--save-raw` writes
 a separate CSV containing selected OCR text and unfiltered readings. The
 main telemetry CSV keeps its existing seven columns for simulation comparison.
 With no `--video`, the script uses or downloads the configured broadcast.
+
+For `ExtractTelemetry.py`, `START_TIME_SEC` and `END_TIME_SEC` also select the
+download interval, so a new `VIDEO_FILENAME` contains only that part of the
+broadcast. Override them with `--start` / `--end` or `--t1` / `--t2`:
+
+```bash
+PYTHONPATH= .venv/bin/python ExtractTelemetry.py \
+  --t1 604 --t2 1130 --separation 755
+```
+
+Without `--video`, this downloads the configured `VIDEO_URL` directly into
+`VIDEO_FILENAME` using [yt-dlp's time-range download option](https://github.com/yt-dlp/yt-dlp#usage-and-options)
+and ffmpeg. The adjacent `.mp4.clip.json` file records the clip's original start
+and end times. Keep it with the clip: CSV `t_video_sec` values and `--separation`
+continue to use the original broadcast clock, even though the clip starts at
+local time zero. Preview also seeks within the clip correctly. A cached clip
+can be reused for any interval it contains; use another `VIDEO_FILENAME` when
+requesting a different broadcast or an interval outside that clip. Existing
+videos without clip metadata are treated as full videos and reused without
+being overwritten. `--video path/to/video.mp4` uses an existing local video.
+The telemetry CSV and optional `_raw.csv` use that video's basename under
+`--output-dir`.
