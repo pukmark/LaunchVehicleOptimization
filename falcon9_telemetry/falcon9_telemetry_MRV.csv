@@ -1,4 +1,4 @@
-t_video_sec,time_str_primary,speed_kmh,altitude_km,acceleration_g,velocity2_kmh,altitude2_km,acceleration2_g
+t_video_sec,time_str_primary,velocity1_kmh,altitude1_km,acceleration1_g,velocity2_kmh,altitude2_km,acceleration2_g
 843.008936336803,00:00:00,0,0,1,,,
 844.00993645911,00:00:00,0,0,1.1,,,
 845.010936581418,00:00:01,4,0,1.2,,,

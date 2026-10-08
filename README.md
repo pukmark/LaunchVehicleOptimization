@@ -58,6 +58,20 @@ a unique name and click **Create vehicle** to add it to the selector and select
 it for the active case. Existing cases retain their own vehicle selections.
 Custom vehicles can also be used as templates for another new vehicle.
 
+The **3D trajectory** tab shows first- and second-stage ascent in ECI coordinates,
+Earth, the equatorial plane, and parking/final orbits, with XY, YZ, and XZ
+projections as in `Main.py`. Drag the 3D view to rotate it and use the plot
+toolbar to save the figure. Case colors and **Display** selections also apply
+to this tab. Orbit shapes are sampled as two-body ellipses; the final orbit
+uses the saved speed change at parking apogee. Unbound states show the ascent
+with an explanation instead of an orbit. Scalar altitude/speed telemetry has
+no 3D position information and is shown on its existing flight-phase tabs.
+The first-stage path uses the saved launch-site/azimuth transform, matching the
+solver's stage-separation frame. Each displayed case has its own results box
+with matching text and border colors: payload, launch azimuth (east from north),
+parking-to-final-orbit Δv at apogee, orbit apogee/perigee and inclination, MECO
+and SECO mission times, maximum ascent dynamic pressure, and orbit-burn propellant.
+
 Vehicle definitions are saved with the GUI state and included in optimization
 and telemetry-fit requests and results. The editor's **Context** tab shows the
 fixed Earth environment and explains which quantities are calculated. Launch
@@ -116,10 +130,11 @@ Previously saved optimization run folders remain on disk. **Reset dispersion to
 defaults** still resets only the selected case's dispersion factors.
 
 Click **Fit dispersion to telemetry…** to search for factors that improve the
-altitude and ECEF-speed comparison. The dialog selects which factors to vary,
-absolute lower/upper bounds, solver-evaluation budget (80 by default), altitude
-and speed error scales, and the destination case. Thrust and Isp multipliers for
-both ascent stages are selected initially. The default destination is an empty
+altitude, ECEF speed, acceleration, and dynamic-pressure comparison. The dialog
+selects which factors to vary, absolute lower/upper bounds, solver-evaluation
+budget (100 by default in the GUI), four error scales, and the destination case.
+The initial factor selection is defined by `DEFAULT_PARAMETERS` in `DispersionFit.py`.
+The default destination is an empty
 comparison slot, so the source case remains available alongside the fit.
 Each time the dialog opens, lower and upper bounds reset to the vehicle's nominal
 defaults. The initial dispersion guess uses the selected case's current values;
@@ -136,12 +151,12 @@ not override this automatic per-candidate synchronization.
 The search holds payload fixed. A positive payload entry is used directly;
 maximize mode uses the source case's computed payload, or runs a preliminary
 nominal optimization to determine it. It then uses bounded Powell search,
-robust normalized altitude/speed errors balanced across channels and phases,
+robust normalized errors balanced across available channels and phases,
 and a configurable penalty for changes from the starting factors. Comparison
 samples are fixed from baseline overlap (with a small boundary margin). First-
 and second-stage comparisons use only times with positive telemetry acceleration
 (`dv/dt > 0`, backward differences of ECEF speed). The same time mask applies to
-ascent altitude and speed; zero/negative acceleration and missing speed intervals
+all ascent channels; zero/negative acceleration and missing speed intervals
 are excluded. This omits cutoff and coast samples before
 second-stage ignition. Each stage needs speed telemetry to select its samples.
 For **ASDS and RTLS**, available booster altitude and speed telemetry after
@@ -152,7 +167,41 @@ booster telemetry. All phases use the same per-candidate synchronization, which
 still requires first- or second-stage speed telemetry. Booster errors receive the
 same phase weighting as each ascent stage and appear in the fit report.
 Missing coverage is penalized; below 90% coverage in any channel the candidate is rejected.
-Derived acceleration, pressure, and heat flux are not included in the score.
+Rows with no usable telemetry measurement are skipped, including internal gaps;
+they add neither a measurement residual nor a missing-coverage penalty. Missing
+coverage means the simulation cannot predict an existing telemetry measurement.
+Each fitted phase also receives a duration penalty in either direction and an
+extra penalty for simulation samples later than that phase's last telemetry
+reading. Timing uses the full first-to-last observed phase extent, including
+coasts and cutoff samples, rather than the trimmed positive-acceleration fit
+window. Empty leading/trailing rows do not extend a phase. These telemetry
+bounds are fixed before searching. When unlabelled primary columns are shared
+by first-stage ascent and booster return, the baseline separation time divides
+them; explicitly labelled phase columns retain their complete observed extent.
+**Phase timing error scale [s]** defaults to **5**; smaller values strengthen
+both timing penalties. The fit report shows telemetry and simulation durations,
+their difference, late sample counts, and end overruns for each fitted phase.
+Acceleration and dynamic pressure contribute during **first- and second-stage
+ascent only**, with the same robust loss as altitude and speed. These channels
+are ignored for booster return and other phases, whether measured or calculated.
+Finite supplied ascent telemetry takes precedence, with missing
+values calculated where possible. Supplied acceleration follows the CSV's
+specific-acceleration convention and is compared to the simulation's
+non-gravitational force per unit mass (including aerodynamic forces).
+Calculated acceleration uses signed backward differences of ECEF speed; the
+simulation comparison uses the same telemetry time intervals, including gravity.
+This keeps the two acceleration definitions separate
+without counting both at one timestamp. Dynamic pressure is calculated as
+`½ρv²` using Earth-fixed speed and the project's atmosphere model. Telemetry
+calculations use nominal density; simulation calculations include that case's
+atmospheric-density dispersion, including stage two.
+
+The fit dialog exposes **Acceleration error scale [m/s²]** (default **1**) and
+**Dynamic pressure error scale [kPa]** (default **5**), alongside altitude
+(1000 m) and speed (25 m/s). Smaller scales give stronger mismatch penalties;
+all scales must be finite and positive. These settings persist with the case
+and appear in the fit report, together with measured/calculated sample counts.
+Heat flux is excluded from the fit score.
 
 The GUI stays responsive, displays evaluation progress and best score, and saves
 improving candidates throughout the search. **Cancel** stops the worker and loads
@@ -239,20 +288,46 @@ and `heat_flux_kw_m2`/`heat_flux_w_m2` readings remain separate **Telemetry · C
 curves, so they can also be compared with the calculated estimates. Stage
 selection, time shifts, display toggles, and case colors apply to these plots.
 
-The loader supports all three CSV formats in `falcon9_telemetry/`, including
-`time_str_primary`, `speed_kmh`, `altitude_km`, `acceleration_g`, the raw extraction
-columns, and the separate `velocity2_kmh` / `altitude2_km` channels. Other files
+Telemetry extraction and the revised files in `falcon9_telemetry/` use three
+independent phase groups:
+
+| Phase | CSV columns |
+| --- | --- |
+| Stage 1, before separation | `velocity1_kmh`, `altitude1_km`, `acceleration1_g` |
+| Stage 2, upper stage | `velocity2_kmh`, `altitude2_km` |
+| Booster return, ASDS/RTLS | `velocity3_kmh`, `altitude3_km` |
+
+The first two columns are `t_video_sec` and `time_str_primary`. In
+`ExtractTelemetry.py`, `START_SEP_SEC` (or CLI `--separation`) is the video time
+at which stage 1 ends. Samples before that time populate group 1; samples at or
+after it populate groups 2 and 3 concurrently. Inactive groups stay blank;
+EXP leaves group 3 blank throughout. The extraction preview plots show separate
+stage-one, upper-stage, and booster velocity/altitude curves.
+
+The GUI automatically selects **Phase columns** for these files. The loader,
+plots, synchronization, and fit use the numbered columns directly, so stage-one
+readings never fill gaps in the upper-stage or booster histories. Fitting uses
+supplied stage-one acceleration; upper-stage acceleration and ascent dynamic
+pressure are calculated where no measurement is supplied. Acceleration and
+pressure penalties apply only to ascent. Booster altitude/speed contribute for
+ASDS/RTLS; EXP ignores booster readings.
+
+Older unnumbered and raw extraction columns remain supported, including
+`speed_kmh`, `altitude_km`, and `acceleration_g`. Other files
 can use `time_s` or `mission_time_s` and unit-labelled measurements. Examples
 include `speed_mps`, `altitude_m`, `mass_kg`, `thrust_n`, `thrust_factor`,
 `angle_of_attack_deg`, `dynamic_pressure_kpa`, `isp_s`, and
 `specific_acceleration_mps2`. The full recognized column list is in
-`TelemetryCSV.py` (`CHANNELS`). Stage-specific columns can use `stage1_`,
+`TelemetryCSV.py` (`CHANNELS` and `NUMBERED_CHANNELS`). Stage-specific columns can use `stage1_`,
 `stage2_`, or `booster_` prefixes (also `s1_` / `s2_`).
 
-**Primary columns** assigns unprefixed readings to stage 1/booster, stage 2, or
-booster. Explicit stage columns take precedence. When simulations are displayed,
-stage-one and booster readings are limited to the union of their flight time
-ranges. Mission timestamps support signed `T±HH:MM:SS` and fractional seconds.
+**Column routing** selects phase columns directly or assigns legacy unprefixed
+readings to stage 1/booster, stage 2, or booster. Explicit numbered/prefixed stage
+columns take precedence. With **Phase columns** routing, telemetry displays its
+full observed history, including booster landing readings later than the simulated landing.
+Legacy primary readings shared between stage one and booster are limited to the
+union of the displayed simulations' respective flight time ranges for routing.
+Mission timestamps support signed `T±HH:MM:SS` and fractional seconds.
 Missing mission times use video times aligned to available mission timestamps;
 video-only files start at zero and are labelled as video-relative. Enter a
 **Shift [s]** and click **Apply** to align telemetry; positive shifts move it later.

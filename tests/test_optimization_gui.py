@@ -1,6 +1,7 @@
 """GUI integration checks; display checks skip on headless machines."""
 from dataclasses import asdict
 from copy import deepcopy
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,169 @@ from OptimizationGUI import (
 
 
 class DispersionFormTests(unittest.TestCase):
+    def test_numbered_booster_telemetry_remains_visible_beyond_simulation_end(self):
+        from TelemetryCSV import TelemetryData, make_plot_axes
+        time = np.arange(11.)
+        booster = {'altitude': np.where(time >= 5, (10-time)/10, np.nan),
+                   'speed': np.where(time >= 5, 10-time, np.nan)}
+        for mode in ('Phase columns', 'Stage 1 / booster', 'Booster'):
+            with self.subTest(mode=mode):
+                explicit = mode == 'Phase columns'
+                data = TelemetryData(Path('flight.csv'), time,
+                                     {'primary': {} if explicit else booster,
+                                      'stage1': {}, 'stage2': {},
+                                      'booster': booster if explicit else {}}, 'test')
+                app = OptimizationApp.__new__(OptimizationApp)
+                result = {'x4': np.zeros((2, 5)), 't4_vec': np.array([5., 7.]), 'payload_mass': 10000.}
+                case = Mock(result=result, request=nominal_request(asdict(DispesrionFactorsType())), color='blue')
+                case.name = 'Case 1'
+                app.cases = [case]
+                app.case_visible = [Mock(get=Mock(return_value=True))]
+                app.telemetry = data
+                app.telemetry_visible = Mock(get=Mock(return_value=True))
+                app.telemetry_primary = Mock(get=Mock(return_value=mode))
+                app.telemetry_shift = -1.
+                app.telemetry_color = '#CC79A7'
+                app.telemetry_info, app.summary, app.notebook = Mock(), Mock(), Mock()
+                app.tabs = {'Booster': Mock(), 'First stage': Mock()}
+                app.figures = {'Booster': Figure()}
+                app.canvases = {'Booster': Mock()}
+                app.update_case_labels, app.schedule_save = Mock(), Mock()
+                def draw(figure, phase, *args, **kwargs):
+                    make_plot_axes(figure, phase)
+                with patch('OptimizationGUI.draw_phase', side_effect=draw), \
+                     patch('OptimizationGUI.remaining_propellant_text', return_value='—'):
+                    app.refresh_comparison()
+                for axis_index in (1, 2, 5, 6):  # Altitude, speed, derived pressure/heating.
+                    line = app.figures['Booster'].axes[axis_index].lines[0]
+                    valid = np.isfinite(line.get_ydata())
+                    last_time = line.get_xdata()[valid][-1]
+                    self.assertEqual(last_time, 7. if mode == 'Stage 1 / booster' else 9.)
+                self.assertEqual(np.isfinite(app.telemetry.channels('booster', mode)['speed']).sum(), 6)
+
+    def test_load_numbered_csv_selects_phase_columns_and_legacy_csv_selects_primary(self):
+        import tkinter as tk
+        interpreter = tk.Tcl()
+        app = OptimizationApp.__new__(OptimizationApp)
+        app.root = Mock()
+        app.telemetry_primary = tk.StringVar(master=interpreter, value='Stage 2')
+        app.telemetry_shift_input = tk.StringVar(master=interpreter, value='10')
+        app.telemetry_visible = tk.BooleanVar(master=interpreter, value=False)
+        app.telemetry_color = '#CC79A7'
+        app.cases = [Mock(color='blue'), Mock(color='red'), Mock(color='green')]
+        app.refresh_comparison = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'flight.csv'
+            path.write_text('time_s,velocity1_kmh,altitude1_km,acceleration1_g,'
+                            'velocity2_kmh,altitude2_km,velocity3_kmh,altitude3_km\n'
+                            '0,36,1,1,,,,\n1,,,,72,2,18,1\n')
+            with patch('tkinter.filedialog.askopenfilename', return_value=str(path)), \
+                 patch('tkinter.messagebox.showerror') as error:
+                app.load_telemetry()
+                error.assert_not_called()
+            self.assertEqual(app.telemetry_primary.get(), 'Phase columns')
+            self.assertEqual(app.telemetry.groups['primary'], {})
+            self.assertEqual(app.telemetry.groups['booster']['speed'][1], 5.)
+            self.assertTrue(app.telemetry_visible.get())
+            self.assertEqual(app.telemetry_shift, 0.)
+            app.refresh_comparison.assert_called_once()
+            # Reopening a numbered file also replaces an old saved assignment.
+            app.telemetry_primary.set('Stage 1 / booster')
+            app.select_telemetry_column_mode()
+            self.assertEqual(app.telemetry_primary.get(), 'Phase columns')
+            path.write_text('time_s,speed_kmh,altitude_km\n0,36,1\n1,72,2\n')
+            with patch('tkinter.filedialog.askopenfilename', return_value=str(path)):
+                app.load_telemetry()
+            self.assertEqual(app.telemetry_primary.get(), 'Stage 1 / booster')
+
+    def test_fit_dialog_exposes_saves_and_submits_new_scales_without_a_display(self):
+        import tkinter as tk
+        from tkinter import ttk
+        from DispersionFit import ERROR_SCALES
+        interpreter = tk.Tcl()
+        string_var, boolean_var = tk.StringVar, tk.BooleanVar
+        for saved in ({}, {'acceleration_scale': '2.5', 'pressure_scale': '8', 'phase_time_scale': '3'}):
+            with self.subTest(saved=saved), ExitStack() as stack:
+                stack.enter_context(patch.object(tk, 'Toplevel'))
+                stack.enter_context(patch.object(tk, 'Canvas'))
+                stack.enter_context(patch.object(tk, 'StringVar',
+                    side_effect=lambda **kwargs: string_var(master=interpreter, **kwargs)))
+                stack.enter_context(patch.object(tk, 'BooleanVar',
+                    side_effect=lambda **kwargs: boolean_var(master=interpreter, **kwargs)))
+                labels = stack.enter_context(patch.object(ttk, 'Label'))
+                entries = stack.enter_context(patch.object(ttk, 'Entry'))
+                buttons = stack.enter_context(patch.object(ttk, 'Button'))
+                for name in ('Frame', 'Checkbutton', 'Combobox', 'Scrollbar'):
+                    stack.enter_context(patch.object(ttk, name))
+                app = OptimizationApp.__new__(OptimizationApp)
+                app.process, app.telemetry, app.root = None, Mock(), Mock()
+                app.selected_case = 0
+                app.cases = [Mock(name='case', fit_settings=deepcopy(saved), result=None)]
+                app.cases[0].name = 'Case 1'
+                app.form_request = Mock(return_value=nominal_request(asdict(DispesrionFactorsType())))
+                app.schedule_save, app.start_fit = Mock(), Mock()
+                app.open_fit_dialog()
+                label_text = {call.kwargs.get('text') for call in labels.call_args_list}
+                self.assertIn('Acceleration error scale [m/s²]', label_text)
+                self.assertIn('Dynamic pressure error scale [kPa]', label_text)
+                self.assertIn('Phase timing error scale [s]', label_text)
+                # Parameter entries precede settings; find the settings variables
+                # by their order, shared with the dialog's named settings.
+                settings = [call.kwargs['textvariable'] for call in entries.call_args_list[-(len(ERROR_SCALES)+2):]]
+                fields = dict(zip(('max_evaluations', *ERROR_SCALES, 'regularization'), settings))
+                for key in ('acceleration_scale', 'pressure_scale', 'phase_time_scale'):
+                    self.assertEqual(float(fields[key].get()), float(saved.get(key, ERROR_SCALES[key])))
+                fields['acceleration_scale'].set('3.5')
+                fields['pressure_scale'].set('7.5')
+                fields['phase_time_scale'].set('4')
+                self.assertEqual(app.cases[0].fit_settings['acceleration_scale'], '3.5')
+                self.assertEqual(app.cases[0].fit_settings['pressure_scale'], '7.5')
+                self.assertEqual(app.cases[0].fit_settings['phase_time_scale'], '4')
+                start = next(call.kwargs['command'] for call in buttons.call_args_list
+                             if call.kwargs['text'] == 'Start search')
+                start()
+                options, target = app.start_fit.call_args.args
+                self.assertEqual(options['acceleration_scale'], 3.5)
+                self.assertEqual(options['pressure_scale'], 7.5)
+                self.assertEqual(options['phase_time_scale'], 4.)
+                self.assertEqual(target, 0)
+
+    def test_start_fit_rejects_invalid_new_scales_without_starting_a_worker(self):
+        from DispersionFit import ERROR_SCALES
+        app = OptimizationApp.__new__(OptimizationApp)
+        app.process, app.telemetry = None, Mock()
+        app.form_request = Mock(return_value=nominal_request(asdict(DispesrionFactorsType())))
+        options = dict(ERROR_SCALES, parameters=['FirstStageThrust'], max_evaluations=3,
+                       bounds={'FirstStageThrust': (.9, 1.1)}, regularization=.01)
+        with patch('OptimizationGUI.subprocess.Popen') as worker_process:
+            for key in ('acceleration_scale', 'pressure_scale', 'phase_time_scale'):
+                for value in (0., -1., np.nan, np.inf):
+                    with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, 'Error scales'):
+                        app.start_fit(dict(options, **{key: value}), 0)
+            worker_process.assert_not_called()
+
+    def test_fit_report_displays_phase_duration_and_overrun_without_a_display(self):
+        app = OptimizationApp.__new__(OptimizationApp)
+        timing = dict(telemetry_duration=100., simulation_duration=110., duration_error=10.,
+                      late_samples=10, end_overrun=10., penalty=3.)
+        baseline = dict(score=4., request={'payload_mass_predefined': 10000., 'dispersion': {}},
+                        synchronization={'phase': 'stage1', 'shift': 7.}, errors={},
+                        phase_timing={'stage1': timing})
+        best = deepcopy(baseline)
+        best['phase_timing']['stage1'].update(simulation_duration=100., duration_error=0.,
+                                             late_samples=0, end_overrun=0., penalty=0.)
+        report = dict(baseline=baseline, best=best, termination='done', evaluations=3,
+                      parameters=[], settings={'phase_time_scale': 5.})
+        app.selected_case = 0
+        app.cases = [Mock(fit_report=report)]
+        app.cases[0].name = 'Case 1'
+        app.fit_report_view = Mock()
+        app.render_fit_report()
+        text = app.fit_report_view.insert.call_args.args[1]
+        self.assertIn('Phase timing: 5 s', text)
+        self.assertIn('telemetry 100 s; simulation 110 → 100 s (difference +0 s)', text)
+        self.assertIn('0 late samples; end overrun 0 s; timing penalty 0', text)
+
     def test_defaults_and_fractional_edits(self):
         defaults = asdict(DispesrionFactorsType())
         self.assertEqual(asdict(parse_dispersion(defaults)), defaults)
@@ -524,6 +688,8 @@ class ResultRenderingTests(unittest.TestCase):
                 folder = Path(command[-1])
                 settings = json.loads((folder/'fit_inputs.json').read_text())
                 self.assertEqual(settings['telemetry']['groups']['primary']['speed'], [0,10,50,100])
+                self.assertEqual(settings['acceleration_scale'], 1.)
+                self.assertEqual(settings['pressure_scale'], 5.)
                 with (folder/'fit_result.pickle').open('wb') as stream:
                     pickle.dump(bundle, stream)
                 return Mock(poll=Mock(return_value=0))

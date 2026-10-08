@@ -80,7 +80,7 @@ class VLType(PythonMsg):
     #Aerodynamic Properties
     Sref: float = field(default = 0.0)
     FirstStage_CLa: float = field(default = 0.5) # [1/rad]
-    FirstStage_Cd0: float = field(default = 1.5)
+    FirstStage_Cd0: float = field(default = 0.5)
     FirstStage_Cda2: float = field(default = 3.0)
     FirstStage_MaxAlpha: float = field(default = 0.1745) # [rad]
     FairingSeparationAltitude: float = field(default = 85.0 * 10**3) # [m]
@@ -88,10 +88,10 @@ class VLType(PythonMsg):
     FirstStage_StageSeparationMaxDynamicPressure: float = field(default = 0.5 * 10**3) # [Pa]
     FirstStage_MaxQdynAlpha: float = field(default = 5.0 * 10**3) # [Pa]
 
-    Booster_Cd0: float = field(default = 2.0)
+    Booster_Cd0: float = field(default = 1.6)
     Booster_Cda2: float = field(default = 2.0)
     Booster_CLa: float = field(default = 0.6) # [1/rad]
-    Booster_MaxDynamicPressure: float = field(default = 50.0 * 10**3) # [Pa]
+    Booster_MaxDynamicPressure: float = field(default = 75.0 * 10**3) # [Pa]
     Booster_MaxHeatFlux: float = field(default = 110.0 * 10**3) # [Pa]
     Booster_k_empirical: float = field(default = 2.0e-4) # [-]
 

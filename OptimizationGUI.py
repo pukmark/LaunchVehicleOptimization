@@ -20,22 +20,24 @@ import traceback
 
 import numpy as np
 
-from DispersionFit import DEFAULT_PARAMETERS, default_fit_bounds, fit_report
+from DispersionFit import DEFAULT_PARAMETERS, ERROR_SCALES, CHANNEL_UNITS, default_fit_bounds, fit_report
 from LaunchSites import LAUNCH_SITES, DEFAULT_LAUNCH_SITE, launch_site_inputs, parse_launch_site
 from GUIState import read_gui_state, write_gui_state
 from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name)
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from TelemetryFrames import local_to_ecef_velocity, eci_to_ecef_velocity
+from Trajectory3D import draw_trajectory_3d
 from TelemetryCSV import (load_telemetry_csv, overlay_telemetry, phase_group,
-                          aerodynamic_loads, make_plot_axes, interpolate_speed_time, numerical_acceleration)
+                          aerodynamic_loads, make_plot_axes, interpolate_speed_time,
+                          numerical_acceleration, PRIMARY_GROUPS)
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
 RECOVERY = {"EXP — Expendable": "EXP", "ASDS — Drone ship": "ASDS",
             "RTLS — Return to launch site": "RTLS"}
 VEHICLES = BUILTIN_VEHICLES
-RESULT_TABS = ("First stage", "S1 details", "Second stage", "S2 propulsion", "S2 orbit", "Booster")
+RESULT_TABS = ("First stage", "S1 details", "Second stage", "S2 propulsion", "S2 orbit", "3D trajectory", "Booster")
 MULTIPLIERS = {"FirstStageIsp", "SecondStageIsp", "FirstStageThrust",
                "SecondStageThrust", "FirstStageCx0", "BoosterStageCx0", "AtmosphereDensity"}
 
@@ -511,10 +513,10 @@ class OptimizationApp:
         self.sync_button.grid(row=0, column=4, padx=(8, 0))
         options = ttk.Frame(case_panel)
         options.grid(row=4, column=0, columnspan=4, sticky="ew", pady=4)
-        ttk.Label(options, text="Primary columns:").pack(side="left")
+        ttk.Label(options, text="Column routing:").pack(side="left")
         self.telemetry_primary = tk.StringVar(value="Stage 1 / booster")
         primary = ttk.Combobox(options, textvariable=self.telemetry_primary, state="readonly", width=17,
-                               values=("Stage 1 / booster", "Stage 2", "Booster"))
+                               values=PRIMARY_GROUPS)
         primary.pack(side="left", padx=4)
         self.controls.append((primary, "readonly"))
         primary.bind("<<ComboboxSelected>>", lambda event: self.refresh_comparison())
@@ -850,7 +852,7 @@ class OptimizationApp:
             self.telemetry_color_button.configure(background=self.telemetry_color)
             self.telemetry_visible.set(bool(telemetry.get("visible", True)))
             primary = telemetry.get("primary", "Stage 1 / booster")
-            if primary in ("Stage 1 / booster", "Stage 2", "Booster"):
+            if primary in PRIMARY_GROUPS:
                 self.telemetry_primary.set(primary)
             shift = float(telemetry.get("shift", 0))
             self.telemetry_shift = shift if np.isfinite(shift) else 0.0
@@ -858,6 +860,7 @@ class OptimizationApp:
             if telemetry.get("path"):
                 try:
                     self.telemetry = load_telemetry_csv(telemetry["path"])
+                    self.select_telemetry_column_mode()
                 except (OSError, ValueError, UnicodeError) as exc:
                     notes.append(f"Telemetry could not be reopened: {exc}. Use Load telemetry CSV to select it again.")
             self.refresh_comparison()
@@ -1037,6 +1040,7 @@ class OptimizationApp:
             messagebox.showerror("Could not load telemetry", str(exc), parent=self.root)
             return
         self.telemetry = data
+        self.select_telemetry_column_mode()
         # Pick a distinct default even if a simulation case was recolored.
         if self.telemetry_color.lower() in {case.color.lower() for case in self.cases}:
             self.telemetry_color = next(color for color in ("#CC79A7", "#7B2CBF", "#222222", "#E69F00")
@@ -1046,6 +1050,13 @@ class OptimizationApp:
         self.telemetry_shift_input.set("0")
         self.telemetry_visible.set(True)
         self.refresh_comparison()
+
+    def select_telemetry_column_mode(self):
+        """Numbered/prefixed phase columns need no legacy primary assignment."""
+        if not self.telemetry.groups['primary']:
+            self.telemetry_primary.set('Phase columns')
+        elif self.telemetry_primary.get() == 'Phase columns':
+            self.telemetry_primary.set('Stage 1 / booster')
 
     def clear_telemetry(self):
         self.telemetry = None
@@ -1069,8 +1080,8 @@ class OptimizationApp:
         try:
             channels = self.telemetry.channels("stage1", self.telemetry_primary.get())
             if "speed" not in channels:
-                raise ValueError("No first-stage speed telemetry is available. Select Stage 1 / booster "
-                                 "for primary columns, or load a CSV with stage1_speed_mps/speed_kmh.")
+                raise ValueError("No first-stage speed telemetry is available. Load velocity1_kmh "
+                                 "or select Stage 1 / booster for legacy unnumbered speed columns.")
             initial_time = float(np.asarray(case.result["t1_vec"]).ravel()[0])
             initial_local = np.asarray(case.result["x1"])[2:4, 0]
             initial_velocity = local_velocity_in_ecef(case.result, [initial_local[0], 0., initial_local[1]])
@@ -1119,6 +1130,11 @@ class OptimizationApp:
             self.notebook.hide(self.tabs["Booster"])
         matched_tabs = 0
         for phase, figure in self.figures.items():
+            if phase == '3D trajectory':
+                draw_trajectory_3d(figure, [(case.result, case.request['target_orbit'], case.color, case.name)
+                                          for case in displayed])
+                self.canvases[phase].draw_idle()
+                continue
             channels = telemetry.channels(phase_group(phase), primary) if telemetry else {}
             speed_frame = "ECEF" if any(key in channels for key in ("speed", "vx", "vy", "vz")) else "Inertial"
             phase_cases = [case for case in displayed if phase != "Booster" or "x4" in case.result]
@@ -1128,11 +1144,17 @@ class OptimizationApp:
                 draw_phase(figure, phase, case.result, case.request["target_orbit"],
                            color=case.color, case_label=case.name, append=index > 0, speed_frame=speed_frame)
             windows = []
-            for case in phase_cases:
-                if phase_group(phase) == "stage1":
-                    windows.append((min(0, float(np.min(case.result["t1_vec"]))), float(np.max(case.result["t1_vec"]))))
-                elif phase == "Booster":
-                    windows.append((float(np.min(case.result["t4_vec"])), float(np.max(case.result["t4_vec"]))))
+            # Only shared, unlabelled ascent/return readings need a simulation
+            # window for routing. Explicit phase telemetry must show its full
+            # extent, including a landing later than the simulated landing.
+            shared_primary = (telemetry is not None and primary == "Stage 1 / booster"
+                              and bool(telemetry.groups["primary"]))
+            if shared_primary:
+                for case in phase_cases:
+                    if phase_group(phase) == "stage1":
+                        windows.append((min(0, float(np.min(case.result["t1_vec"]))), float(np.max(case.result["t1_vec"]))))
+                    elif phase == "Booster":
+                        windows.append((float(np.min(case.result["t4_vec"])), float(np.max(case.result["t4_vec"]))))
             show_telemetry = telemetry is not None and (phase != "Booster" or has_booster)
             overlaid = show_telemetry and overlay_telemetry(figure, phase, telemetry, primary,
                                                           self.telemetry_color, self.telemetry_shift, windows)
@@ -1339,11 +1361,30 @@ class OptimizationApp:
                 a, b = before['request']['dispersion'][name], best['request']['dispersion'][name]
                 low, high = report['bounds'][name]
                 lines.append(f"{name:26s} {a:12.6g} → {b:12.6g}   bounds [{low:g}, {high:g}]")
+            if report.get('settings'):
+                lines += ["", "Error scales (smaller means a stronger penalty)"]
+                for channel, unit in CHANNEL_UNITS.items():
+                    key = f'{channel}_scale'
+                    if key in report['settings']:
+                        lines.append(f"{channel}: {float(report['settings'][key]):g} {unit}")
+                if 'phase_time_scale' in report['settings']:
+                    lines.append(f"Phase timing: {float(report['settings']['phase_time_scale']):g} s")
             lines += ["", "Telemetry errors (RMSE)", ""]
             for name, metric in best['errors'].items():
                 a = before['errors'][name]['rmse']
                 lines.append(f"{name:22s} {a:12.4g} → {metric['rmse']:12.4g} {metric['unit']} "
                              f"  coverage {100*metric['coverage']:.1f}%")
+                if 'measured_samples' in metric:
+                    lines.append(f"  {metric['measured_samples']} supplied / {metric['calculated_samples']} calculated samples")
+            if best.get('phase_timing'):
+                lines += ["", "Phase durations and late simulation samples", ""]
+                for phase, metric in best['phase_timing'].items():
+                    previous = before.get('phase_timing', {}).get(phase, metric)
+                    lines.append(f"{phase}: telemetry {metric['telemetry_duration']:.6g} s; simulation "
+                                 f"{previous['simulation_duration']:.6g} → {metric['simulation_duration']:.6g} s "
+                                 f"(difference {metric['duration_error']:+.6g} s)")
+                    lines.append(f"  {metric['late_samples']} late samples; "
+                                 f"end overrun {metric['end_overrun']:.6g} s; timing penalty {metric['penalty']:.6g}")
             lines += ["", "The best candidate is displayed on the flight plots in this case's color.",
                       "Each comparison uses a newly interpolated telemetry synchronization.",
                       "", "Search history", ""]
@@ -1475,8 +1516,24 @@ class OptimizationApp:
         dialog.title(f"Fit {source.name} to telemetry")
         dialog.transient(self.root)
         dialog.grab_set()
-        panel = ttk.Frame(dialog, padding=12)
-        panel.pack(fill="both", expand=True)
+        dialog.geometry('760x680')
+        dialog.minsize(650, 480)
+        footer = ttk.Frame(dialog, padding=12)
+        footer.pack(side='bottom', fill='x')
+        body = ttk.Frame(dialog)
+        body.pack(fill='both', expand=True)
+        canvas = tk.Canvas(body, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(body, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+        panel = ttk.Frame(canvas, padding=12)
+        window = canvas.create_window((0, 0), window=panel, anchor='nw')
+        panel.bind('<Configure>', lambda event: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>', lambda event: canvas.itemconfigure(window, width=event.width))
+        dialog.bind('<MouseWheel>', lambda event: canvas.yview_scroll(-int(event.delta / 120), 'units'))
+        dialog.bind('<Button-4>', lambda event: canvas.yview_scroll(-1, 'units'))
+        dialog.bind('<Button-5>', lambda event: canvas.yview_scroll(1, 'units'))
         ttk.Label(panel, text="Choose factors and absolute bounds. Each candidate is synchronized before scoring.",
                   wraplength=630).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
         for column, title in enumerate(("Fit factor", "Initial guess", "Lower bound", "Upper bound")):
@@ -1493,8 +1550,11 @@ class OptimizationApp:
         row = 2 + len(bounds)
         settings = {}
         for key, label, default in (("max_evaluations", "Maximum solver evaluations", 100),
-                                    ("altitude_scale", "Altitude error scale [m]", 1000),
-                                    ("speed_scale", "Speed error scale [m/s]", 25),
+                                    ("altitude_scale", "Altitude error scale [m]", ERROR_SCALES['altitude_scale']),
+                                    ("speed_scale", "Speed error scale [m/s]", ERROR_SCALES['speed_scale']),
+                                    ("acceleration_scale", "Acceleration error scale [m/s²]", ERROR_SCALES['acceleration_scale']),
+                                    ("pressure_scale", "Dynamic pressure error scale [kPa]", ERROR_SCALES['pressure_scale']),
+                                    ("phase_time_scale", "Phase timing error scale [s]", ERROR_SCALES['phase_time_scale']),
                                     ("regularization", "Penalty for parameter changes", .01)):
             settings[key] = tk.StringVar(value=str(saved.get(key, default)))
             ttk.Label(panel, text=label).grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
@@ -1511,7 +1571,12 @@ class OptimizationApp:
                   "Bounds open at their nominal defaults; the initial guess uses the selected case's current values. "
                   "Nominal units: s = seconds, t = metric tons, tf = metric ton-force; SL = sea level, vac = vacuum. "
                   "Payload is held fixed; maximize mode uses the current result's payload or a preliminary nominal solve. "
-                  "ASDS and RTLS also fit available booster return altitude/speed, including deceleration. "
+                  "Smaller error scales give stronger mismatch penalties. Supplied acceleration is specific "
+                  "acceleration; missing values use ECEF dv/dt. Pressure uses supplied values or ½ρv². "
+                  "Acceleration and pressure penalties apply only to ascent. ASDS and RTLS also fit "
+                  "booster return altitude/speed, including deceleration. "
+                  "Missing telemetry rows are skipped. Phase durations must match telemetry; "
+                  "simulation samples after the last phase reading receive an extra penalty. "
                   "Cancel retains the best completed comparison.")).grid(row=row, column=0, columnspan=4, sticky="w", pady=8)
         def remember(*args):
             source.fit_settings = dict(parameters=[name for name in selected if selected[name].get()],
@@ -1523,7 +1588,7 @@ class OptimizationApp:
             try:
                 options = deepcopy(source.fit_settings)
                 options['max_evaluations'] = int(options['max_evaluations'])
-                for key in ('altitude_scale', 'speed_scale', 'regularization'):
+                for key in (*ERROR_SCALES, 'regularization'):
                     options[key] = float(options[key])
                 options['bounds'] = {name: tuple(map(float, options['bounds'][name])) for name in options['parameters']}
                 target = [case.name for case in self.cases].index(destination.get())
@@ -1534,8 +1599,8 @@ class OptimizationApp:
             dialog.destroy()
         for variable in (*selected.values(), *lows.values(), *highs.values(), *settings.values()):
             variable.trace_add('write', remember)
-        ttk.Button(panel, text="Close", command=dialog.destroy).grid(row=row+1, column=0, sticky="w")
-        ttk.Button(panel, text="Start search", command=start).grid(row=row+1, column=2, columnspan=2, sticky="e")
+        ttk.Button(footer, text="Close", command=dialog.destroy).pack(side='left')
+        ttk.Button(footer, text="Start search", command=start).pack(side='right')
 
     def start_fit(self, options, target):
         if self.process is not None:
@@ -1543,9 +1608,12 @@ class OptimizationApp:
         if self.telemetry is None:
             raise ValueError('Load telemetry before fitting.')
         request = self.form_request()
+        # Older sessions and callers may only contain altitude/speed scales.
+        options = dict(ERROR_SCALES, **options)
         if not options['parameters'] or options['max_evaluations'] < 2:
             raise ValueError('Select factors and allow at least two evaluations.')
-        if not np.isfinite([options['altitude_scale'], options['speed_scale'], options['regularization']]).all() or min(options['altitude_scale'], options['speed_scale']) <= 0 or options['regularization'] < 0:
+        scales = [options[key] for key in ERROR_SCALES]
+        if not np.isfinite([*scales, options['regularization']]).all() or min(scales) <= 0 or options['regularization'] < 0:
             raise ValueError('Error scales must be positive and the parameter penalty nonnegative.')
         for name in options['parameters']:
             low, high = options['bounds'][name]

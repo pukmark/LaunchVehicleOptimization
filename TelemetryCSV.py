@@ -43,6 +43,20 @@ CHANNELS = {
 }
 PREFIXES = {"primary": ("",), "stage1": ("stage1_", "s1_", "first_stage_"),
             "stage2": ("stage2_", "s2_", "second_stage_"), "booster": ("booster_",)}
+PRIMARY_GROUPS = ('Phase columns', 'Stage 1 / booster', 'Stage 2', 'Booster')
+# The numbered broadcast columns identify the vehicle, not successive time
+# windows: upper-stage and booster readings coexist after stage separation.
+NUMBERED_CHANNELS = {
+    phase: {
+        'speed': [(f'velocity{number}_mps', 1), (f'speed{number}_mps', 1),
+                  (f'velocity{number}_kmh', 1/3.6), (f'speed{number}_kmh', 1/3.6)],
+        'altitude': [(f'altitude{number}_km', 1), (f'altitude{number}_m', .001)],
+        'acceleration': [(f'specific_acceleration{number}_mps2', 1),
+                         (f'acceleration{number}_mps2', 1), (f'acceleration{number}_g', 9.80665)],
+        'pressure': [(f'dynamic_pressure{number}_kpa', 1), (f'dynamic_pressure{number}_pa', .001)],
+    }
+    for phase, number in (('stage1', 1), ('stage2', 2), ('booster', 3))
+}
 # Axis, channel, title, y unit. Trajectories use a separate x channel.
 PLOTS = {
     "First stage": [(0, "local_z", "Local trajectory", "Local Z [km]"), (1, "altitude", "Altitude", "Altitude [km]"), (2, "speed", "ECEF speed", "Speed [m/s]"), (3, "mass", "Vehicle mass", "Mass [t]"), (4, "thrust_factor", "Engine & steering", "Thrust factor [−]"), (5, "pressure", "Dynamic pressure", "Pressure [kPa]")],
@@ -199,10 +213,8 @@ def load_telemetry_csv(path):
         channels = {}
         for key, aliases in CHANNELS.items():
             values = np.full(len(frame), np.nan)
-            names = [(prefix + name, scale) for prefix in prefixes for name, scale in aliases]
-            if group == "stage2":
-                names += {"speed": [("velocity2_kmh", 1/3.6), ("speed2_kmh", 1/3.6)],
-                          "altitude": [("altitude2_km", 1)], "acceleration": [("acceleration2_g", 9.80665)]}.get(key, [])
+            names = (NUMBERED_CHANNELS.get(group, {}).get(key, [])
+                     + [(prefix + name, scale) for prefix in prefixes for name, scale in aliases])
             for name, scale in names:
                 values = np.where(np.isfinite(values), values, numeric(name) * scale)
             if np.isfinite(values[order]).any():

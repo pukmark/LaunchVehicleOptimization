@@ -221,7 +221,7 @@ class LV_Optimization(VLType):
         # 3a. This manuever is done in the current apogee (which is the same as the target orbit perigee)
         v_apogee = ca.sqrt(self.eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / a))
         v_desired = ca.sqrt(self.eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["a"]))
-        propellent_mass_for_final_dv = x3f[6] * (1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / (self.eci.SecondStage_Vac_Isp * self.eci.g0)))
+        propellent_mass_for_final_dv = x3f[6] * (1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / ((0.99*self.eci.SecondStage_Vac_Isp) * self.eci.g0)))
         
         # v_final_apogee = ca.sqrt(self.rocket_eci.mu * (1.0 / Target_Orbit["a"]))
         # dv_for_inclination_fix = 2 * v_apogee * ca.sin(Target_Orbit["i"]/2.0)
@@ -265,7 +265,7 @@ class LV_Optimization(VLType):
             # set the time step constraints
             if RecoveryStrategy == 'RTLS':
                 opti.subject_to(dt4_boostback >= 1.0 / self.boostback.scaleT)
-            opti.subject_to(dt4_ballistic >= 75.0 / self.rocket_return.scaleT)
+            opti.subject_to(dt4_ballistic >= 200.0 / self.rocket_return.scaleT)
             opti.subject_to(dt4_reentry >= 0.1 / self.rocket_return.scaleT)
             opti.subject_to(dt4_before_landing >= 0.1 / self.rocket_return.scaleT)
             opti.subject_to(dt4_landing >= 0.1 / self.rocket_return.scaleT)
@@ -324,19 +324,14 @@ class LV_Optimization(VLType):
             opti.subject_to(x4_landing[4,self.rocket_return.N] >= (self.rocket_return.EmptyFirstStageMass)/self.rocket_return.scaleX[4]) # minimal mass at the end of the flight
 
         # set the cost function
-        gain = 1e-2
+        gain = 1e+2
         cost = 0.0
-        # cost += 0.5*20*ca.sumsqr(np.linspace(0,1,self.booster.N, (self.booster.N,1))**2*(u1[0,:]-0.75).T) 
         cost += 0.5*gain*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])) 
-        cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]) )
+        cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]))
         if RecoveryStrategy != 'EXP':
             cost += 0.05*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) 
-        if type(payload_mass_scaled) != ca.MX:
-            cost += -x3f[6]
-            if RecoveryStrategy != 'EXP':
-                cost += -0.01*x4_landing[4,self.rocket_return.N]
-        else:
-            cost += -payload_mass_scaled*10
+        cost += -x3f[6]
+
         opti.minimize(cost)
 
 
@@ -350,7 +345,7 @@ class LV_Optimization(VLType):
                 "linear_solver": linear_solver,
                 "mu_strategy": "adaptive",  # "adaptive" or "adaptive" Strategy for updating the barrier parameter
                 "tol": 1e-6,  # Convergence tolerance
-                "max_iter": 500,  # Max iterations
+                "max_iter": 200,  # Max iterations
                 "print_level": ipopt_print_freq,  # Verbosity level
                 'print_frequency_iter': 1,  # print_frequency_iter
                 # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter

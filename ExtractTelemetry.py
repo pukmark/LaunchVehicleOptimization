@@ -14,24 +14,24 @@ import pytesseract
 
 
 # ========== USER SETTINGS ==========
-VIDEO_URL = "https://x.com/i/broadcasts/1nxnRRdXWEkxO"  # X (Twitter) stream
+VIDEO_URL = "https://x.com/i/broadcasts/1zqKVdlVyaYJB"  # X (Twitter) stream
 OUTPUT_DIR = Path("falcon9_telemetry")
-VIDEO_FILENAME = OUTPUT_DIR / "falcon9_MRV.mp4"
+VIDEO_FILENAME = OUTPUT_DIR / "falcon9_Starlink_LEO.mp4"
 
 # How many frames per second to sample (effective)
 SAMPLE_FPS = 1.0  # samples per second
 
 # Optional: start processing at an offset into the video (seconds).
 # Set to None to process from the beginning.
-START_TIME_SEC = 14*60+3  # skip the prelaunch portion of this broadcast
+START_TIME_SEC = 10*60+4  # skip the prelaunch portion of this broadcast
 # Optional: stop processing at an offset into the video (seconds).
 # Set to None to process through the end.
-END_TIME_SEC = START_TIME_SEC + 8*60+4
-START_SEP_SEC = START_TIME_SEC + 2*60+45  # set to seconds when second stage telemetry begins
+END_TIME_SEC = START_TIME_SEC + 8*60+46
+START_SEP_SEC = START_TIME_SEC + 2*60+31  # video time ending stage 1; stage 2/booster start here
 
 # EXP: expendable; ASDS: drone ship; RTLS: return to launch site.
 # EXP broadcasts have no booster telemetry after separation.
-RECOVERY_MODE = "EXP"
+RECOVERY_MODE = "ASDS"
 RECOVERY_MODES = ("EXP", "ASDS", "RTLS")
 
 # Coordinates measured on a 3840x2160 frame, scaled to the input resolution.
@@ -41,7 +41,7 @@ ROI_REFERENCE_SIZE = (3840, 2160)  # width, height
 # Start with something like lower-left box; adjust after preview (see function show_sample_frame)
 TELEMETRY_ROI_PHASE1 = {
     # Bottom-left widget: SPEED only (km/h).
-    "speed": {"yx1": (647*3, 60*3), "yx2": (671*3, 140*3)},   # (y1, x1), (y2, x2) -- tune via show_sample_frame
+    "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # (y1, x1), (y2, x2) -- tune via show_sample_frame
     # Dedicated altitude widget (km).
     "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # tune visually
     # Bottom-right widget: ACCELERATION only (g).
@@ -51,20 +51,20 @@ TELEMETRY_ROI_PHASE1 = {
 }
 
 # Phase 2 ROIs (after START_SEP_SEC). Tune these visually.
-# TELEMETRY_ROI_PHASE2 = {
-#     "speed": {"yx1": (647*3, 60*3), "yx2": (671*3, 140*3)},   # speed widget unchanged
-#     "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # stage 1 altitude (if present)
-#     "velocity2": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # acceleration widget now shows stage 2 velocity
-#     "altitude2": {"yx1": (647*3, 1138*3), "yx2": (671*3, 1215*3)},    # stage 2 altitude widget
-#     "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},       # time widget unchanged
-# }
-
 TELEMETRY_ROI_PHASE2 = {
-    "velocity2": {"yx1": (647*3, 60*3), "yx2": (671*3, 140*3)},   # speed widget unchanged
-    "altitude2": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # stage 1 altitude (if present)
-    "acceleration2": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # acceleration widget now shows stage 2 velocity
+    "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # speed widget unchanged
+    "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # booster return altitude (if present)
+    "velocity2": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # acceleration widget now shows stage 2 velocity
+    "altitude2": {"yx1": (647*3, 1138*3), "yx2": (671*3, 1215*3)},    # stage 2 altitude widget
     "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},       # time widget unchanged
 }
+
+# TELEMETRY_ROI_PHASE2 = {
+#     "velocity2": {"yx1": (647*3, 60*3), "yx2": (671*3, 140*3)},   # speed widget unchanged
+#     "altitude2": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # stage 1 altitude (if present)
+#     "acceleration2": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # acceleration widget now shows stage 2 velocity
+#     "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},       # time widget unchanged
+# }
 
 # ROI preview styling
 ROI_BORDER_COLOR = (0, 255, 0)   # BGR
@@ -75,8 +75,8 @@ PREVIEW_MAX_HEIGHT = 800
 
 # Basic validity ranges for parsed telemetry (used to filter out OCR noise).
 VEL_KMH_MIN, VEL_KMH_MAX = 0, 30000   # 0 to ~8.3 km/s
-ALT_KM_MIN, ALT_KM_MAX = 0, 400       # 0 to ~400 km
-ACC_G_MIN, ACC_G_MAX = -10, 10          # reasonable g-range
+ALT_KM_MIN, ALT_KM_MAX = 0, 36000       # 0 to ~36,000 km
+ACC_G_MIN, ACC_G_MAX = -20, 20          # reasonable g-range
 
 # Continuity limits use video timestamps, so they also work at other sample rates.
 STANDARD_GRAVITY_MPS2 = 9.80665
@@ -451,13 +451,34 @@ def parse_telemetry_text(text, origin=None):
 # ========== MAIN EXTRACTION LOOP ==========
 
 METRIC_SOURCES = {
-    "speed_kmh": ("speed", "velocity"),
-    "altitude_km": ("altitude", "altitude"),
-    "acceleration_g": ("acceleration", "accel_g"),
+    "velocity1_kmh": ("speed", "velocity"),
+    "altitude1_km": ("altitude", "altitude"),
+    "acceleration1_g": ("acceleration", "accel_g"),
     "velocity2_kmh": ("velocity2", "velocity"),
     "altitude2_km": ("altitude2", "altitude"),
+    "velocity3_kmh": ("speed", "velocity"),
+    "altitude3_km": ("altitude", "altitude"),
 }
 CSV_COLUMNS = ["t_video_sec", "time_str_primary", *METRIC_SOURCES]
+PHASE_COLUMNS = {
+    'stage1': ('velocity1_kmh', 'altitude1_km', 'acceleration1_g'),
+    'stage2': ('velocity2_kmh', 'altitude2_km'),
+    'booster': ('velocity3_kmh', 'altitude3_km'),
+}
+
+
+def phase_metrics(parsed_data, time_sec, separation_sec, recovery_mode):
+    """Route gauges into the three CSV phase groups, leaving inactive ones blank."""
+    after_separation = separation_sec is not None and time_sec >= separation_sec
+    phases = ('stage2',) if after_separation else ('stage1',)
+    if after_separation and normalize_recovery_mode(recovery_mode) != 'EXP':
+        phases += ('booster',)
+    values = dict.fromkeys(METRIC_SOURCES)
+    for phase in phases:
+        for column in PHASE_COLUMNS[phase]:
+            origin, key = METRIC_SOURCES[column]
+            values[column] = parsed_data.get(origin, {}).get(key)
+    return values
 
 SANITY_FIELDS = {
     "speed": ("velocity", "km/h", VEL_KMH_MIN, VEL_KMH_MAX),
@@ -612,14 +633,15 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
                              video_path=None, output_dir=None, sample_fps=None,
                              separation_sec=START_SEP_SEC, debug=None, save_raw=False,
                              recovery_mode=None):
-    """Extract an inclusive video segment, preserving the existing CSV schema.
+    """Extract an inclusive video segment into three numbered phase groups.
 
     Sample times are anchored to the requested start frame without accumulating
     frame-rounding drift. Routine GUI previews are opt-in; manual corrections
     always show the relevant gauge crop. Raw OCR can be saved separately
     for diagnosis. Every active gauge is checked against its last valid readings;
     failed checks pause for a manual reading in the terminal before continuing.
-    EXP skips booster gauges after separation, leaving their CSV values blank.
+    Stage one ends at separation_sec; upper stage and booster then share rows.
+    EXP skips booster gauges after separation, leaving phase-three values blank.
     """
     recovery_mode = normalize_recovery_mode(recovery_mode)
     video_path = VIDEO_FILENAME if video_path is None else Path(video_path)
@@ -688,8 +710,7 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
                                           roi_images=roi_images)
                 row = {"frame_idx": frame_idx, "t_video_sec": time_sec,
                        "time_str_primary": parsed_data.get("time", {}).get("time_str")}
-                for column, (origin, key) in METRIC_SOURCES.items():
-                    row[column] = parsed_data.get(origin, {}).get(key)
+                row.update(phase_metrics(parsed_data, time_sec, separation_sec, recovery_mode))
                 row.update({f"raw_{name}": text for name, text in roi_texts.items()})
                 rows.append(row)
                 sample_idx += 1
@@ -712,13 +733,13 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
     df = pd.DataFrame(rows, columns=CSV_COLUMNS)
     if save_raw:
         output_dir.mkdir(parents=True, exist_ok=True)
-        raw_path = output_dir / "falcon9_telemetry_MRV_raw.csv"
+        raw_path = output_dir / "falcon9_telemetry_COSMO_SSO_raw.csv"
         pd.DataFrame(rows).to_csv(raw_path, index=False)
         print(f"[INFO] Saved raw OCR to: {raw_path}")
     if df.empty:
         raise RuntimeError("No valid telemetry found; preview the crops and check the broadcast layout.")
     output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "falcon9_telemetry_MRV.csv"
+    csv_path = VIDEO_FILENAME[:-4] + ".csv"
     df.to_csv(csv_path, index=False)
     print(f"[INFO] Saved {len(df)} telemetry rows to: {csv_path}")
     return df
@@ -743,21 +764,23 @@ def plot_extracted_data(df, *, output_dir=None, show=True):
             return True
         return False
 
-    # Speed (Stage 1) and Stage 2 velocity
+    # Upper stage and booster return are concurrent after stage separation.
     ax_speed = axes[0]
     speed_plotted = []
-    speed_plotted.append(_plot(ax_speed, "speed_kmh", "Speed (km/h)", "tab:green"))
+    speed_plotted.append(_plot(ax_speed, "velocity1_kmh", "Stage 1 Velocity (km/h)", "tab:green"))
     speed_plotted.append(_plot(ax_speed, "velocity2_kmh", "Stage 2 Velocity (km/h)", "tab:olive"))
+    speed_plotted.append(_plot(ax_speed, "velocity3_kmh", "Booster Return Velocity (km/h)", "tab:blue"))
     ax_speed.set_ylabel("Speed (km/h)")
     if any(speed_plotted):
         ax_speed.legend()
     ax_speed.grid(True, alpha=0.3)
 
-    # Altitude (Stage 1) and Stage 2 altitude
+    # Altitude for each vehicle phase.
     ax_alt = axes[1]
     alt_plotted = []
-    alt_plotted.append(_plot(ax_alt, "altitude_km", "Altitude (km)", "tab:purple"))
+    alt_plotted.append(_plot(ax_alt, "altitude1_km", "Stage 1 Altitude (km)", "tab:purple"))
     alt_plotted.append(_plot(ax_alt, "altitude2_km", "Stage 2 Altitude (km)", "tab:pink"))
+    alt_plotted.append(_plot(ax_alt, "altitude3_km", "Booster Return Altitude (km)", "tab:blue"))
     ax_alt.set_ylabel("Altitude (km)")
     if any(alt_plotted):
         ax_alt.legend()
@@ -765,7 +788,7 @@ def plot_extracted_data(df, *, output_dir=None, show=True):
 
     # Acceleration
     ax_acc = axes[2]
-    acc_plotted = _plot(ax_acc, "acceleration_g", "Acceleration (g)", "tab:red")
+    acc_plotted = _plot(ax_acc, "acceleration1_g", "Stage 1 Acceleration (g)", "tab:red")
     if acc_plotted:
         ax_acc.legend()
     ax_acc.set_ylabel("Acceleration (g)")
@@ -775,7 +798,7 @@ def plot_extracted_data(df, *, output_dir=None, show=True):
     plt.tight_layout()
     output_dir = OUTPUT_DIR if output_dir is None else Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    plot_path = output_dir / "falcon9_telemetry_MRV.png"
+    plot_path = output_dir / "falcon9_telemetry_COSMO_SSO.png"
     fig.savefig(plot_path, dpi=150)
     print(f"[INFO] Saved plot to: {plot_path}")
     if show:
@@ -785,11 +808,12 @@ def plot_extracted_data(df, *, output_dir=None, show=True):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video", default='./falcon9_telemetry/falcon9_MRV.mp4')
+    parser.add_argument("--video", default=VIDEO_FILENAME)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--start", type=float, default=START_TIME_SEC, help="Video start time in seconds")
     parser.add_argument("--end", type=float, default=END_TIME_SEC, help="Video end time in seconds")
-    parser.add_argument("--separation", type=float, default=START_SEP_SEC, help="Phase 2 video time in seconds")
+    parser.add_argument("--separation", type=float, default=START_SEP_SEC,
+                        help="Video time ending stage 1 and starting upper-stage/booster columns")
     parser.add_argument("--sample-fps", type=float, default=SAMPLE_FPS)
     parser.add_argument("--recovery-mode", "--recovery", type=str.upper,
                         choices=RECOVERY_MODES, default=RECOVERY_MODE,

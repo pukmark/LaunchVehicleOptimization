@@ -23,6 +23,45 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(np.isnan(mission_seconds("00:61:00")))
         self.assertTrue(np.isnan(mission_seconds("bad")))
 
+    def test_numbered_three_phase_schema_units_gaps_and_concurrent_return(self):
+        data = self.load('t_video_sec,time_str_primary,velocity1_kmh,altitude1_km,acceleration1_g,'
+                         'velocity2_kmh,altitude2_km,velocity3_kmh,altitude3_km\n'
+                         '10,T+00:00:00,36,0.1,1,,,,\n'
+                         '11,T+00:00:01,72,0.2,2,,,,\n'
+                         '12,T+00:00:02,,,,360,3,180,2\n'
+                         '13,T+00:00:03,,,,720,4,,\n')
+        self.assertEqual(data.groups['primary'], {})
+        np.testing.assert_allclose(data.time, [0, 1, 2, 3])
+        for mode in ('Phase columns', 'Stage 1 / booster', 'Stage 2', 'Booster'):
+            with self.subTest(mode=mode):
+                first = data.channels('stage1', mode)
+                upper = data.channels('stage2', mode)
+                booster = data.channels('booster', mode)
+                np.testing.assert_allclose(first['speed'], [10, 20, np.nan, np.nan], equal_nan=True)
+                np.testing.assert_allclose(first['altitude'], [.1, .2, np.nan, np.nan], equal_nan=True)
+                np.testing.assert_allclose(first['acceleration'], [9.80665, 19.6133, np.nan, np.nan], equal_nan=True)
+                np.testing.assert_allclose(upper['speed'], [np.nan, np.nan, 100, 200], equal_nan=True)
+                np.testing.assert_allclose(upper['altitude'], [np.nan, np.nan, 3, 4], equal_nan=True)
+                np.testing.assert_allclose(booster['speed'], [np.nan, np.nan, 50, np.nan], equal_nan=True)
+                np.testing.assert_allclose(booster['altitude'], [np.nan, np.nan, 2, np.nan], equal_nan=True)
+        figure = Figure()
+        self.assertTrue(overlay_telemetry(figure, 'Booster', data, 'Phase columns', 'purple'))
+        np.testing.assert_allclose(figure.axes[2].lines[0].get_ydata(),
+                                   [np.nan, np.nan, 50, np.nan], equal_nan=True)
+        figure = Figure()
+        self.assertTrue(overlay_telemetry(figure, 'S1 details', data, 'Phase columns', 'purple'))
+        np.testing.assert_allclose(figure.axes[1].lines[0].get_ydata(),
+                                   [9.80665, 19.6133, np.nan, np.nan], equal_nan=True)
+
+    def test_numbered_phase_columns_prefer_new_values_and_support_exp(self):
+        data = self.load('time_s,velocity1_kmh,stage1_speed_mps,altitude1_km,acceleration1_g,'
+                         'velocity2_kmh,altitude2_km,velocity3_kmh,altitude3_km\n'
+                         '0,36,99,0,1,,,,\n1,,,,,720,3,,\n')
+        self.assertEqual(data.groups['stage1']['speed'][0], 10.)
+        self.assertEqual(data.groups['booster'], {})
+        self.assertEqual(data.groups['primary'], {})
+        self.assertNotIn('acceleration', data.groups['stage2'])
+
     def test_clean_schema_units_gaps_and_separate_stage_two(self):
         data = self.load("time_s,speed_kmh,altitude_km,acceleration_g,velocity2_kmh,altitude2_km\n"
                          "2,360,1,2,720,3\n0,0,0,1,,\n1,,0.5,,,\n")
@@ -124,12 +163,14 @@ class TelemetryTests(unittest.TestCase):
 
     def test_shipped_telemetry_formats(self):
         root = Path(__file__).resolve().parents[1] / 'falcon9_telemetry'
-        for name in ('falcon9_telemetry.csv', 'falcon9_telemetry_starlink.csv', 'Tranche 1.csv'):
-            with self.subTest(name=name):
-                data = load_telemetry_csv(root / name)
+        paths = sorted(root.glob('*.csv'))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(name=path.name):
+                data = load_telemetry_csv(path)
                 self.assertGreater(len(data.time), 0)
-                self.assertIn('speed', data.groups['primary'])
-                self.assertIn('altitude', data.groups['primary'])
+                self.assertTrue(any('speed' in group for group in data.groups.values()))
+                self.assertTrue(any('altitude' in group for group in data.groups.values()))
 
     def test_numerical_acceleration_unequal_intervals_and_deceleration(self):
         np.testing.assert_allclose(numerical_acceleration([0, .5, 2, 4], [10, 12, 18, 14]),

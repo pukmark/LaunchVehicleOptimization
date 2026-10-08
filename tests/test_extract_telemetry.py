@@ -44,7 +44,8 @@ class SanityTests(unittest.TestCase):
     def test_altitude_allows_fast_steady_ascent_but_rejects_acceleration_spike(self):
         history = {"altitude": [(0, 10), (1, 11)]}
         self.assertIsNone(self.issue("altitude", 12, 2, history))
-        self.assertIn("altitude trend", self.issue("altitude", 13, 2, history))
+        spike = 12 + 2 * extract.ALTITUDE_RESOLUTION_KM + 1
+        self.assertIn("altitude trend", self.issue("altitude", spike, 2, history))
         # Three unequally spaced samples on a 5g vertical trajectory.
         altitude = lambda t: 10 + .5 * 5 * 9.80665 * t**2 / 1000
         history = {"altitude": [(0, altitude(0)), (2, altitude(2))]}
@@ -54,7 +55,8 @@ class SanityTests(unittest.TestCase):
     def test_altitude_rounding_does_not_trigger_false_alarm(self):
         history = {"altitude": [(0, 10), (1, 10.1)]}
         self.assertIsNone(self.issue("altitude", 10.1, 2, history, sample(speed=400)))
-        self.assertIsNotNone(self.issue("altitude", 10.5, 2, history, sample(speed=400)))
+        self.assertIsNotNone(self.issue("altitude", 10.1 + extract.ALTITUDE_RESOLUTION_KM + 1,
+                                       2, history, sample(speed=400)))
 
     def test_stage2_uses_its_own_history_and_speed(self):
         data = sample(speed=0)
@@ -68,7 +70,7 @@ class SanityTests(unittest.TestCase):
         self.assertIsNone(self.issue("acceleration", 1, 1, history))
         self.assertIsNotNone(self.issue("acceleration", 9, 1, history))
         self.assertIsNone(self.issue("acceleration", 9, 2, history))
-        self.assertIsNotNone(self.issue("acceleration", 11, 2, {}))
+        self.assertIsNotNone(self.issue("acceleration", extract.ACC_G_MAX + 1, 2, {}))
 
     def test_timer_follows_video_and_handles_countdown_crossing(self):
         history = {"time": [(0, "T-00:00:01")]}
@@ -82,7 +84,7 @@ class SanityTests(unittest.TestCase):
         for origin in extract.SANITY_FIELDS:
             self.assertIsNotNone(self.issue(origin, None, 0, {}))
         for origin, value in (("speed", -1), ("speed", 30001),
-                              ("altitude", 401), ("altitude2", -1),
+                              ("altitude", extract.ALT_KM_MAX + 1), ("altitude2", -1),
                               ("acceleration", np.inf), ("speed", np.nan)):
             with self.subTest(origin=origin, value=value):
                 self.assertIsNotNone(self.issue(origin, value, 0, {}))
@@ -231,6 +233,48 @@ class CorrectionPreviewTests(WindowTestCase):
 
 
 class ExtractionTests(WindowTestCase):
+    def test_three_phase_csv_routes_at_separation_and_round_trips_to_loader(self):
+        from TelemetryCSV import load_telemetry_csv
+        for mode in ('ASDS', 'RTLS'):
+            with self.subTest(mode=mode):
+                cap = FakeCapture(4)
+                def gauge(_image, origin):
+                    if cap.position <= 2:
+                        return '1'
+                    return {'speed': '180', 'altitude': '2',
+                            'velocity2': '360', 'altitude2': '20'}[origin]
+                with tempfile.TemporaryDirectory() as directory, \
+                     patch.object(extract.cv2, 'VideoCapture', return_value=cap), \
+                     patch.object(extract, 'ocr_gauge_robust', side_effect=gauge), \
+                     patch.object(extract, 'ocr_time_robust', side_effect=[f'00:00:0{i}' for i in range(4)]), \
+                     patch('builtins.input', side_effect=AssertionError('unexpected prompt')), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    result = extract.extract_telemetry_to_csv(output_dir=directory, debug=False,
+                                                              separation_sec=2, recovery_mode=mode)
+                    self.assertEqual(list(result.columns), ['t_video_sec', 'time_str_primary',
+                        'velocity1_kmh', 'altitude1_km', 'acceleration1_g',
+                        'velocity2_kmh', 'altitude2_km', 'velocity3_kmh', 'altitude3_km'])
+                    np.testing.assert_allclose(result['velocity1_kmh'], [1, 1, np.nan, np.nan], equal_nan=True)
+                    np.testing.assert_allclose(result['velocity2_kmh'], [np.nan, np.nan, 360, 360], equal_nan=True)
+                    np.testing.assert_allclose(result['velocity3_kmh'], [np.nan, np.nan, 180, 180], equal_nan=True)
+                    data = load_telemetry_csv(next(Path(directory).glob('*.csv')))
+                    self.assertEqual(data.groups['primary'], {})
+                    self.assertEqual(data.groups['stage2']['speed'][2], 100.)
+                    self.assertEqual(data.groups['booster']['speed'][2], 50.)
+                    self.assertTrue(np.isnan(data.groups['stage1']['acceleration'][2:]).all())
+                    # The generated file also drives all three extraction plots.
+                    subplots = extract.plt.subplots
+                    figures = []
+                    def create_figure(*args, **kwargs):
+                        figure, axes = subplots(*args, **kwargs)
+                        figures.append(figure)
+                        return figure, axes
+                    with patch.object(extract.plt, 'subplots', side_effect=create_figure):
+                        extract.plot_extracted_data(result, output_dir=directory, show=False)
+                    self.assertEqual([len(axis.lines) for axis in figures[0].axes], [3, 3, 1])
+                    self.assertTrue(list(Path(directory).glob('*.png')))
+                self.assertTrue(cap.released)
+
     def test_exp_skips_booster_ocr_but_still_checks_stage2_values(self):
         cap = FakeCapture(3)
 
@@ -253,16 +297,17 @@ class ExtractionTests(WindowTestCase):
             prompt.assert_called_once()
             self.assertIn("velocity2", prompt.call_args.args[0])
             self.assertEqual(self.gui["imshow"].call_args.args[0], "Manual correction - velocity2")
-            self.assertEqual(result.loc[0, "speed_kmh"], 1)
-            self.assertEqual(result.loc[0, "altitude_km"], 1)
-            self.assertTrue(result.loc[1:, ["speed_kmh", "altitude_km", "acceleration_g"]].isna().all().all())
+            self.assertEqual(result.loc[0, "velocity1_kmh"], 1)
+            self.assertEqual(result.loc[0, "altitude1_km"], 1)
+            self.assertTrue(result.loc[1:, list(extract.PHASE_COLUMNS['stage1'])].isna().all().all())
+            self.assertTrue(result[list(extract.PHASE_COLUMNS['booster'])].isna().all().all())
             self.assertEqual(result.loc[1:, "velocity2_kmh"].tolist(), [20000, 20000])
             self.assertEqual(result.loc[1:, "altitude2_km"].tolist(), [100, 100])
             csv_path = next(path for path in Path(directory).glob("*.csv")
                             if not path.stem.endswith("_raw"))
             saved = pd.read_csv(csv_path)
             self.assertEqual(list(saved.columns), extract.CSV_COLUMNS)
-            self.assertTrue(saved.loc[1:, "speed_kmh"].isna().all())
+            self.assertTrue(saved.loc[1:, "velocity1_kmh"].isna().all())
         self.assertTrue(cap.released)
 
     def test_pauses_resumes_and_saves_corrected_values_without_median_filter(self):
@@ -283,14 +328,14 @@ class ExtractionTests(WindowTestCase):
                                                        separation_sec=None, save_raw=True)
             self.assertEqual(prompt.call_count, 2)
             self.assertEqual(len(result), 7)
-            self.assertEqual(result.loc[3, "speed_kmh"], 999)
+            self.assertEqual(result.loc[3, "velocity1_kmh"], 999)
             csv_path = next(path for path in Path(directory).glob("*.csv")
                             if not path.stem.endswith("_raw"))
             saved = pd.read_csv(csv_path)
-            self.assertEqual(saved.loc[3, "speed_kmh"], 999)
+            self.assertEqual(saved.loc[3, "velocity1_kmh"], 999)
             raw = pd.read_csv(next(Path(directory).glob("*_raw.csv")))
             self.assertEqual(raw.loc[3, "raw_speed"], 1500)
-            self.assertEqual(raw.loc[3, "speed_kmh"], 999)
+            self.assertEqual(raw.loc[3, "velocity1_kmh"], 999)
         self.assertTrue(cap.released)
 
     def test_stage_separation_checks_new_gauges_without_prompting_for_absent_ones(self):
@@ -306,7 +351,9 @@ class ExtractionTests(WindowTestCase):
                                                        separation_sec=1)
         self.assertTrue(np.isnan(result.loc[0, "velocity2_kmh"]))
         self.assertEqual(result.loc[1, "velocity2_kmh"], 1)
-        self.assertTrue(np.isnan(result.loc[1, "acceleration_g"]))
+        self.assertTrue(result.loc[1:, list(extract.PHASE_COLUMNS['stage1'])].isna().all().all())
+        self.assertEqual(result.loc[1, 'velocity3_kmh'], 1)
+        self.assertEqual(result.loc[1, 'altitude3_km'], 1)
         self.assertTrue(cap.released)
 
     def test_missing_terminal_input_releases_capture_without_overwriting_csv(self):
