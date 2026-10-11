@@ -289,7 +289,7 @@ def run_dispersion_case(i):
                 else:
                     Results.append(0.0)
                 if iVal == DispesrionVec.shape[0]-1:
-                    ConfigName = {1: 'Falcon9', 2: 'Starship', 3: 'StarshipV3'}[LV_Configuration]
+                    ConfigName = {1: 'Falcon9', 2: 'Starship', 3: 'StarshipV3', 4: 'NewGlenn'}[LV_Configuration]
                     result_lines.append(ConfigName+'_'+Target_Orbit['Name']+'_'+RecoveryStrategy+'_'+DispesrionParam+'=0.001*np.array(['+', '.join(f'{x:.2f}' for x in Results) + '])')
                 # print(f'dV for final orbit: {v3_desired-v3_apogee:.2f} m/s, Propellent mass for final dV: {propellent_mass_for_final_dv3:.2f} kg')
                 # print(f'Final Orbit (Apogee, Perigee, Inclination): {(actual_apogee3 - self.eci.R0)/1000:.2f} Km, {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {np.rad2deg(i3_sol[-1]):.2f} deg')
@@ -619,10 +619,10 @@ if __name__ == '__main__':
     RecoveryStrategyVec = ['ASDS'] # 'EXP', 'ASDS', 'RTLS'
     payload_mass_predefined = -1 # payload mass defined in kg, maximmize the payload mass if set to non-positive value
     Plot_interm = 0
-    LV_Configuration = 1 # 1 - Falcon 9, 2 - Starship, 3 - Starship V3
+    LV_Configuration = 4 # 1 - Falcon 9, 2 - Starship, 3 - Starship V3, 4-New Glenn
     Plot_Results = 2 # 1 - Plot telemetry, 2- Plot 3d trajectory
 
-    ConfigName = {1: 'Falcon9', 2: 'Starship', 3: 'StarshipV3'}[LV_Configuration]
+    ConfigName = {1: 'Falcon9', 2: 'Starship', 3: 'StarshipV3', 4: 'NewGlenn'}[LV_Configuration]
 
     Target_Orbits = []
     ### Target orbit parameters for LEO 
@@ -692,7 +692,7 @@ if __name__ == '__main__':
     # DispesrionList.append(np.linspace(-10000,10000, 9))
     DispesrionList.append(np.array([[0]]))
     DispesrionParamList.append('FirstStage_EmptyMass')
-    ConfigList.append(1)
+    ConfigList.append(4)
 
     # DispesrionList.append(np.linspace(-3000,10000, 9))
     # DispesrionParamList.append('SecondStage_EmptyMass')

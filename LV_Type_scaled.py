@@ -205,14 +205,14 @@ class VLType(PythonMsg):
         self.FirstStage_CLa = 0.4  # Less lift from cylindrical shape
         self.FirstStage_Cd0 = 0.8  # More drag due to wider diameter
         self.FirstStage_Cda2 = 3.5
-        self.FirstStage_MaxAlpha = 0.1745  # [rad]
-        self.FirstStage_MaxDynamicPressure = 25.0 * 10**3  # [Pa]
-        self.FirstStage_StageSeparationMaxDynamicPressure = 5.0 * 10**3  # [Pa]
+        self.FirstStage_MaxAlpha = np.deg2rad(10.0)  # [rad]
+        self.FirstStage_MaxDynamicPressure = 30.0e3  # [Pa]
+        self.FirstStage_StageSeparationMaxDynamicPressure = 2.0e3  # [Pa]
 
-        self.Booster_Cd0 = 1.1  # with grid fins
+        self.Booster_Cd0 = 1.6  # with grid fins
         self.Booster_Cda2 = 1.8
         self.Booster_CLa = 0.5
-        self.Booster_MaxDynamicPressure = 120.0 * 10**3  # [Pa]
+        self.Booster_MaxDynamicPressure = 100.0 * 10**3  # [Pa]
         self.Booster_MaxHeatFlux = 150.0 * 10**3  # [W/m^2]
         self.Booster_k_empirical = 2.0e-4
 
@@ -259,6 +259,66 @@ class VLType(PythonMsg):
 
         self.__post_init__()
 
+    def NewGlennDatabase(self):
+        """Apply New Glenn 7x2 upgraded vehicle parameters.
+
+        Propellant masses, dry masses, aerodynamic coefficients and
+        specific impulses include engineering estimates.
+        """
+
+        # Geometry
+        self.Diameter = 7.0  # [m]
+
+        # Mass properties [kg] - estimates
+        self.EmptyFirstStageMass = 55.0e3
+        self.EmptySecondStageMass = 25.0e3
+        self.FirstStagePropellentMass = 1230.0e3
+        self.SecondStagePropellentMass = 230.0e3
+        self.FairingMass = 7.0e3
+
+        # Aerodynamics - estimates
+        self.FirstStage_CLa = 0.45
+        self.FirstStage_Cd0 = 0.6
+        self.FirstStage_Cda2 = 3.0
+        self.FirstStage_MaxAlpha = np.deg2rad(15.0)
+        self.FirstStage_MaxDynamicPressure = 30.0e3
+        self.FirstStage_StageSeparationMaxDynamicPressure = 1.0e3
+        self.FirstStage_MaxQdynAlpha = 5.0e3
+        self.FairingSeparationAltitude = 100.0e3
+
+        # Booster recovery - estimates
+        self.Booster_Cd0 = 1.6
+        self.Booster_Cda2 = 2.0
+        self.Booster_CLa = 0.8
+        self.Booster_MaxDynamicPressure = 80.0e3
+        self.Booster_MaxHeatFlux = 120.0e3
+        self.Booster_k_empirical = 2.0e-4
+
+        # First stage: 7 x BE-4
+        self.FirstStage_SL_Isp = 310.0
+        self.FirstStage_Vac_Isp = 340.0
+        self.FirstStage_SL_Thrust = 2846.0e3 * 7
+
+        # Estimated vacuum thrust, consistent with mass flow
+        self.FirstStage_Vac_Thrust = self.FirstStage_SL_Thrust * self.FirstStage_Vac_Isp / self.FirstStage_SL_Isp
+
+        self.FirstStage_MinThrust_Factor = 220.0 / 640.0
+        self.FirstStage_MinThrust_IspFactor = 0.98
+        self.FirstStage_Ae = (self.FirstStage_Vac_Thrust - self.FirstStage_SL_Thrust) / 101325.0
+
+        # Second stage: 2 x BE-3U
+        self.SecondStage_Thrust = 890.0e3 * 2
+        self.SecondStage_Vac_Isp = 445.0
+        self.SecondStage_MinThrust_Factor = 0.5
+        self.SecondStage_MinThrust_IspFactor = 0.99
+        self.SecondStage_CoastTimeAfterSep = 8.0
+
+        # Payload acceleration limit
+        self.Payload_Max_acc = 4.0 * 9.81
+
+        # Derived mass and aerodynamic properties
+        self.__post_init__()
+
     def ApplyVehicleConfiguration(self, LV_Configuration: int):
         if isinstance(LV_Configuration, dict):
             definition = validate_vehicle_definition(LV_Configuration)
@@ -273,6 +333,9 @@ class VLType(PythonMsg):
             return
         if LV_Configuration == 3:
             self.StarShipV3Database()
+            return
+        if LV_Configuration == 4:
+            self.NewGlennDatabase()
             return
         raise ValueError(f"Unknown launch vehicle configuration: {LV_Configuration}")
 

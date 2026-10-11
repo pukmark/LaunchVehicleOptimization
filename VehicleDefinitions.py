@@ -2,7 +2,7 @@
 import math
 
 
-BUILTIN_VEHICLES = {"Falcon 9": 1, "Starship": 2, "Starship V3": 3}
+BUILTIN_VEHICLES = {"Falcon 9": 1, "Starship": 2, "Starship V3": 3, "New Glenn": 4}
 TONNE_FORCE = 1000. * 9.80665
 # Attribute, display label, display unit, conversion from display units to SI.
 VEHICLE_PARAMETER_GROUPS = {

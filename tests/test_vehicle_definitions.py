@@ -49,6 +49,24 @@ class VehicleDefinitionTests(unittest.TestCase):
                     self.assertAlmostEqual(cloned['parameters'][name], value)
                 self.assertAlmostEqual(model.Sref, np.pi * (expected.Diameter / 2)**2)
 
+    def test_new_glenn_selector_reaches_worker_and_all_vehicle_phases(self):
+        configuration = vehicle_catalog()['New Glenn']
+        self.assertEqual(configuration, 4)
+        self.assertEqual(vehicle_name(configuration), 'New Glenn')
+        request = nominal_request(asdict(DispesrionFactorsType()), configuration, 'ASDS')
+        model = LV_Optimization(DispesrionFactorsType(), request['configuration'])
+        for phase in (model.booster, model.eci, model.boostback, model.rocket_return):
+            self.assertEqual(phase.Diameter, 7.)
+            self.assertEqual(phase.FirstStage_SL_Thrust, 7*2846e3)
+            self.assertEqual(phase.SecondStage_Thrust, 2*890e3)
+            self.assertEqual(phase.SecondStage_Vac_Isp, 445.)
+            self.assertEqual(phase.LV_total_mass, 1547e3)
+            self.assertAlmostEqual(phase.Sref, np.pi*3.5**2)
+        with patch('LV_Optimization_Type.LV_Optimization') as constructor:
+            run_optimization(request, None)
+        self.assertEqual(constructor.call_args.args[1], configuration)
+        self.assertEqual(constructor.return_value.SolveOptimiztion.call_args.kwargs['RecoveryStrategy'], 'ASDS')
+
     def test_display_units_convert_to_si_and_nominal_annotations(self):
         values = dict(self.values, EmptyFirstStageMass='30', FirstStage_SL_Thrust='1000',
                       FirstStage_SL_Isp='290', FirstStage_MaxAlpha='12')

@@ -401,7 +401,12 @@ curves cover both sides of fairing separation. Specific acceleration excludes
 gravity; orbital diagnostics use the model's Earth gravitational parameter.
 Undefined angles at zero speed or zero thrust appear as gaps in the curves.
 
-The vehicle selector also supports Starship and Starship V3 (configuration 3).
+The vehicle selector also supports Starship, Starship V3 (configuration 3), and
+New Glenn (configuration 4). New Glenn uses the existing upgraded 7×2 model in
+`LV_Type_scaled.py`: seven BE-4 engines and two BE-3U engines. Its masses,
+specific impulses, aerodynamic coefficients, and recovery limits include
+engineering estimates. Select New Glenn and use **New vehicle…** to create
+an editable copy of these parameters.
 Each tab has Matplotlib controls
 for zooming, panning, and saving plots. Settings are locked during a run; the
 solver runs in a separate process, with live output and a **Cancel** button.

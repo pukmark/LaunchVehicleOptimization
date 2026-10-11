@@ -218,7 +218,7 @@ class DispersionFormTests(unittest.TestCase):
         self.assertAlmostEqual(model.FirstStage_SL_Thrust, 8240e3 * 9.80665)
         self.assertAlmostEqual(model.SecondStage_Thrust, 1614e3 * 9.80665)
         with self.assertRaisesRegex(ValueError, "Unknown launch vehicle configuration"):
-            model.ApplyVehicleConfiguration(4)
+            model.ApplyVehicleConfiguration(5)
 
     def test_solver_receives_snapshot_and_nominal_target(self):
         request = nominal_request(asdict(DispesrionFactorsType(FirstStageThrust=1.02)), 2, "RTLS")

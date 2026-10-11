@@ -120,7 +120,7 @@ class LV_Optimization(VLType):
             payload_mass_scaled = payload_mass_predefined / self.booster.scaleX[4]
         else:
             payload_mass_scaled = opti.variable(1, 1)
-            # opti.subject_to(payload_mass_scaled >= 0.0)
+            opti.subject_to(payload_mass_scaled >= 0.0)
         x1 = opti.variable(self.booster.nx, self.booster.N+1) # [x, z, vx, vz, m]
         u1 = opti.variable(self.booster.nu, self.booster.N) # [T_factor, alpha]
         dt1 = opti.variable(1)
@@ -362,13 +362,13 @@ class LV_Optimization(VLType):
             opti.subject_to(x4_landing[4,self.rocket_return.N] >= (self.rocket_return.EmptyFirstStageMass)/self.rocket_return.scaleX[4]) # minimal mass at the end of the flight
 
         # set the cost function
-        gain = 1e+2
+        gain = 5e2
         cost = 0.0
         cost += 0.5*gain*(ca.sumsqr(u1[0,1:]-u1[0,:-1]) + ca.sumsqr(u1[1,1:]-u1[1,:-1])) 
         cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]))
         if RecoveryStrategy != 'EXP':
             cost += 0.05*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) 
-        cost += -payload_mass # maximize the payload mass
+        cost += -(x3f[6] - propellent_mass_for_final_dv) # maximize the payload mass and propellant spares
 
         opti.minimize(cost)
 
@@ -383,7 +383,7 @@ class LV_Optimization(VLType):
                 "linear_solver": linear_solver,
                 "mu_strategy": "adaptive",  # "adaptive" or "adaptive" Strategy for updating the barrier parameter
                 "tol": 1e-6,  # Convergence tolerance
-                "max_iter": 250,  # Max iterations
+                "max_iter": 300,  # Max iterations
                 "print_level": ipopt_print_freq,  # Verbosity level
                 'print_frequency_iter': 1,  # print_frequency_iter
                 # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter
