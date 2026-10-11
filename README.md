@@ -63,14 +63,22 @@ Earth, the equatorial plane, and parking/final orbits, with XY, YZ, and XZ
 projections as in `Main.py`. Drag the 3D view to rotate it and use the plot
 toolbar to save the figure. Case colors and **Display** selections also apply
 to this tab. Orbit shapes are sampled as two-body ellipses; the final orbit
-uses the saved speed change at parking apogee. Unbound states show the ascent
+uses the saved target speed and the smallest plane rotation that reaches the
+target inclination at parking apogee, allowing final RAAN to vary as in the
+optimizer. Apogee need not lie on the equator. A star marks the final burn in
+the 3D view and each projection. Circular parking orbits use an equatorial
+node. Geometrically unreachable target inclinations show an explanation;
+matching parking and target inclinations produce a speed-only burn.
+Unbound states show the ascent
 with an explanation instead of an orbit. Scalar altitude/speed telemetry has
 no 3D position information and is shown on its existing flight-phase tabs.
 The first-stage path uses the saved launch-site/azimuth transform, matching the
 solver's stage-separation frame. Each displayed case has its own results box
 with matching text and border colors: payload, launch azimuth (east from north),
-parking-to-final-orbit Δv at apogee, orbit apogee/perigee and inclination, MECO
+parking-to-final-orbit Δv, orbit apogee/perigee, parking and final
+inclinations, inclination change, actual plane rotation, MECO
 and SECO mission times, maximum ascent dynamic pressure, and orbit-burn propellant.
+The case summary also shows the maneuver's Δv, inclination change, and plane rotation.
 
 Vehicle definitions are saved with the GUI state and included in optimization
 and telemetry-fit requests and results. The editor's **Context** tab shows the

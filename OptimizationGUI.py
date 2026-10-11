@@ -27,7 +27,7 @@ from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehi
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name)
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from TelemetryFrames import local_to_ecef_velocity, eci_to_ecef_velocity
-from Trajectory3D import draw_trajectory_3d
+from Trajectory3D import draw_trajectory_3d, maneuver_summary_text
 from TelemetryCSV import (load_telemetry_csv, overlay_telemetry, phase_group,
                           aerodynamic_loads, make_plot_axes, interpolate_speed_time,
                           numerical_acceleration, PRIMARY_GROUPS)
@@ -1183,7 +1183,8 @@ class OptimizationApp:
                              f"{(orbit['perigee'] - 6378137) / 1000:g} km · "
                              f"{np.rad2deg(orbit['i']):g}° · Payload: {float(case.result['payload_mass']):,.1f} kg "
                              f"({'fixed' if case.request.get('payload_mass_predefined', -1) > 0 else 'maximized'}) · "
-                             f"S2 propellant left (est.): {remaining_propellant_text(case)}")
+                             f"S2 propellant left (est.): {remaining_propellant_text(case)} · "
+                             f"{maneuver_summary_text(case.result, orbit)}")
         self.summary.set("\n".join(summaries) if summaries else
                          f"Telemetry only · {telemetry.path.name}" if telemetry and matched_tabs else
                          "No cases displayed. Compute a case and enable Display.")

@@ -38,10 +38,51 @@ def orbit_curve(position, velocity, mu=VLType.mu, samples=361):
 
 
 def solution_orbits(solution, target, mu=VLType.mu):
-    """Match Main.py: parking orbit, then the saved speed change at apogee."""
+    """Apply the optimizer's minimum plane rotation at parking apogee.
+
+    The target specifies inclination with free RAAN. The final plane must
+    contain the burn position, which need not be an equatorial node.
+    """
     state = np.asarray(solution['x3'], dtype=float)[:, -1]
     parking = orbit_curve(state[:3], state[3:6], mu)
-    position = parking['apogee_position']
+    position = parking['apogee_position'].copy()
+    inclination = np.arccos(np.clip(parking['normal'][2], -1, 1))
+    target_inclination = float(target.get('i', inclination))
+    if not np.isfinite(target_inclination) or not 0 <= target_inclination <= np.pi:
+        raise ValueError('Target inclination must be between 0 and 180 degrees.')
+    eccentricity = ((parking['apogee'] - parking['perigee'])
+                    / (parking['apogee'] + parking['perigee']))
+    circular = eccentricity**2 <= 1e-16
+    if circular:
+        # A circle has no distinguished apogee; coast to an equatorial node.
+        node = np.cross([0., 0., 1.], parking['normal'])
+        if np.linalg.norm(node) > 1e-10:
+            position = parking['apogee'] * node / np.linalg.norm(node)
+    radial = position / np.linalg.norm(position)
+    direction = np.cross(parking['normal'], radial)
+    normal = parking['normal']
+    rho_squared = max(1.0 - radial[2]**2, 0.)
+    cos_target = np.cos(target_inclination)
+    target_margin = rho_squared - cos_target**2
+    # Allow roundoff at maximum latitude and at a geographic pole.
+    if target_margin < -1e-10:
+        latitude = np.rad2deg(np.arcsin(np.clip(radial[2], -1, 1)))
+        raise ValueError(f'Target inclination cannot be reached at parking apogee '
+                         f'(latitude {latitude:+.2f}°).')
+    if rho_squared > 1e-16 and abs(target_inclination - inclination) > 1e-8:
+        # Choose the target plane through the burn position closest to the
+        # parking plane. This has the same normal dot product as the optimizer's
+        # cos_plane_change. A vanishing inclination difference retains the
+        # existing plane, including small solver residuals.
+        vertical = np.array([0., 0., 1.]) - radial[2] * radial
+        horizontal = np.cross(radial, [0., 0., 1.])
+        horizontal /= np.linalg.norm(horizontal)
+        if np.dot(horizontal, normal) < 0:
+            horizontal = -horizontal
+        coefficient = np.clip(cos_target, -np.sqrt(rho_squared), np.sqrt(rho_squared)) / rho_squared
+        transverse_squared = 1 - coefficient**2 * np.dot(vertical, vertical)
+        normal = coefficient * vertical + np.sqrt(max(0., transverse_squared)) * horizontal
+        normal /= np.linalg.norm(normal)
     if 'v3_desired' in solution:
         speed = float(np.asarray(solution['v3_desired']).item())
     else:
@@ -52,9 +93,34 @@ def solution_orbits(solution, target, mu=VLType.mu):
         speed = np.sqrt(speed_squared)
     if not np.isfinite(speed) or speed <= 0:
         raise ValueError('The final-orbit speed must be finite and positive.')
-    direction = np.cross(parking['normal'], position / np.linalg.norm(position))
-    final = orbit_curve(position, speed * direction, mu)
+    parking_semimajor = (parking['apogee'] + parking['perigee']) / 2
+    parking_speed = np.sqrt(mu * (2 / parking['apogee'] - 1 / parking_semimajor))
+    before = parking_speed * direction
+    after = speed * np.cross(normal, radial)
+    final = orbit_curve(position, after, mu)
+    final_inclination = np.arccos(np.clip(final['normal'][2], -1, 1))
+    plane_change = np.arctan2(np.linalg.norm(np.cross(parking['normal'], final['normal'])),
+                             np.dot(parking['normal'], final['normal']))
+    inclination_change = float(final_inclination - inclination)
+    if abs(inclination_change) < 1e-10:
+        inclination_change = 0.0
+    final.update(burn_position=position, velocity_before=before, velocity_after=after,
+                 delta_v=float(np.linalg.norm(after - before)),
+                 inclination_change=inclination_change,
+                 plane_change=float(plane_change),
+                 burn_location='equatorial node' if circular else 'parking apogee')
     return parking, final
+
+
+def maneuver_summary_text(solution, target):
+    """Describe the maneuver using the computed case's target and state."""
+    try:
+        _, final = solution_orbits(solution, target)
+    except (KeyError, ValueError):
+        return 'Final maneuver: unavailable (see 3D trajectory)'
+    return (f"Final maneuver: Δv {final['delta_v']:,.2f} m/s · "
+            f"Δi {np.rad2deg(final['inclination_change']):+.2f}° · "
+            f"Plane rotation {np.rad2deg(final['plane_change']):.2f}°")
 
 
 def first_stage_eci_positions(solution):
@@ -92,17 +158,16 @@ def case_results_text(solution, label, parking=None, final=None):
     if parking is not None and final is not None:
         model = VLType()
         model.ApplyVehicleConfiguration(solution.get('configuration', 1))
-        radius = parking['apogee']
-        a_parking = (parking['apogee'] + parking['perigee']) / 2
-        a_final = (final['apogee'] + final['perigee']) / 2
-        delta_v = abs(np.sqrt(model.mu*(2/radius - 1/a_final))
-                      - np.sqrt(model.mu*(2/radius - 1/a_parking)))
-        lines.append(f'Δv at parking apogee: {delta_v:,.2f} m/s')
+        lines.append('Orbit / plane adjustment' if final['plane_change'] > 1e-8 else 'Orbit adjustment')
+        lines.append(f"Δv at {final['burn_location']}: {final['delta_v']:,.2f} m/s")
         for orbit, name in ((parking, 'Parking'), (final, 'Final')):
             apogee, perigee = ((orbit[key] - model.R0) / 1000 for key in ('apogee', 'perigee'))
             lines.append(f'{name}: {apogee:,.1f} × {perigee:,.1f} km')
-        inclination = np.rad2deg(np.arccos(np.clip(parking['normal'][2], -1, 1)))
-        lines.append(f'Inclination: {inclination:.2f}°')
+        inclinations = [np.rad2deg(np.arccos(np.clip(orbit['normal'][2], -1, 1)))
+                        for orbit in (parking, final)]
+        lines.append(f'Inclination: {inclinations[0]:.2f}° → {inclinations[1]:.2f}°')
+        lines.append(f"Δi: {np.rad2deg(final['inclination_change']):+.2f}°")
+        lines.append(f"Plane rotation: {np.rad2deg(final['plane_change']):.2f}°")
     else:
         lines += ['Δv / parking / final orbit: —']
     for number, name in ((1, 'MECO'), (3, 'SECO')):
@@ -177,6 +242,11 @@ def draw_trajectory_3d(figure, cases):
         else:
             for orbit, name, style in ((parking, 'Parking orbit', '--'), (final, 'Final orbit', '-.')):
                 path(orbit['points'], color, f'{label} · {name}', style)
+            burn = final['burn_position'] / 1000
+            axis.scatter(*burn, color=color, marker='*', s=65, depthshade=False,
+                         label=f'{label} · Final burn')
+            for projection, (horizontal, vertical) in zip(projections, ((0, 1), (1, 2), (0, 2))):
+                projection.scatter(burn[horizontal], burn[vertical], color=color, marker='*', s=35)
         results = figure.add_subplot(grid[index, 3])
         results.set_axis_off()
         text = case_results_text(solution, label, parking, final)

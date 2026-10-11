@@ -219,10 +219,45 @@ class LV_Optimization(VLType):
         # 2. The perigee is at least 100 km above the earth surface
         # 3. Need to calculate the propellent mass needed to reach the target orbit - raise the current perigee to the target orbit apogee
         # 3a. This manuever is done in the current apogee (which is the same as the target orbit perigee)
+
         v_apogee = ca.sqrt(self.eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / a))
         v_desired = ca.sqrt(self.eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["a"]))
-        propellent_mass_for_final_dv = x3f[6] * (1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / ((0.99*self.eci.SecondStage_Vac_Isp) * self.eci.g0)))
+        # propellent_mass_for_final_dv = x3f[6] * (1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / ((0.99*self.eci.SecondStage_Vac_Isp) * self.eci.g0)))
         
+        # Current orbital-plane normal.
+        n = h / ca.norm_2(h)
+        cos_i_target = np.cos(Target_Orbit["i"])
+
+        # At apogee, the position direction is opposite to e.
+        # Only its squared vertical component is needed.
+        e_squared = ca.sumsqr(e)
+        rhat_z_squared = ca.if_else(e_squared > 1e-16, e[2]**2 / ca.fmax(e_squared, 1e-16), 0.0)  # Circular orbit: choose an equatorial crossing.
+
+        # An attainable final plane must contain the burn position.
+        rho_squared = ca.fmax(1.0 - rhat_z_squared, 0.0)
+        target_margin = rho_squared - cos_i_target**2
+
+        # Minimum plane rotation, allowing final RAAN to vary.
+        normal_vertical = n[2]
+        tangent_vertical_squared = ca.fmax(rho_squared - normal_vertical**2, 0.0)
+
+        cos_plane_change = (normal_vertical * cos_i_target + ca.sqrt(tangent_vertical_squared * ca.fmax(target_margin, 0.0))) / ca.fmax(rho_squared, 1e-16)
+
+        # At a geographic pole, every possible orbit is polar.
+        cos_plane_change = ca.if_else(rho_squared > 1e-16, cos_plane_change, 1.0)
+        cos_plane_change = ca.fmin(ca.fmax(cos_plane_change, -1.0), 1.0)
+
+        delta_v_final = ca.sqrt((v_desired - v_apogee)**2 + 2.0 * v_apogee * v_desired * (1.0 - cos_plane_change))
+
+        exhaust_velocity = (0.99 * self.eci.SecondStage_Vac_Isp * self.eci.g0)
+
+        # If target inclination is geometrically unreachable at apogee,
+        # zero remaining mass makes the existing mass constraint reject
+        # this candidate. No additional subject_to constraint is added.
+        mass_after_final_burn = ca.if_else(target_margin >= 0.0, x3f[6] * ca.exp(-delta_v_final / exhaust_velocity), 0.0)
+
+        propellent_mass_for_final_dv = (x3f[6] - mass_after_final_burn)
+       
         # v_final_apogee = ca.sqrt(self.rocket_eci.mu * (1.0 / Target_Orbit["a"]))
         # dv_for_inclination_fix = 2 * v_apogee * ca.sin(Target_Orbit["i"]/2.0)
         # propellent_mass_for_inclination_fix = (x3[6,self.rocket_eci.N[1]]-propellent_mass_for_final_dv) * (1.0 - ca.exp(-ca.fabs(dv_for_inclination_fix) / (self.rocket_eci.SecondStage_Vac_Isp * self.rocket_eci.g0)))
@@ -233,15 +268,18 @@ class LV_Optimization(VLType):
         opti.subject_to(x3[6,self.eci.N[1]] >= x3f_mass_scaled)
         opti.subject_to(apogee/Target_Orbit["perigee"] == 1.0)
         opti.subject_to(perigee/(self.eci.R0 + self.eci.ParkingOrbit_PerigeeAlt) >= 1.0)
-        if Target_Orbit["i"] == 0.0 or Target_Orbit["i"] == np.pi:
-            # Equatorial planes require both horizontal angular-momentum
-            # components to vanish, without dividing by zero or differentiating
-            # acos at its singular endpoints. The sign selects pro/retrograde.
-            h_scaled = h / np.sqrt(self.eci.mu * self.eci.R0)
-            opti.subject_to(h_scaled[:2] == 0.0)
-            opti.subject_to(h_scaled[2] >= 0.0 if Target_Orbit["i"] == 0.0 else h_scaled[2] <= 0.0)
-        else:
-            opti.subject_to(i/Target_Orbit["i"] == 1.0)
+        # opti.subject_to(h_final[2] / ca.norm_2(h_final) == np.cos(Target_Orbit["i"]))
+        
+        # if Target_Orbit["i"] == 0.0 or Target_Orbit["i"] == np.pi:
+        #     # Equatorial planes require both horizontal angular-momentum
+        #     # components to vanish, without dividing by zero or differentiating
+        #     # acos at its singular endpoints. The sign selects pro/retrograde.
+        #     h_scaled = h / np.sqrt(self.eci.mu * self.eci.R0)
+        #     opti.subject_to(h_scaled[:2] == 0.0)
+        #     opti.subject_to(h_scaled[2] >= 0.0 if Target_Orbit["i"] == 0.0 else h_scaled[2] <= 0.0)
+        # else:
+        #     opti.subject_to(i/Target_Orbit["i"] == 1.0)
+            
 
 
     # Phase 4 - Booster Return:
@@ -330,7 +368,7 @@ class LV_Optimization(VLType):
         cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]))
         if RecoveryStrategy != 'EXP':
             cost += 0.05*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) 
-        cost += -x3f[6]
+        cost += -payload_mass # maximize the payload mass
 
         opti.minimize(cost)
 
@@ -345,7 +383,7 @@ class LV_Optimization(VLType):
                 "linear_solver": linear_solver,
                 "mu_strategy": "adaptive",  # "adaptive" or "adaptive" Strategy for updating the barrier parameter
                 "tol": 1e-6,  # Convergence tolerance
-                "max_iter": 200,  # Max iterations
+                "max_iter": 250,  # Max iterations
                 "print_level": ipopt_print_freq,  # Verbosity level
                 'print_frequency_iter': 1,  # print_frequency_iter
                 # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter
