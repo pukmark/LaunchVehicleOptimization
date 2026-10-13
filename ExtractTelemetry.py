@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 import json
+import os
 import re
 import subprocess
 import sys
@@ -17,23 +18,24 @@ import pytesseract
 
 # ========== USER SETTINGS ==========
 # VIDEO_URL = "https://x.com/i/broadcasts/1zqKVdlVyaYJB"  # X (Twitter) stream
-VIDEO_URL = "https://x.com/i/broadcasts/1vAxRDjaXwyGl"  # X (Twitter) stream SPHEREx
+# VIDEO_URL = "https://x.com/i/broadcasts/1vAxRDjaXwyGl"  # X (Twitter) stream SPHEREx
+VIDEO_URL = "https://x.com/i/broadcasts/1yKAPwdemygxb"  # X (Twitter) Starlink 424
 OUTPUT_DIR = Path("falcon9_telemetry")
-VIDEO_FILENAME = OUTPUT_DIR / "falcon9_SPHEREx_SSO.mp4"
+VIDEO_FILENAME = OUTPUT_DIR / "falcon9_STARLINK_424.mp4"
 
 # How many frames per second to sample (effective)
 SAMPLE_FPS = 1.0  # samples per second
 
 # Optional: download and process from this broadcast timestamp (seconds).
 # Set to None to process from the beginning.
-START_TIME_SEC = 57*60+20  # skip the prelaunch portion of this broadcast
+START_TIME_SEC = 10*60+14  # skip the prelaunch portion of this broadcast
 # Optional: download and process through this broadcast timestamp (seconds).
 # Set to None to process through the end.
-END_TIME_SEC = START_TIME_SEC + 8*60+22
-START_SEP_SEC = START_TIME_SEC + 2*60+20  # video time ending stage 1; stage 2/booster start here
+END_TIME_SEC = START_TIME_SEC + 8*60+49
+START_SEP_SEC = START_TIME_SEC + 2*60+31  # video time ending stage 1; stage 2/booster start here
 # Original video time when the broadcast switches to stage two after landing.
 # Set this per broadcast, or pass --landing / --phase3-start. None disables it.
-START_PHASE3_SEC = None
+START_PHASE3_SEC = START_TIME_SEC + 8*60+32 #
 
 # EXP: expendable; ASDS: drone ship; RTLS: return to launch site.
 # EXP broadcasts have no booster telemetry after separation.
@@ -45,51 +47,51 @@ RECOVERY_MODES = ("EXP", "ASDS", "RTLS")
 ROI_REFERENCE_SIZE = (3840, 2160)  # width, height
 # Coordinates: [y1:y2, x1:x2]
 # Start with something like lower-left box; adjust after preview (see function show_sample_frame)
-TELEMETRY_ROI_PHASE1 = {
-    # Bottom-left widget: SPEED only (km/h).
-    "speed": {"yx1": (644*3, 74*3), "yx2": (671*3, 150*3)},   # (y1, x1), (y2, x2) -- tune via show_sample_frame
-    # Dedicated altitude widget (km).
-    "altitude": {"yx1": (644*3, 172*3), "yx2": (671*3, 254*3)},  # tune visually
-    # Bottom-right widget: ACCELERATION only (g).
-    # "acceleration": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # tune visually
-    # Bottom-center timer: T-/T+ hh:mm:ss. Sized to avoid the subtitle line below.
-    "time":  {"yx1": (654*3, 591*3), "yx2": (686*3, 733*3)},  # tune visually
-}
-
 # TELEMETRY_ROI_PHASE1 = {
 #     # Bottom-left widget: SPEED only (km/h).
-#     "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # (y1, x1), (y2, x2) -- tune via show_sample_frame
+#     "speed": {"yx1": (644*3, 74*3), "yx2": (671*3, 150*3)},   # (y1, x1), (y2, x2) -- tune via show_sample_frame
 #     # Dedicated altitude widget (km).
-#     "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # tune visually
+#     "altitude": {"yx1": (644*3, 172*3), "yx2": (671*3, 254*3)},  # tune visually
 #     # Bottom-right widget: ACCELERATION only (g).
 #     "acceleration": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # tune visually
 #     # Bottom-center timer: T-/T+ hh:mm:ss. Sized to avoid the subtitle line below.
-#     "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},  # tune visually
+#     "time":  {"yx1": (654*3, 591*3), "yx2": (686*3, 733*3)},  # tune visually
 # }
+
+TELEMETRY_ROI_PHASE1 = {
+    # Bottom-left widget: SPEED only (km/h).
+    "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # (y1, x1), (y2, x2) -- tune via show_sample_frame
+    # Dedicated altitude widget (km).
+    "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # tune visually
+    # Bottom-right widget: ACCELERATION only (g).
+    "acceleration": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # tune visually
+    # Bottom-center timer: T-/T+ hh:mm:ss. Sized to avoid the subtitle line below.
+    "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},  # tune visually
+}
 
 # Phase 2 ROIs (after START_SEP_SEC). Tune these visually.
-# TELEMETRY_ROI_PHASE2 = {
-#     "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # speed widget unchanged
-#     "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # booster return altitude (if present)
-#     "velocity2": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # acceleration widget now shows stage 2 velocity
-#     "altitude2": {"yx1": (647*3, 1138*3), "yx2": (671*3, 1215*3)},    # stage 2 altitude widget
-#     "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},       # time widget unchanged
-# }
-
 TELEMETRY_ROI_PHASE2 = {
-    "speed": {"yx1": (644*3, 74*3), "yx2": (671*3, 150*3)},   # speed widget unchanged
-    "altitude": {"yx1": (644*3, 172*3), "yx2": (671*3, 254*3)},  # booster return altitude (if present)
-    "velocity2": {"yx1": (644*3, 1018*3), "yx2": (670*3, 1100*3)},  # acceleration widget now shows stage 2 velocity
-    "altitude2": {"yx1": (644*3, 1138*3), "yx2": (670*3, 1200*3)},    # stage 2 altitude widget
-    "time":  {"yx1": (654*3, 591*3), "yx2": (686*3, 733*3)},       # time widget unchanged
+    "speed": {"yx1": (647*3, 62*3), "yx2": (671*3, 140*3)},   # speed widget unchanged
+    "altitude": {"yx1": (647*3, 172*3), "yx2": (671*3, 254*3)},  # booster return altitude (if present)
+    "velocity2": {"yx1": (647*3, 1029*3), "yx2": (671*3, 1105*3)},  # acceleration widget now shows stage 2 velocity
+    "altitude2": {"yx1": (647*3, 1138*3), "yx2": (671*3, 1215*3)},    # stage 2 altitude widget
+    "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},       # time widget unchanged
 }
+
+# TELEMETRY_ROI_PHASE2 = {
+#     "speed": {"yx1": (644*3, 74*3), "yx2": (671*3, 150*3)},   # speed widget unchanged
+#     "altitude": {"yx1": (644*3, 172*3), "yx2": (671*3, 254*3)},  # booster return altitude (if present)
+#     "velocity2": {"yx1": (644*3, 1018*3), "yx2": (670*3, 1100*3)},  # acceleration widget now shows stage 2 velocity
+#     "altitude2": {"yx1": (644*3, 1138*3), "yx2": (670*3, 1200*3)},    # stage 2 altitude widget
+#     "time":  {"yx1": (654*3, 591*3), "yx2": (686*3, 733*3)},       # time widget unchanged
+# }
 
 # Phase 3: stage two continues after booster landing. Default crops use the
 # left-side speed/altitude widgets; tune them for this broadcast with --preview.
 TELEMETRY_ROI_PHASE3 = {
-    "velocity2": {"yx1": (644*3, 74*3), "yx2": (671*3, 150*3)},
-    "altitude2": {"yx1": (644*3, 172*3), "yx2": (671*3, 254*3)},
-    "time": {"yx1": (654*3, 591*3), "yx2": (686*3, 733*3)},
+    "velocity2": {"yx1": (648*3, 401*3), "yx2": (672*3, 480*3)},
+    "altitude2": {"yx1": (648*3, 809*3), "yx2": (672*3, 865*3)},
+    "time":  {"yx1": (646*3, 580*3), "yx2": (672*3, 725*3)},
 }
 
 # ROI preview styling
@@ -115,6 +117,9 @@ TIME_TOLERANCE_SEC = 1.0  # the broadcast timer only displays whole seconds
 # General config for telemetry gauges (speed/altitude).
 TESSERACT_CONFIG = r"--psm 7 -c tessedit_char_whitelist=0123456789,+-.km/hKM/gG"
 OCR_TIMEOUT_SEC = 10
+PADDLE_OCR_MODEL = "en_PP-OCRv5_mobile_rec"
+PADDLE_OCR_MIN_CONFIDENCE = 0.8
+PADDLE_OCR_CACHE_DIR = Path(__file__).resolve().parent / ".cache" / "paddleocr"
 # Dedicated config for the center timer (cleaner whitelist: digits, colon, T, +, -).
 TIME_TESSERACT_CONFIG = r"--psm 7 -c tessedit_char_whitelist=0123456789:Tt:+-"
 
@@ -329,10 +334,8 @@ def ocr_telemetry(roi_img, config=TESSERACT_CONFIG, invert=False, use_otsu=False
     processed = preprocess_roi(roi_img, invert=invert, use_otsu=use_otsu)
     try:
         text = pytesseract.image_to_string(processed, config=config, timeout=OCR_TIMEOUT_SEC)
-    except RuntimeError as exc:
-        if "timeout" not in str(exc).lower():
-            raise
-        print("[WARN] OCR timed out; trying another preprocessing variant.")
+    except (RuntimeError, pytesseract.TesseractNotFoundError) as exc:
+        print(f"[WARN] Tesseract could not read this crop: {exc}")
         return ""
     # Clean up some typical artifacts
     text = text.replace("\n", " ").replace("\r", " ")
@@ -423,6 +426,42 @@ def ocr_gauge_robust(roi_img, origin="speed"):
                 if values[0] is not None and values[0] == values[1]:
                     return candidates[0]
     return _best_numeric_candidate(candidates, origin, families=["otsu", "adaptive"] * 2)
+
+
+class PaddleOCRFallback:
+    """Load a crop recognizer on the first failed reading and reuse it."""
+
+    def __init__(self):
+        self.model = None
+        self.load_failed = False
+
+    def __call__(self, roi_img):
+        if roi_img is None or roi_img.size == 0 or self.load_failed:
+            return ""
+        if self.model is None:
+            try:
+                os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(PADDLE_OCR_CACHE_DIR))
+                # Cached weights work offline; avoid probing every download host.
+                os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+                from paddleocr import TextRecognition
+                print(f"[INFO] Loading PaddleOCR fallback: {PADDLE_OCR_MODEL}", flush=True)
+                self.model = TextRecognition(model_name=PADDLE_OCR_MODEL, device="cpu")
+            except Exception as exc:
+                self.load_failed = True
+                print(f"[WARN] PaddleOCR fallback unavailable: {exc}. "
+                      "Install requirements-ocr.txt; unresolved readings need manual input.")
+                return ""
+        try:
+            # Keep color/antialiasing; PaddleOCR handles resizing and normalization.
+            results = self.model.predict(input=roi_img, batch_size=1)
+            for result in results:
+                score = float(result["rec_score"])
+                if np.isfinite(score) and PADDLE_OCR_MIN_CONFIDENCE <= score <= 1:
+                    return re.sub(r"\s+", " ", result["rec_text"]).strip()
+                print(f"[WARN] PaddleOCR confidence {score:.3f} is too low for automatic acceptance.")
+        except Exception as exc:
+            print(f"[WARN] PaddleOCR could not read this crop: {exc}")
+        return ""
 
 
 def show_debug(frame, roi_images, roi_texts, parsed_data, frame_idx, rois):
@@ -663,8 +702,8 @@ def correction_roi_preview(origin, roi_img, ocr_text, time_sec, frame_idx):
 
 
 def validate_telemetry_sample(parsed_data, roi_texts, time_sec, frame_idx, history, *,
-                              roi_images=None):
-    """Pause for each bad active gauge; manually verified values become history.
+                              roi_images=None, fallback_ocr=None, fallback_texts=None):
+    """Retry bad gauges with a second reader before asking for a manual reading.
 
     A manual reading must parse and satisfy the absolute range. It can override
     a continuity warning, since a user may confirm a real broadcast discontinuity.
@@ -676,6 +715,22 @@ def validate_telemetry_sample(parsed_data, roi_texts, time_sec, frame_idx, histo
             continue
         value = parsed_data[origin].get(key)
         issue = _sanity_issue(origin, value, time_sec, history, parsed_data)
+        roi_img = (roi_images or {}).get(origin)
+        if issue and fallback_ocr is not None and roi_img is not None:
+            print(f"[INFO] Tesseract failed at video {time_sec:.3f}s, frame {frame_idx}: "
+                  f"{origin}; {issue}. Trying PaddleOCR.", flush=True)
+            fallback_text = fallback_ocr(roi_img)
+            if fallback_texts is not None:
+                fallback_texts[origin] = fallback_text
+            replacement = parse_telemetry_text(fallback_text, origin=origin)
+            fallback_value = replacement[key]
+            fallback_issue = _sanity_issue(origin, fallback_value, time_sec, history, parsed_data)
+            if fallback_issue is None:
+                parsed_data[origin] = replacement
+                value, issue = fallback_value, None
+                print(f"[INFO] Accepted PaddleOCR {origin}: {value} {unit}.")
+            else:
+                print(f"[WARN] PaddleOCR {origin}: {fallback_text!r}; {fallback_issue}.")
         if issue:
             previous = history.get(origin, [])
             print(f"[SANITY] Paused at video {time_sec:.3f}s, frame {frame_idx}: {origin}")
@@ -683,7 +738,7 @@ def validate_telemetry_sample(parsed_data, roi_texts, time_sec, frame_idx, histo
             if previous:
                 last_time, last_value = previous[-1]
                 print(f"  Last valid: {last_value} {unit} at video {last_time:.3f}s.")
-            with correction_roi_preview(origin, (roi_images or {}).get(origin),
+            with correction_roi_preview(origin, roi_img,
                                         roi_texts.get(origin, ""), time_sec, frame_idx):
                 while True:
                     try:
@@ -720,7 +775,8 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
     frame-rounding drift. Routine GUI previews are opt-in; manual corrections
     always show the relevant gauge crop. Raw OCR can be saved separately
     for diagnosis. Every active gauge is checked against its last valid readings;
-    failed checks pause for a manual reading in the terminal before continuing.
+    failed checks retry the crop with PaddleOCR. Only if both readers fail the
+    checks does extraction pause for a manual reading in the terminal.
     Stage one ends at separation_sec; upper stage and booster then share rows.
     At landing_sec, phase 3 switches to upper-stage gauges only and stops booster
     readings and correction prompts. Its measurements still populate stage two.
@@ -747,6 +803,7 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
     cap = cv2.VideoCapture(str(video_path))
     rows = []
     history = {}
+    fallback_ocr = PaddleOCRFallback()
     try:
         if not cap.isOpened():
             raise RuntimeError(f"Could not open video: {video_path}")
@@ -793,13 +850,20 @@ def extract_telemetry_to_csv(start_time_sec=None, end_time_sec=None, *,
                 # Show the paused sample/crops before any terminal prompt.
                 stop_requested = debug and show_debug(
                     frame, roi_images, roi_texts, parsed_data, frame_idx, current_rois)
+                fallback_texts = {}
                 validate_telemetry_sample(parsed_data, roi_texts, time_sec, frame_idx, history,
-                                          roi_images=roi_images)
+                                          roi_images=roi_images, fallback_ocr=fallback_ocr,
+                                          fallback_texts=fallback_texts)
                 row = {"frame_idx": frame_idx, "t_video_sec": time_sec,
                        "time_str_primary": parsed_data.get("time", {}).get("time_str")}
                 row.update(phase_metrics(parsed_data, time_sec, separation_sec, recovery_mode,
                                          landing_sec=landing_sec))
+                summary = ", ".join(
+                    f"{name}={value}" for name, value in row.items()
+                    if name not in ("frame_idx", "t_video_sec") and value is not None)
+                print(f"[INFO] Frame {frame_idx} | video {time_sec:.3f}s | {summary}", flush=True)
                 row.update({f"raw_{name}": text for name, text in roi_texts.items()})
+                row.update({f"paddle_{name}": text for name, text in fallback_texts.items()})
                 rows.append(row)
                 sample_idx += 1
                 next_sample = start_frame + round(sample_idx * fps / effective_fps)

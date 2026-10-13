@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import casadi as ca
 import numpy as np
+import LV_Optimization_Type as optimization
 
 from LV_Optimization_Type import InitialGuessConstraintDiagnostics, LV_Optimization
 from LV_Type_scaled import DispesrionFactorsType
@@ -79,8 +80,8 @@ class ConstraintDiagnosticTests(unittest.TestCase):
 
 
 class PhaseDiagnosticTests(unittest.TestCase):
-    def solve(self, strategy, **kwargs):
-        model = LV_Optimization(DispesrionFactorsType())
+    def solve(self, strategy, model=None, **kwargs):
+        model = model or LV_Optimization(DispesrionFactorsType())
         reports = []
         captured = {}
         original_report = InitialGuessConstraintDiagnostics.report
@@ -133,11 +134,15 @@ class PhaseDiagnosticTests(unittest.TestCase):
                     for violation in report['violations']:
                         self.assertIn('constraint', violation)
                         self.assertIn('scaled_residual', violation)
+                        self.assertFalse(violation['nonfinite'])
+                        self.assertFalse(violation['constraint'].startswith('Dynamics'))
+                        self.assertFalse(violation['constraint'].startswith('Initial state'))
                 if strategy != 'EXP':
                     burn = next(report for report in reports if report['phase'] == 'Reentry burn')
-                    thrust = next(item for item in burn['violations'] if item['constraint'] == 'Thrust factor upper bound')
-                    self.assertAlmostEqual(thrust['violation'], .2)
-                    self.assertIn('Reentry start altitude lower bound', output)
+                    self.assertFalse(any(item['constraint'].startswith('Thrust factor') for item in burn['violations']))
+                    ballistic = next(report for report in reports if report['phase'] == 'Ballistic coast to reentry')
+                    self.assertFalse(any(item['constraint'] == 'Reentry start altitude lower bound'
+                                         for item in ballistic['violations']))
 
     def test_supplied_warm_start_is_checked_after_overriding_generated_guess(self):
         initial, _, _, _ = self.solve('EXP')
@@ -162,7 +167,69 @@ class PhaseDiagnosticTests(unittest.TestCase):
                     'dt1', 'dt2', 'dt3', 'dt4_landing', 'payload_mass'):
             np.testing.assert_array_equal(enabled[key], disabled[key])
         first = reports[0]
-        self.assertTrue(any(item['constraint'] == 'Initial state [mass]' for item in first['violations']))
+        self.assertFalse(any(item['constraint'].startswith('Initial state') for item in first['violations']))
+
+    def test_exhausted_phase2_search_keeps_the_last_propagated_time_step(self):
+        model = LV_Optimization(DispesrionFactorsType())
+        model.eci.FairingSeparationAltitude = 1e9  # Force the duration search to exhaust its budget.
+        solution, reports, _, _ = self.solve('EXP', model=model)
+        phase2 = next(report for report in reports if report['phase'] == 'Second stage before fairing separation')
+        self.assertTrue(any(item['constraint'] == 'Fairing separation altitude' for item in phase2['violations']))
+        self.assertFalse(any(item['constraint'].startswith('Dynamics') for item in phase2['violations']))
+        self.assertAlmostEqual(float(solution['dt2']), (20. + 19 * 4.) / model.eci.N[0])
+        self.assertTrue(np.isfinite(solution['x2']).all())
+
+    def test_fixed_payload_and_recovery_bounds_for_all_strategies(self):
+        for strategy in ('EXP', 'ASDS', 'RTLS'):
+            with self.subTest(strategy=strategy):
+                model = LV_Optimization(DispesrionFactorsType())
+                payload = 10000.
+                solution, reports, _, _ = self.solve(strategy, model=model, payload_mass_predefined=payload)
+                expected_mass = (model.booster.LV_total_mass + payload - 5. * model.booster.FirstStage_SL_Thrust
+                                 / (model.booster.FirstStage_SL_Isp * model.booster.g0))
+                self.assertAlmostEqual(solution['x1'][4,0], expected_mass)
+                self.assertEqual(solution['payload_mass'], payload)
+                for report in reports:
+                    self.assertFalse(any(item['constraint'].startswith(('Dynamics', 'Initial state'))
+                                         or item['nonfinite'] for item in report['violations']))
+                if strategy != 'EXP':
+                    throttle = solution['u4_reentry'] / model.rocket_return.scaleU[0]
+                    self.assertGreaterEqual(throttle, model.rocket_return.FirstStage_MinThrust_Factor)
+                    self.assertLessEqual(throttle, .8)
+                    thrust = np.asarray(solution['u4_landing']) / model.rocket_return.scaleU[0]
+                    lower = .75/3. * model.rocket_return.EmptyFirstStageMass * model.rocket_return.g0 / model.rocket_return.scaleU[0]
+                    self.assertTrue((thrust >= lower - 1e-12).all())
+                    self.assertTrue((thrust <= 1./3. + 1e-12).all())
+                    self.assertGreaterEqual(float(model.rocket_return.local_to_alt(solution['x4_before_reentry'])), 70000.)
+                    self.assertTrue(np.isfinite(solution['x4_landing']).all())
+
+    def test_nonfinite_partial_stage3_candidate_is_discarded_and_regenerated(self):
+        model = LV_Optimization(DispesrionFactorsType())
+        original_rollout = optimization._rollout_initial_guess
+        dynamics = model.eci.dynamics_kp1
+        injected = []
+
+        def rollout(*args, **kwargs):
+            if args[5] != 'Second stage after fairing separation' or injected:
+                return original_rollout(*args, **kwargs)
+            calls = []
+            def fail_third_step(*values):
+                calls.append(1)
+                if len(calls) == 3:
+                    injected.append(True)
+                    return ca.DM(np.full(model.eci.nx, np.nan))
+                return dynamics(*values)
+            with patch.object(model.eci, 'dynamics_kp1', fail_third_step):
+                return original_rollout(*args, **kwargs)
+
+        with patch.object(optimization, '_rollout_initial_guess', rollout):
+            solution, reports, _, _ = self.solve('EXP', model=model)
+        self.assertEqual(injected, [True])
+        self.assertTrue(np.isfinite(solution['x3']).all())
+        self.assertTrue(np.isfinite(solution['u3']).all())
+        phase3 = next(report for report in reports if report['phase'] == 'Second stage after fairing separation')
+        self.assertFalse(any(item['constraint'].startswith(('Dynamics', 'Initial state'))
+                             or item['nonfinite'] for item in phase3['violations']))
 
 
 if __name__ == '__main__':

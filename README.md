@@ -62,6 +62,8 @@ The plots use most of the available height. Scenario summaries are collapsed
 by default; click **Show scenario details** above the graphs to open a compact,
 scrollable summary, and **Hide scenario details** to reclaim that space. Case
 selection, display controls, and a single-line status remain visible.
+The **Solver output** tab sits beside **Fit results** and contains the live
+solver log, leaving the full notebook height available for graphs.
 
 The **Edit…**, **Save…**, and **Load…** buttons appear alongside **New vehicle…**
 below the vehicle selector. **Edit…** opens the selected custom configuration;
@@ -459,6 +461,16 @@ prevent solving. Output also appears in the GUI solver log. Pass
 `initial_guess_diagnostics=False` to suppress these reports independently of
 IPOPT verbosity.
 
+Generated guesses keep each trajectory, its controls, and its propagated time
+step together, including when a duration search reaches its iteration limit.
+Stage-two and landing candidates that stop early or become nonfinite are
+discarded; the last complete candidate is retained, or generation reports an
+error if none exists. Fixed-payload guesses use the entire requested payload.
+Recovery guesses target 71 km before reentry (above the 70 km minimum), use
+reentry thrust within its bounds, and clip landing thrust after all adjustments
+using the same limits as the optimizer. Remaining orbit, landing, aerodynamic,
+or fuel-reserve violations are still shown by the constraint reports.
+
 Results are written to `output_dir` (default `Results`; use `None` to disable
 saving). Filenames include vehicle configuration and a hash of the precise
 orbit, payload setting, and dispersion values so different cases do not
@@ -491,6 +503,25 @@ broadcast layout still requires tuning the ROI settings. `--save-raw` writes
 a separate CSV containing selected OCR text and unfiltered readings. The
 main telemetry CSV keeps its existing seven columns for simulation comparison.
 With no `--video`, the script uses or downloads the configured broadcast.
+
+`ExtractTelemetry.py` reads each active gauge with Tesseract first. A missing,
+out-of-range, or implausible reading is retried on the same crop with PaddleOCR's
+`en_PP-OCRv5_mobile_rec` model. Only if neither reader produces a valid reading
+does extraction show the crop and ask for a manual value. The fallback loads
+once, on its first use, and runs on CPU. Install its dependencies with:
+
+```bash
+PYTHONPATH= .venv/bin/python -m pip install -r requirements-ocr.txt
+```
+
+The first fallback use downloads the model weights to `.cache/paddleocr`;
+later runs reuse the cache. `PADDLE_PDX_CACHE_HOME` can override that location.
+PaddleOCR confidence must meet `PADDLE_OCR_MIN_CONFIDENCE` (default 0.8), and its
+readings pass the same range and continuity checks as Tesseract. If the fallback
+cannot load or read a crop, the script reports the error before manual input.
+Each sampled frame prints an info line with the validated telemetry. With
+`--save-raw`, the diagnostic CSV preserves Tesseract text in `raw_*` columns and
+adds `paddle_*` columns for attempted fallback readings.
 
 For `ExtractTelemetry.py`, `START_TIME_SEC` and `END_TIME_SEC` also select the
 download interval, so a new `VIDEO_FILENAME` contains only that part of the

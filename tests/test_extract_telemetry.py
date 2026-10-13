@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -319,11 +320,149 @@ class FakeCapture:
 
 class WindowTestCase(unittest.TestCase):
     def setUp(self):
+        # Exercise fallback routing without downloading models or running OCR.
+        fallback = patch.object(extract, "PaddleOCRFallback")
+        self.fallback = fallback.start().return_value
+        self.fallback.return_value = ""
+        self.addCleanup(fallback.stop)
         self.gui = {}
         for name in ("namedWindow", "imshow", "setWindowProperty", "waitKey", "destroyWindow"):
             mock = patch.object(extract.cv2, name, return_value=-1 if name == "waitKey" else None)
             self.gui[name] = mock.start()
             self.addCleanup(mock.stop)
+
+
+class PaddleFallbackTests(unittest.TestCase):
+    def test_tesseract_errors_allow_secondary_reader_to_run(self):
+        crop = np.zeros((24, 80, 3), dtype=np.uint8)
+        for error in (extract.pytesseract.TesseractError(1, "OCR failed"),
+                      extract.pytesseract.TesseractNotFoundError(), RuntimeError("timeout")):
+            with self.subTest(error=error), \
+                 patch.object(extract.pytesseract, "image_to_string", side_effect=error), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(extract.ocr_gauge_robust(crop), "")
+
+    def test_loads_on_first_use_and_reuses_model_with_original_crop(self):
+        model = Mock()
+        model.predict.return_value = [{"rec_text": "  1050\n", "rec_score": .98}]
+        factory = Mock(return_value=model)
+        crop = np.full((24, 80, 3), 100, dtype=np.uint8)
+        with patch.dict(sys.modules, {"paddleocr": Mock(TextRecognition=factory)}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            fallback = extract.PaddleOCRFallback()
+            factory.assert_not_called()
+            self.assertEqual(fallback(crop), "1050")
+            self.assertEqual(fallback(crop), "1050")
+        factory.assert_called_once_with(model_name="en_PP-OCRv5_mobile_rec", device="cpu")
+        self.assertEqual(model.predict.call_count, 2)
+        self.assertIs(model.predict.call_args.kwargs["input"], crop)
+
+    def test_low_or_nonfinite_confidence_is_rejected(self):
+        model = Mock()
+        fallback = extract.PaddleOCRFallback()
+        fallback.model = model
+        for score in (.2, np.nan, np.inf, 2):
+            with self.subTest(score=score), contextlib.redirect_stdout(io.StringIO()):
+                model.predict.return_value = [{"rec_text": "1050", "rec_score": score}]
+                self.assertEqual(fallback(np.zeros((24, 80, 3), dtype=np.uint8)), "")
+
+    def test_model_load_failure_is_reported_once_and_not_retried(self):
+        factory = Mock(side_effect=RuntimeError("model unavailable"))
+        crop = np.zeros((24, 80, 3), dtype=np.uint8)
+        with patch.dict(sys.modules, {"paddleocr": Mock(TextRecognition=factory)}), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            fallback = extract.PaddleOCRFallback()
+            self.assertEqual(fallback(crop), "")
+            self.assertEqual(fallback(crop), "")
+        factory.assert_called_once()
+        self.assertIn("model unavailable", output.getvalue())
+
+    def test_inference_failure_allows_next_crop_to_retry(self):
+        model = Mock()
+        model.predict.side_effect = [RuntimeError("bad crop"),
+                                     [{"rec_text": "1050", "rec_score": .98}]]
+        fallback = extract.PaddleOCRFallback()
+        fallback.model = model
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(fallback(np.zeros((24, 80, 3), dtype=np.uint8)), "")
+            self.assertEqual(fallback(np.zeros((24, 80, 3), dtype=np.uint8)), "1050")
+
+
+class FallbackValidationTests(WindowTestCase):
+    def test_valid_primary_readings_do_not_call_fallback_or_prompt(self):
+        crops = {origin: np.zeros((24, 80, 3), dtype=np.uint8) for origin in sample()}
+        with patch("builtins.input", side_effect=AssertionError("unexpected prompt")):
+            extract.validate_telemetry_sample(sample(), {}, 0, 0, {}, roi_images=crops,
+                                              fallback_ocr=self.fallback)
+        self.fallback.assert_not_called()
+        self.gui["imshow"].assert_not_called()
+
+    def test_missing_active_gauges_and_timer_use_fallback_without_prompt(self):
+        for origin, text in (("speed", "100"), ("velocity2", "20000"),
+                             ("altitude", "10"), ("altitude2", "200"),
+                             ("acceleration", "1.5"), ("time", "T-00:00:02")):
+            with self.subTest(origin=origin):
+                data = {origin: extract.parse_telemetry_text("bad", origin)}
+                history, fallback_texts = {}, {}
+                self.fallback.return_value = text
+                with patch("builtins.input", side_effect=AssertionError("unexpected prompt")), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    extract.validate_telemetry_sample(
+                        data, {origin: "bad"}, 0, 0, history,
+                        roi_images={origin: np.zeros((24, 80, 3), dtype=np.uint8)},
+                        fallback_ocr=self.fallback, fallback_texts=fallback_texts)
+                key = extract.SANITY_FIELDS[origin][0]
+                self.assertEqual(data[origin], extract.parse_telemetry_text(text, origin))
+                self.assertEqual(history[origin], [(0, data[origin][key])])
+                self.assertEqual(fallback_texts, {origin: text})
+        self.gui["imshow"].assert_not_called()
+
+    def test_continuity_failure_tries_fallback_before_manual_input(self):
+        data = {"speed": extract.parse_telemetry_text("5000", "speed")}
+        history = {"speed": [(0, 1000)]}
+        self.fallback.return_value = "1050"
+        with patch("builtins.input", side_effect=AssertionError("unexpected prompt")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            extract.validate_telemetry_sample(
+                data, {"speed": "5000"}, 1, 30, history,
+                roi_images={"speed": np.zeros((24, 80, 3), dtype=np.uint8)},
+                fallback_ocr=self.fallback)
+        self.assertEqual(history["speed"][-1], (1, 1050))
+
+    def test_corrected_speed_is_used_to_check_altitude(self):
+        data = {origin: extract.parse_telemetry_text(text, origin)
+                for origin, text in (("speed", "bad"), ("altitude", "11"))}
+        history = {"speed": [(0, 3600)], "altitude": [(0, 10)]}
+        self.fallback.return_value = "3600"
+        with patch("builtins.input", side_effect=AssertionError("unexpected prompt")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            extract.validate_telemetry_sample(
+                data, {}, 1, 30, history,
+                roi_images={origin: np.zeros((24, 80, 3), dtype=np.uint8) for origin in data},
+                fallback_ocr=self.fallback)
+        self.fallback.assert_called_once()
+        self.assertEqual(history["altitude"][-1], (1, 11))
+
+    def test_manual_input_only_after_fallback_also_fails_continuity(self):
+        data = {"speed": extract.parse_telemetry_text("5000", "speed")}
+        history = {"speed": [(0, 1000)]}
+        self.fallback.return_value = "6000"
+
+        def enter_value(prompt):
+            self.fallback.assert_called_once()
+            self.assertIn("speed", prompt)
+            return "1050"
+
+        with patch("builtins.input", side_effect=enter_value) as prompt, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            extract.validate_telemetry_sample(
+                data, {"speed": "5000"}, 1, 30, history,
+                roi_images={"speed": np.zeros((24, 80, 3), dtype=np.uint8)},
+                fallback_ocr=self.fallback)
+        prompt.assert_called_once()
+        self.assertEqual(history["speed"][-1], (1, 1050))
+        self.assertIn("PaddleOCR speed: '6000'", output.getvalue())
+        self.gui["imshow"].assert_called_once()
 
 
 class CorrectionPreviewTests(WindowTestCase):
@@ -382,6 +521,29 @@ class CorrectionPreviewTests(WindowTestCase):
 
 
 class ExtractionTests(WindowTestCase):
+    def test_fallback_stage2_reading_is_saved_without_manual_input(self):
+        cap = FakeCapture(2)
+        self.fallback.return_value = "20000"
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(extract.cv2, "VideoCapture", return_value=cap), \
+             patch.object(extract, "ocr_gauge_robust",
+                          side_effect=lambda _image, origin: "bad" if origin == "velocity2" else "1"), \
+             patch.object(extract, "ocr_time_robust", side_effect=["00:00:00", "00:00:01"]), \
+             patch("builtins.input", side_effect=AssertionError("unexpected prompt")), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            result = extract.extract_telemetry_to_csv(
+                video_path=Path(directory) / "clip.mp4", output_dir=directory, debug=False,
+                separation_sec=1, recovery_mode="EXP", save_raw=True)
+            self.assertEqual(result.loc[1, "velocity2_kmh"], 20000)
+            self.assertTrue(pd.isna(result.loc[1, "velocity3_kmh"]))
+            raw = pd.read_csv(Path(directory) / "clip_raw.csv")
+            self.assertEqual(raw.loc[1, "raw_velocity2"], "bad")
+            self.assertEqual(raw.loc[1, "paddle_velocity2"], 20000)
+            self.assertIn("Frame 1 | video 1.000s", output.getvalue())
+            self.assertIn("velocity2_kmh=20000", output.getvalue())
+        self.fallback.assert_called_once()
+        self.assertTrue(cap.released)
+
     def test_post_landing_clip_continues_upper_stage_without_booster_ocr_or_prompts(self):
         for mode in extract.RECOVERY_MODES:
             with self.subTest(mode=mode):

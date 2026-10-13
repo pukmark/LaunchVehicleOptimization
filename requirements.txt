@@ -6,6 +6,7 @@ matplotlib==3.5.3
 
 # Telemetry comparison, video processing, OCR, and downloads.
 pandas==1.5.3
-opencv-python==4.6.0.66
+# PaddleOCR also uses this OpenCV distribution; install only one cv2 provider.
+opencv-contrib-python==4.10.0.84
 pytesseract==0.3.13
 yt-dlp==2026.8.19

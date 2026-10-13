@@ -14,6 +14,37 @@ import pickle
 from LaunchSites import parse_launch_site
 
 
+class _IncompleteInitialGuess(ValueError):
+    def __init__(self, phase, step):
+        super().__init__(f'{phase}: initial trajectory became invalid at step {step}.')
+        self.step = step
+
+
+def _rollout_initial_guess(model, initial_state, steps, time_step, control, phase,
+                          minimum_mass=0., stop_below_ground=False):
+    """Return complete scaled states/controls, or reject the whole candidate."""
+    if not np.isfinite(time_step) or time_step <= 0:
+        raise ValueError(f'{phase}: initial time step must be positive and finite.')
+    states = np.empty((model.nx, steps + 1))
+    controls = np.empty((model.nu, steps))
+    states[:, 0] = np.asarray(initial_state, dtype=float).reshape(-1)
+    for k in range(steps):
+        physical = model.unscale_x(states[:, k]).full().flatten()
+        if not np.isfinite(physical).all() or physical[-1] <= 0:
+            raise _IncompleteInitialGuess(phase, k)
+        controls[:, k] = np.asarray(control(physical), dtype=float).reshape(-1)
+        if not np.isfinite(controls[:, k]).all():
+            raise _IncompleteInitialGuess(phase, k)
+        states[:, k+1] = model.dynamics_kp1(states[:, k], controls[:, k], time_step).full().flatten()
+        following = model.unscale_x(states[:, k+1]).full().flatten()
+        if not np.isfinite(following).all() or following[-1] <= 0:
+            raise _IncompleteInitialGuess(phase, k+1)
+        if k+1 < steps and (following[-1] < minimum_mass or
+                           stop_below_ground and float(model.local_to_alt(following)) < -1.):
+            raise _IncompleteInitialGuess(phase, k+1)
+    return states, controls
+
+
 class InitialGuessConstraintDiagnostics:
     """Label actual Opti constraints and evaluate them at the current initial values.
 
@@ -401,6 +432,15 @@ class LV_Optimization(VLType):
 
     # Phase 4 - Booster Return:
         if RecoveryStrategy != 'EXP':
+            reentry_altitude_min = 70000.
+            reentry_thrust_max = 0.8
+            landing_thrust_max = 1./3.
+            landing_thrust_min = (0.75/3. * self.rocket_return.EmptyFirstStageMass
+                                  * self.rocket_return.g0/self.rocket_return.scaleU[0])
+            if self.rocket_return.FirstStage_MinThrust_Factor > reentry_thrust_max:
+                raise ValueError('Reentry minimum thrust exceeds the permitted maximum of 0.8.')
+            if landing_thrust_min > landing_thrust_max:
+                raise ValueError('Landing minimum thrust exceeds the permitted maximum of 1/3.')
             if RecoveryStrategy == 'RTLS':
                 dt4_boostback = opti.variable(1)
                 x4_boostback = opti.variable(self.boostback.nx, 1) # [x, z, vx, vz, m]
@@ -452,15 +492,15 @@ class LV_Optimization(VLType):
                                 x4_before_reentry == self.rocket_return.dynamics_kp1_M50(x4_0, 0, dt4_ballistic),
                                 self.rocket_return.scaleX, local_units, local_components)
             diagnostics.add(ballistic, 'Reentry start altitude lower bound',
-                            self.rocket_return.local_to_alt(self.rocket_return.unscale_x(x4_before_reentry))/70000.0 >= 1.0,
-                            70000., 'm')
+                            self.rocket_return.local_to_alt(self.rocket_return.unscale_x(x4_before_reentry))/reentry_altitude_min >= 1.0,
+                            reentry_altitude_min, 'm')
 
             # rentry burn
             diagnostics.add(reentry, 'Dynamics',
                             x4_after_reentryburn == self.rocket_return.dynamics_kp1_M20(x4_before_reentry, u4_reentry, dt4_reentry),
                             self.rocket_return.scaleX, local_units, local_components)
             ### set the thrust constraints
-            diagnostics.add(reentry, 'Thrust factor upper bound', u4_reentry[0] <= 0.8)
+            diagnostics.add(reentry, 'Thrust factor upper bound', u4_reentry[0] <= reentry_thrust_max)
             diagnostics.add(reentry, 'Thrust factor lower bound', u4_reentry[0] >= self.rocket_return.FirstStage_MinThrust_Factor)
 
             ### After Reentry, before landing burn (ballistic)
@@ -486,9 +526,9 @@ class LV_Optimization(VLType):
                 diagnostics.add(landing, f'Dynamics k={k} → {k+1}',
                                 x4_landing[:,k+1] == self.rocket_return.dynamics_kp1(x4_landing[:,k], u4_landing[:,k], dt4_landing),
                                 self.rocket_return.scaleX, local_units, local_components)
-                diagnostics.add(landing, f'Thrust factor upper bound k={k}', u4_landing[0,k] <= 1.0/3.0)
+                diagnostics.add(landing, f'Thrust factor upper bound k={k}', u4_landing[0,k] <= landing_thrust_max)
                 diagnostics.add(landing, f'Thrust factor lower bound k={k}',
-                                u4_landing[0,k] >= 0.75*1.0/3.0*self.rocket_return.EmptyFirstStageMass*self.rocket_return.g0/self.rocket_return.scaleU[0])
+                                u4_landing[0,k] >= landing_thrust_min)
                 diagnostics.add(landing, f'Dynamic pressure k={k+1}',
                                 self.rocket_return.dynamic_pressure_fun(x4_landing[:,k+1])/self.rocket_return.Booster_MaxDynamicPressure <= 1.0,
                                 self.rocket_return.Booster_MaxDynamicPressure / 1000., 'kPa')
@@ -538,7 +578,7 @@ class LV_Optimization(VLType):
                 "linear_solver": linear_solver,
                 "mu_strategy": "adaptive",  # "adaptive" or "adaptive" Strategy for updating the barrier parameter
                 "tol": 1e-6,  # Convergence tolerance
-                "max_iter": 300,  # Max iterations
+                "max_iter": 400,  # Max iterations
                 "print_level": ipopt_print_freq,  # Verbosity level
                 'print_frequency_iter': 1,  # print_frequency_iter
                 # "alpha_for_y": "min",  # Fraction-to-boundary rule parameter
@@ -580,8 +620,8 @@ class LV_Optimization(VLType):
             v3_0_guess = 2300.0
             v3_0_guess = 1500.0
         elif RecoveryStrategy == 'ASDS':
-            v3_0_guess = 2400.0
-            v3_0_guess = 1750.0
+            v3_0_guess = 2000.0
+            # v3_0_guess = 1750.0
         else:
             v3_0_guess = 2700.0
 
@@ -592,7 +632,7 @@ class LV_Optimization(VLType):
             else:
                 payload_mass_guess = init_guess['payload_mass']
         else:
-            payload_mass_guess = payload_mass_predefined*0.25
+            payload_mass_guess = payload_mass_predefined
         m3_final = (self.eci.SecondStage_EmptyMass + payload_mass_guess)*(1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / (self.eci.SecondStage_Vac_Isp * self.eci.g0)))
 
         init_acc_guess = self.booster.FirstStage_SL_Thrust / (self.booster.LV_total_mass + payload_mass_guess) - self.booster.g0 * (self.booster.R0 / (self.booster.R0 + self.booster.LaunchAltitude))**2
@@ -639,11 +679,15 @@ class LV_Optimization(VLType):
             alt_N1 = self.booster.local_to_alt(xN)
             Q = 0.5 * (xN[2]**2 + xN[3]**2) * self.atmosphere.rho_fun(alt_N1)
 
+            # Keep the last fully propagated duration when the search is exhausted.
+            if iter == 29:
+                break
             if Q > self.booster.FirstStage_StageSeparationMaxDynamicPressure:
                 dt1_guess += 0.5 / self.booster.N / self.booster.scaleT
                 iter += 1
             elif xN[4] <= self.booster.FirstStage_EmptyMass + payload_mass_guess + dm:
-                dt1_guess -= 1.0 / self.booster.N / self.booster.scaleT
+                dt1_guess = max(0.1/self.booster.scaleT,
+                                dt1_guess - 1.0 / self.booster.N / self.booster.scaleT)
                 iter += 1
             else:
                 break
@@ -666,7 +710,7 @@ class LV_Optimization(VLType):
         x2_init = ca.vertcat(pos, vel, self.eci.SecondStage_FullMass + payload_mass_guess)
         # Match the constraint: separate, transform to ECI, then coast until ignition.
         x2_guess[:,0] = self.eci.dynamics_kp1(
-            self.eci.scale_x(x2_init), [0, 0, 0],
+            self.eci.scale_x(x2_init), 1e-8*np.ones(self.eci.nu),
             self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT).full().flatten()
         alt2_initial_guess = self.eci.eci_to_alt(self.eci.unscale_x(x2_guess[:,0]))
         iter=0
@@ -677,7 +721,7 @@ class LV_Optimization(VLType):
                 x2_guess[:,k+1] = self.eci.dynamics_kp1(x2_guess[:,k], u2_guess[:,k], dt2_guess).full().flatten()
             xN = self.eci.unscale_x(x2_guess[:,self.eci.N[0]])
             alt = self.eci.eci_to_alt(xN)
-            if alt > self.eci.FairingSeparationAltitude:
+            if alt >= self.eci.FairingSeparationAltitude or iter == 19:
                 break
             else:
                 dt2_guess += 4.0/self.eci.N[0]/self.eci.scaleT
@@ -691,48 +735,48 @@ class LV_Optimization(VLType):
 
     # calculate the initial guess for second stage after fairing separation
         dt3_guess = 370.0/self.eci.N[1]/self.eci.scaleT
-        x3_guess = np.zeros((self.eci.nx, self.eci.N[1]+1))
-        u3_guess = np.zeros((self.eci.nu, self.eci.N[1]))
-        x3_guess[0:6,0] = x2_guess[0:6,self.eci.N[0]]
-        x3_guess[6,0] = x2_guess[6,self.eci.N[0]] - self.eci.FairingMass / self.eci.scaleX[6]
+        x3_initial = x2_guess[:,-1].copy()
+        x3_initial[6] -= self.eci.FairingMass / self.eci.scaleX[6]
+        minimum_stage3_mass = float(m3_final + self.eci.SecondStage_EmptyMass + payload_mass_guess)
+        last_complete_stage3 = None
         iter=0
 
         alpha3_init = 0.0
         v3_max = ca.sqrt(self.eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["apogee"]))
         while iter < 50:
-            alpha3, alpha_factor = alpha3_init, 1.0
-            for k in range(self.eci.N[1]):
-                xk = self.eci.unscale_x(x3_guess[:,k]).full().flatten()
+            def stage3_control(xk):
                 h = np.cross(xk[0:3], xk[3:6])
                 h = h / np.linalg.norm(h)
-                u3_guess[0:3,k] = (xk[3:6] / np.linalg.norm(xk[3:6])) 
-                # alpha_factor = k/self.rocket_eci.N[1]
-                alpha3 = -alpha3_init*alpha_factor
-                u3_guess[0:3,k] = u3_guess[0:3,k] * np.cos(alpha3) + np.cross(h, u3_guess[0:3,k]) * np.sin(alpha3) + h * np.dot(h, u3_guess[0:3,k]) * (1 - np.cos(alpha3)) 
+                direction = xk[3:6] / np.linalg.norm(xk[3:6])
+                alpha3 = -alpha3_init
+                direction = (direction * np.cos(alpha3) + np.cross(h, direction) * np.sin(alpha3)
+                             + h * np.dot(h, direction) * (1 - np.cos(alpha3)))
                 acc = self.eci.SecondStage_Thrust / xk[6]
-                if acc > self.eci.Payload_Max_acc:
-                    u3_guess[0:3,k] = u3_guess[0:3,k] * self.eci.Payload_Max_acc/acc
-                x3_guess[:,k+1] = self.eci.dynamics_kp1(x3_guess[:,k], u3_guess[:,k], dt3_guess).full().flatten()
-            
-                xkp1 = self.eci.unscale_x(x3_guess[:,k+1]).full().flatten()
-                vel = np.linalg.norm(xkp1[3:6])
-                h_guess = np.cross(xkp1[0:3], xkp1[3:6])
-                e_guess = ca.cross(xkp1[3:6], h_guess) / (self.eci.mu) - xkp1[0:3] / ca.norm_2(xkp1[0:3])
-                eps_guess = 0.5*ca.sumsqr(xkp1[3:6]) - self.eci.mu / ca.norm_2(xkp1[0:3])
-                a_guess = -self.eci.mu / (2.0*eps_guess)
-                perigee_guess = a_guess * (1.0 - ca.norm_2(e_guess))
-                apogee_guess = a_guess * (1.0 + ca.norm_2(e_guess))
-                i_guess = ca.acos(h_guess[2] / ca.norm_2(h_guess))
+                throttle = np.clip(self.eci.Payload_Max_acc/acc,
+                                   self.eci.SecondStage_MinThrust_Factor, 1.)
+                return direction * throttle
 
-
-                
-                if xkp1[6] < m3_final + self.eci.SecondStage_EmptyMass + payload_mass_guess:
-                    break
-            if k < self.eci.N[1]-1:
+            try:
+                x3_guess, u3_guess = _rollout_initial_guess(
+                    self.eci, x3_initial, self.eci.N[1], float(dt3_guess), stage3_control,
+                    phase3, minimum_mass=minimum_stage3_mass)
+            except _IncompleteInitialGuess as exc:
+                dt3_guess = max(0.1/self.eci.scaleT,
+                                dt3_guess * max(0.1, min(0.9, exc.step / self.eci.N[1])))
                 iter += 1
-                dt3_guess = dt3_guess * (k+1) / self.eci.N[1]
-            elif xkp1[6] < m3_final:
-                dt3_guess -= 0.25/self.eci.scaleT
+                continue
+            last_complete_stage3 = (x3_guess, u3_guess, float(dt3_guess))
+            xkp1 = self.eci.unscale_x(x3_guess[:,-1]).full().flatten()
+            h_guess = np.cross(xkp1[0:3], xkp1[3:6])
+            e_guess = ca.cross(xkp1[3:6], h_guess) / self.eci.mu - xkp1[0:3] / ca.norm_2(xkp1[0:3])
+            eps_guess = 0.5*ca.sumsqr(xkp1[3:6]) - self.eci.mu / ca.norm_2(xkp1[0:3])
+            a_guess = -self.eci.mu / (2.0*eps_guess)
+            perigee_guess = a_guess * (1.0 - ca.norm_2(e_guess))
+            apogee_guess = a_guess * (1.0 + ca.norm_2(e_guess))
+            if iter == 49:
+                break
+            if xkp1[6] < minimum_stage3_mass:
+                dt3_guess = max(0.1/self.eci.scaleT, dt3_guess - 0.25/self.eci.scaleT)
                 iter += 1
             elif apogee_guess < self.eci.ParkingOrbit_PerigeeAlt + self.eci.R0 or a_guess < 0.5*(Target_Orbit['perigee']+self.eci.R0+200.0*1e3):
                 dt3_guess += 0.1/self.eci.scaleT
@@ -742,12 +786,13 @@ class LV_Optimization(VLType):
                 # dt3_guess += 0.
                 iter += 1
             elif apogee_guess > Target_Orbit['perigee'] + 150.0*1e3:
-                dt3_guess -= 0.1/self.eci.scaleT
+                dt3_guess = max(0.1/self.eci.scaleT, dt3_guess - 0.1/self.eci.scaleT)
                 iter += 1
             else:
                 break
-
-
+        if last_complete_stage3 is None:
+            raise ValueError('Second-stage initial guess could not generate a complete finite trajectory.')
+        x3_guess, u3_guess, dt3_guess = last_complete_stage3
         opti.set_initial(dt3, dt3_guess)
         opti.set_initial(x3, x3_guess)
         opti.set_initial(u3, u3_guess)
@@ -777,8 +822,11 @@ class LV_Optimization(VLType):
                     vel = np.linalg.norm(x4_boostback_guess_unscaled[2:4])
                     t_bal = (-x4_boostback_guess_unscaled[3]  + np.sqrt(x4_boostback_guess_unscaled[3]**2 +2*self.boostback.g0*alt))/(0.5*self.boostback.g0)
                     x_bal = x4_boostback_guess_unscaled[0] + x4_boostback_guess_unscaled[2]*400
+                    if iter == 49:
+                        break
                     if abs(x_bal) > 100.0:
-                        dt4_boostback_guess += np.clip(x_bal / abs(x4_boostback_guess_unscaled[2])/400, -1.0, 1.0) / self.boostback.scaleT
+                        dt4_boostback_guess = max(1./self.boostback.scaleT,
+                            dt4_boostback_guess + np.clip(x_bal / max(abs(float(x4_boostback_guess_unscaled[2])), 1.)/400, -1.0, 1.0) / self.boostback.scaleT)
                         iter += 1
                     else:
                         break
@@ -790,6 +838,7 @@ class LV_Optimization(VLType):
 
             # calculate the initial guess for self.booster return
             dt4_ballistic_guess = 300 / self.rocket_return.scaleT
+            reentry_altitude_target = reentry_altitude_min + 1000.
             iter=0
             while iter < 50:
                 if RecoveryStrategy == 'RTLS':
@@ -799,8 +848,11 @@ class LV_Optimization(VLType):
                 x4_before_reentry_guess_unscaled = self.rocket_return.unscale_x(x4_before_reentry_guess)
                 alt = self.rocket_return.local_to_alt(x4_before_reentry_guess_unscaled)
                 vel = ca.norm_2(x4_before_reentry_guess_unscaled[2:4,0])
-                if abs(alt - 60000) > 10:
-                    dt4_ballistic_guess += np.clip((alt - 60000)/abs(x4_before_reentry_guess_unscaled[3,0]), -10.0, 10.0) / self.rocket_return.scaleT
+                if iter == 49:
+                    break
+                if abs(alt - reentry_altitude_target) > 10:
+                    dt4_ballistic_guess = max(200./self.rocket_return.scaleT,
+                        dt4_ballistic_guess + np.clip((alt - reentry_altitude_target)/max(abs(float(x4_before_reentry_guess_unscaled[3,0])), 1.), -10.0, 10.0) / self.rocket_return.scaleT)
                     iter += 1
                 else:
                     break
@@ -809,7 +861,7 @@ class LV_Optimization(VLType):
             opti.set_initial(x4_before_reentry, x4_before_reentry_guess)
             diagnostics.report(ballistic)
 
-            u4_reentry_guess = 1.0
+            u4_reentry_guess = reentry_thrust_max
             dt4_reentry_guess = 1.0 / self.rocket_return.scaleT
             iter = 0
             v_final = 1300.0
@@ -819,8 +871,11 @@ class LV_Optimization(VLType):
                 alt = self.rocket_return.local_to_alt(x4_after_reentry_guess_unscaled)
                 vel = ca.norm_2(x4_after_reentry_guess_unscaled[2:4,0])
                 mass = x4_after_reentry_guess_unscaled[4,0]
+                if iter == 49:
+                    break
                 if abs(vel- v_final) > 10:
-                    dt4_reentry_guess += 0.5 * np.sign(vel - v_final) / self.rocket_return.scaleT
+                    dt4_reentry_guess = max(0.1/self.rocket_return.scaleT,
+                        dt4_reentry_guess + 0.5 * np.sign(vel - v_final) / self.rocket_return.scaleT)
                 else:
                     break
                 iter += 1
@@ -839,8 +894,11 @@ class LV_Optimization(VLType):
                 x4_before_landing_guess_unscaled = self.rocket_return.unscale_x(x4_before_landing_guess).full().flatten()
                 alt = self.rocket_return.local_to_alt(x4_before_landing_guess_unscaled)
                 vel = np.linalg.norm(x4_before_landing_guess_unscaled[2:4])
+                if iter == 49:
+                    break
                 if abs(alt - alt4_before_landing) > 10:
-                    dt4_before_landing_guess += 0.9*(alt - alt4_before_landing)/vel / self.rocket_return.scaleT
+                    dt4_before_landing_guess = max(0.1/self.rocket_return.scaleT,
+                        dt4_before_landing_guess + 0.9*(alt - alt4_before_landing)/max(vel, 1.) / self.rocket_return.scaleT)
                     iter += 1
                 else:
                     break
@@ -852,50 +910,59 @@ class LV_Optimization(VLType):
             # initial guess for the landing burn
             vel = np.linalg.norm(x4_before_landing_guess_unscaled[2:4])
             alt  = self.rocket_return.local_to_alt(x4_before_landing_guess_unscaled)
-            dt4_landing_guess = vel/(self.rocket_return.scaleU[0]/x4_before_landing_guess_unscaled[4]/3-self.rocket_return.g0) / self.rocket_return.N / self.rocket_return.scaleT
-            x4_landing_guess = np.zeros((self.rocket_return.nx, self.rocket_return.N+1))
-            u4_landing_guess = np.zeros((self.rocket_return.nu, self.rocket_return.N))
+            landing_deceleration = (self.rocket_return.scaleU[0] * landing_thrust_max
+                                    / x4_before_landing_guess_unscaled[4] - self.rocket_return.g0)
+            dt4_landing_guess = max(0.1/self.rocket_return.scaleT,
+                vel/max(landing_deceleration, 1.) / self.rocket_return.N / self.rocket_return.scaleT)
             iter = 0
             thrust_factor = 1.0
+            last_complete_landing = None
             while iter < 20:
-                x4_landing_guess[:,0] = x4_before_landing_guess.full().flatten()
-                for k in range(self.rocket_return.N):
-                    xk = self.rocket_return.unscale_x(x4_landing_guess[:,k]).full().flatten()
-                    vel = np.linalg.norm(xk[2:4])
-                    alt = self.rocket_return.local_to_alt(xk)
+                def landing_control(xk):
+                    speed = max(np.linalg.norm(xk[2:4]), 1.)
+                    height = float(self.rocket_return.local_to_alt(xk))
+                    safe_height = max(height, 1.)
                     g_vec = -np.array([xk[0], self.rocket_return.R0 + xk[1]])
                     g_vec /= np.linalg.norm(g_vec)
                     g = self.rocket_return.g0 * (self.rocket_return.R0/(self.rocket_return.R0 + xk[1]))**2
-                    g_v = (g_vec[0]*xk[2] + g_vec[1]*xk[3])/vel * g
-                    u4_landing_guess[0,k] = g_v * xk[4]/self.rocket_return.scaleU[0]                    
-                    if vel > 30.0 and alt > 50.0:
-                        u4_landing_guess[0,k] += (3*vel**2)/(2*alt)*xk[4]/self.rocket_return.scaleU[0]
-                    if alt < 50.0:
-                        u4_landing_guess[0,k] += 0.5*(vel-0.5)**2/alt*xk[4]/self.rocket_return.scaleU[0]
-                    u4_landing_guess[0,k] = thrust_factor*np.clip(u4_landing_guess[0,k], 0.01, 1.0/3.0)
-                    x4_landing_guess[:,k+1] = self.rocket_return.dynamics_kp1(x4_landing_guess[:,k], u4_landing_guess[:,k], dt4_landing_guess).full().flatten()
-                    xkp1 = self.rocket_return.unscale_x(x4_landing_guess[:,k+1]).full().flatten()
-                    alt = self.rocket_return.local_to_alt(xkp1)
-                    vel = np.linalg.norm(xkp1[2:4])
-                    if alt < -1.0:
-                        break
+                    g_v = np.dot(g_vec, xk[2:4])/speed * g
+                    thrust = g_v * xk[4]/self.rocket_return.scaleU[0]
+                    if speed > 30.0 and height > 50.0:
+                        thrust += (3*speed**2)/(2*safe_height)*xk[4]/self.rocket_return.scaleU[0]
+                    if height < 50.0:
+                        thrust += 0.5*(speed-0.5)**2/safe_height*xk[4]/self.rocket_return.scaleU[0]
+                    return [np.clip(thrust_factor * thrust, landing_thrust_min, landing_thrust_max)]
+
+                try:
+                    x4_landing_guess, u4_landing_guess = _rollout_initial_guess(
+                        self.rocket_return, x4_before_landing_guess, self.rocket_return.N,
+                        float(dt4_landing_guess), landing_control, landing, stop_below_ground=True)
+                except _IncompleteInitialGuess as exc:
+                    dt4_landing_guess = max(0.1/self.rocket_return.scaleT,
+                        dt4_landing_guess * max(0.1, min(0.9, exc.step / self.rocket_return.N)))
+                    iter += 1
+                    continue
+                last_complete_landing = (x4_landing_guess, u4_landing_guess, float(dt4_landing_guess))
+                xkp1 = self.rocket_return.unscale_x(x4_landing_guess[:,-1]).full().flatten()
+                alt = self.rocket_return.local_to_alt(xkp1)
+                vel = np.linalg.norm(xkp1[2:4])
+                if iter == 19:
+                    break
                 if alt > 10:
-                    dt4_landing_guess += (alt)/vel/self.rocket_return.N / self.rocket_return.scaleT
+                    dt4_landing_guess += alt/max(vel, 1.)/self.rocket_return.N / self.rocket_return.scaleT
                     # thrust_factor *= 1.01
                     iter += 1
                 # elif vel > 20:
                 #     thrust_factor += self.rocket_return.FirstStage_EmptyMass/self.rocket_return.FirstStage_SL_Thrust
                 #     iter += 1
-                elif alt < -1.0 and k<self.rocket_return.N-1:
-                    dt4_landing_guess *= k/(self.rocket_return.N-1) / self.rocket_return.scaleT
-                    iter += 1
                 elif alt < -1.0:
                     thrust_factor *= 1.1
                     iter += 1
                 else:
                     break
-
-
+            if last_complete_landing is None:
+                raise ValueError('Landing initial guess could not generate a complete finite trajectory.')
+            x4_landing_guess, u4_landing_guess, dt4_landing_guess = last_complete_landing
             opti.set_initial(dt4_landing, dt4_landing_guess)
             opti.set_initial(x4_landing, x4_landing_guess)
             opti.set_initial(u4_landing, u4_landing_guess)

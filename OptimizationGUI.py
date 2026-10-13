@@ -566,10 +566,11 @@ class OptimizationApp:
         self.fit_report_view = ScrolledText(fit_tab, wrap="word", state="disabled", font=("TkFixedFont", 10))
         self.fit_report_view.pack(fill="both", expand=True, padx=10, pady=10)
         self.clear_plots("Run optimization to display this phase.")
-        logs = ttk.LabelFrame(left, text="Solver output", padding=4)
-        logs.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        self.log = ScrolledText(logs, height=4, wrap="word", state="disabled", font=("TkFixedFont", 9))
-        self.log.pack(fill="both", expand=True)
+        logs = ttk.Frame(self.notebook)
+        self.tabs["Solver output"] = logs
+        self.notebook.add(logs, text="Solver output")
+        self.log = ScrolledText(logs, wrap="word", state="disabled", font=("TkFixedFont", 9))
+        self.log.pack(fill="both", expand=True, padx=10, pady=10)
 
         right.columnconfigure(0, weight=1)
         right.rowconfigure(2, weight=1)

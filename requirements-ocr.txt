@@ -1,0 +1,4 @@
+# ExtractTelemetry.py's secondary reader. Includes the project's pinned packages.
+-r requirements.txt
+paddleocr==3.7.0
+paddlepaddle==3.3.1
