@@ -18,7 +18,8 @@ from OptimizationGUI import (ComparisonCase, OptimizationApp, nominal_dispersion
                              nominal_request, run_optimization, worker)
 from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETERS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name,
-                                validate_vehicle_definition)
+                                validate_vehicle_definition, read_vehicle_definition,
+                                write_vehicle_definition)
 
 
 class VehicleDefinitionTests(unittest.TestCase):
@@ -180,6 +181,161 @@ class VehicleDefinitionTests(unittest.TestCase):
         catalog = vehicle_catalog(restored['custom_vehicles'])
         self.assertEqual(catalog['Research vehicle'], restored['cases'][0]['request']['configuration'])
         self.assertEqual(vehicle_catalog(), BUILTIN_VEHICLES)
+
+    def test_standalone_vehicle_round_trip_and_failed_save_preserves_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rocket.json'
+            write_vehicle_definition(path, self.definition)
+            self.assertEqual(read_vehicle_definition(path), self.definition)
+            before = path.read_bytes()
+            changed = vehicle_from_editor('Updated', dict(self.values, Diameter='5'))
+            with patch('VehicleDefinitions.os.replace', side_effect=OSError('disk unavailable')):
+                with self.assertRaises(OSError):
+                    write_vehicle_definition(path, changed)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(list(path.parent.glob('*.tmp')), [])
+            with self.assertRaises(ValueError):
+                write_vehicle_definition(path, dict(self.definition, parameters={}))
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_standalone_vehicle_rejects_invalid_formats_and_parameters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rocket.json'
+            for payload in ('{broken', '[]', '{}',
+                            json.dumps({'format': 'launch-vehicle-configuration', 'version': 999}),
+                            json.dumps({'format': 'launch-vehicle-configuration', 'version': True,
+                                        'vehicle': self.definition}),
+                            json.dumps({'format': 'launch-vehicle-configuration', 'version': 1,
+                                        'vehicle': dict(self.definition, parameters={})})):
+                with self.subTest(payload=payload):
+                    path.write_text(payload)
+                    with self.assertRaises(ValueError):
+                        read_vehicle_definition(path)
+
+    def library_app(self):
+        app = OptimizationApp.__new__(OptimizationApp)
+        app.process = None
+        app.root = Mock()
+        app.output_root = Path('/tmp')
+        app.vehicles = vehicle_catalog([self.definition])
+        app.vehicle_combo = Mock()
+        app.vehicle = Mock(get=Mock(return_value=self.definition['name']))
+        app.status = Mock()
+        app.schedule_save = Mock()
+        app.update_case_labels = Mock()
+        app.cases = [ComparisonCase(f'Case {i + 1}', 'blue') for i in range(3)]
+        return app
+
+    def test_edit_and_rename_update_referencing_drafts_preserving_computed_results(self):
+        app = self.library_app()
+        for case in app.cases[:2]:
+            case.draft['vehicle'] = self.definition['name']
+            case.draft['vehicle_definition'] = deepcopy(self.definition)
+            case.computed_inputs = deepcopy(case.draft)
+            case.request = nominal_request(asdict(DispesrionFactorsType()), self.definition)
+            case.result = {'payload_mass': 10000}
+        computed = deepcopy(app.cases[0].computed_inputs)
+        request = deepcopy(app.cases[0].request)
+        result = app.cases[0].result
+        unrelated = deepcopy(app.cases[2].draft)
+        changed = vehicle_from_editor(self.definition['name'], dict(self.values, Diameter='5'))
+        app.update_vehicle(self.definition['name'], changed)
+        for case in app.cases[:2]:
+            self.assertTrue(case.edited)
+            self.assertEqual(case.draft['vehicle_definition'], changed)
+        self.assertEqual(app.cases[0].computed_inputs, computed)
+        self.assertEqual(app.cases[0].request, request)
+        self.assertIs(app.cases[0].result, result)
+        renamed = dict(changed, name='Renamed rocket')
+        app.update_vehicle(self.definition['name'], renamed)
+        self.assertNotIn(self.definition['name'], app.vehicles)
+        for case in app.cases[:2]:
+            self.assertEqual(case.draft['vehicle'], 'Renamed rocket')
+        app.vehicle.set.assert_called_with('Renamed rocket')
+        self.assertEqual(app.cases[2].draft, unrelated)
+        before = deepcopy(app.vehicles)
+        with self.assertRaises(ValueError):
+            app.update_vehicle('Renamed rocket', dict(renamed, name='Falcon 9'))
+        self.assertEqual(app.vehicles, before)
+        with self.assertRaises(ValueError):
+            app.update_vehicle('Falcon 9', renamed)
+
+    def test_import_reuses_identical_definition_and_preserves_name_conflicts(self):
+        app = self.library_app()
+        before = deepcopy(app.vehicles)
+        self.assertEqual(app.import_vehicle(self.definition), self.definition['name'])
+        self.assertEqual(app.vehicles, before)
+        changed = vehicle_from_editor(self.definition['name'], dict(self.values, Diameter='5'))
+        name = app.import_vehicle(changed)
+        self.assertEqual(name, 'Research vehicle (2)')
+        self.assertEqual(app.vehicles[self.definition['name']], self.definition)
+        self.assertEqual(app.vehicles[name]['parameters']['Diameter'], 5)
+        self.assertEqual(changed['name'], self.definition['name'])
+        builtin = vehicle_from_editor('Falcon 9', self.values)
+        self.assertEqual(app.import_vehicle(builtin), 'Falcon 9 (2)')
+        self.assertEqual(app.vehicles['Falcon 9'], 1)
+        long_name = vehicle_from_editor('x' * 80, self.values)
+        app.import_vehicle(long_name)
+        self.assertEqual(len(app.import_vehicle(dict(long_name, parameters=changed['parameters']))), 80)
+
+    def test_save_and_load_controls_export_definition_and_handle_invalid_import(self):
+        app = self.library_app()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'rocket.json'
+            with patch('tkinter.filedialog.asksaveasfilename', return_value=str(path)):
+                app.save_vehicle_file()
+            self.assertEqual(read_vehicle_definition(path), self.definition)
+            app.vehicles = vehicle_catalog()
+            with patch('tkinter.filedialog.askopenfilename', return_value=str(path)):
+                app.load_vehicle_file()
+            self.assertEqual(app.vehicles[self.definition['name']], self.definition)
+            app.vehicle.set.assert_called_with(self.definition['name'])
+            before = deepcopy(app.vehicles)
+            path.write_text('{broken')
+            with patch('tkinter.filedialog.askopenfilename', return_value=str(path)), \
+                 patch('tkinter.messagebox.showerror') as showerror:
+                app.load_vehicle_file()
+            showerror.assert_called_once()
+            self.assertEqual(app.vehicles, before)
+            app.vehicle.get.return_value = 'Falcon 9'
+            with patch('tkinter.filedialog.asksaveasfilename', return_value=str(path)):
+                app.save_vehicle_file()
+            self.assertEqual(read_vehicle_definition(path)['parameters'],
+                             vehicle_from_editor('Falcon 9', self.values)['parameters'])
+
+    def test_vehicle_file_controls_cancel_and_are_guarded_during_runs(self):
+        app = self.library_app()
+        with patch('tkinter.filedialog.asksaveasfilename', return_value='') as save, \
+             patch('tkinter.filedialog.askopenfilename', return_value='') as load, \
+             patch('OptimizationGUI.write_vehicle_definition') as write:
+            app.save_vehicle_file()
+            app.load_vehicle_file()
+            write.assert_not_called()
+            save.reset_mock()
+            load.reset_mock()
+            app.process = Mock()
+            app.save_vehicle_file()
+            app.load_vehicle_file()
+            app.open_vehicle_dialog(edit=True)
+            save.assert_not_called()
+            load.assert_not_called()
+
+    def test_edit_dialog_applies_changes_to_selected_custom_vehicle(self):
+        app = self.library_app()
+        app.update_vehicle = Mock()
+        app.add_vehicle = Mock()
+        widgets = {name: Mock() for name in ('Frame', 'Label', 'Entry', 'Notebook', 'Scrollbar', 'Button')}
+        def variable(**kwargs):
+            return Mock(get=Mock(return_value=kwargs['value']))
+        with patch.multiple('tkinter', Toplevel=Mock(), Canvas=Mock(), StringVar=variable), \
+             patch.multiple('tkinter.ttk', **widgets):
+            app.open_vehicle_dialog(edit=True)
+        buttons = {call.kwargs['text']: call.kwargs['command'] for call in widgets['Button'].call_args_list}
+        buttons['Apply changes']()
+        selected, definition = app.update_vehicle.call_args.args
+        self.assertEqual(selected, self.definition['name'])
+        self.assertEqual(definition, self.definition)
+        app.add_vehicle.assert_not_called()
 
     def test_dialog_starts_from_current_vehicle_and_creates_validated_copy(self):
         app = OptimizationApp.__new__(OptimizationApp)

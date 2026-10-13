@@ -452,6 +452,37 @@ class ResultRenderingTests(unittest.TestCase):
             self.assertEqual(restored.vehicle.get(), 'Falcon 9')
             self.assertIn('Research rocket', restored.vehicles)
 
+    def test_vehicle_edit_refreshes_nominals_and_preserves_history_after_restart(self):
+        from VehicleDefinitions import vehicle_editor_values, vehicle_from_editor
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(directory)
+            original = vehicle_from_editor('Research rocket', vehicle_editor_values(1))
+            app.add_vehicle(original)
+            case = app.cases[0]
+            case.computed_inputs = deepcopy(app.capture_inputs())
+            case.request = app.form_request()
+            case.result = deepcopy(self.results['EXP'])
+            case.result['configuration'] = deepcopy(original)
+            app.select_case(1)
+            app.vehicle.set('Research rocket')
+            app.select_case(0)
+            changed = vehicle_from_editor('Research rocket', dict(vehicle_editor_values(1), EmptyFirstStageMass='30'))
+            app.update_vehicle('Research rocket', changed)
+            self.assertTrue(case.edited)
+            self.assertIn('edited inputs', app.case_status[0].get())
+            self.assertIn('30 t', app.dispersion_labels['FirstStage_EmptyMass']['text'])
+            self.assertEqual(app.form_request()['configuration'], changed)
+            self.assertEqual(case.request['configuration'], original)
+            renamed = dict(changed, name='Renamed rocket')
+            app.update_vehicle('Research rocket', renamed)
+            self.assertEqual(app.cases[1].draft['vehicle'], 'Renamed rocket')
+            app.close()
+            restored = self.make_app(directory)
+            self.assertEqual(restored.vehicle.get(), 'Renamed rocket')
+            self.assertTrue(restored.cases[0].edited)
+            self.assertEqual(restored.cases[0].request['configuration'], original)
+            self.assertEqual(restored.form_request()['configuration'], renamed)
+
     def test_close_reopen_restores_cases_telemetry_and_display(self):
         from TelemetryCSV import load_telemetry_csv
         with tempfile.TemporaryDirectory() as directory:

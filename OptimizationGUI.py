@@ -24,7 +24,9 @@ from DispersionFit import DEFAULT_PARAMETERS, ERROR_SCALES, CHANNEL_UNITS, defau
 from LaunchSites import LAUNCH_SITES, DEFAULT_LAUNCH_SITE, launch_site_inputs, parse_launch_site
 from GUIState import read_gui_state, write_gui_state
 from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
-                                vehicle_editor_values, vehicle_from_editor, vehicle_name)
+                                vehicle_editor_values, vehicle_from_editor, vehicle_name,
+                                read_vehicle_definition, write_vehicle_definition,
+                                validate_vehicle_definition)
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from TelemetryFrames import local_to_ecef_velocity, eci_to_ecef_velocity
 from Trajectory3D import draw_trajectory_3d, maneuver_summary_text
@@ -469,18 +471,30 @@ class OptimizationApp:
         panes.add(right, weight=1)
         left.columnconfigure(0, weight=1)
         left.rowconfigure(3, weight=1)
-        ttk.Label(left, text="Flight simulation", style="Title.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        plot_header = ttk.Frame(left)
+        plot_header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(plot_header, text="Flight simulation", style="Title.TLabel").pack(side="left")
+        self.scenario_details_button = ttk.Button(plot_header, text="Show scenario details",
+                                                  command=self.toggle_scenario_details)
+        self.scenario_details_button.pack(side="right")
         self.summary = tk.StringVar(value="No result yet. Set the factors and run the nominal case.")
-        ttk.Label(left, textvariable=self.summary, wraplength=850).grid(row=1, column=0, sticky="w", pady=(0, 8))
-        case_panel = ttk.LabelFrame(left, text="Compare cases · select to edit, check to display", padding=6)
-        case_panel.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        self.scenario_details = ttk.Frame(left)
+        self.scenario_details.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        self.scenario_details_view = ScrolledText(self.scenario_details, height=4, wrap="word",
+                                                 state="disabled", font=("TkDefaultFont", 9))
+        self.scenario_details_view.pack(fill="both", expand=True)
+        self.summary.trace_add("write", self.refresh_scenario_details)
+        self.refresh_scenario_details()
+        self.scenario_details.grid_remove()
+        case_panel = ttk.LabelFrame(left, text="Compare cases · select to edit, check to display", padding=4)
+        case_panel.grid(row=2, column=0, sticky="ew", pady=(0, 4))
         case_panel.columnconfigure(3, weight=1)
         self.case_selection = tk.IntVar(value=0)
         self.case_visible, self.case_status, self.color_buttons = [], [], []
         for index, case in enumerate(self.cases):
             selector = ttk.Radiobutton(case_panel, text=case.name, variable=self.case_selection,
                                        value=index, command=lambda i=index: self.select_case(i))
-            selector.grid(row=index, column=0, sticky="w", padx=4, pady=2)
+            selector.grid(row=index, column=0, sticky="w", padx=4, pady=1)
             self.controls.append((selector, "normal"))
             visible = tk.BooleanVar(value=True)
             ttk.Checkbutton(case_panel, text="Display", variable=visible,
@@ -490,7 +504,8 @@ class OptimizationApp:
                                      command=lambda i=index: self.choose_color(i), width=6)
             color_button.grid(row=index, column=2, padx=4)
             status = tk.StringVar(value="Not run")
-            ttk.Label(case_panel, textvariable=status, wraplength=680).grid(row=index, column=3, sticky="w", padx=8)
+            ttk.Label(case_panel, textvariable=status, width=1, anchor="w").grid(
+                row=index, column=3, sticky="ew", padx=8)
             self.case_visible.append(visible)
             self.case_status.append(status)
             self.color_buttons.append(color_button)
@@ -553,7 +568,7 @@ class OptimizationApp:
         self.clear_plots("Run optimization to display this phase.")
         logs = ttk.LabelFrame(left, text="Solver output", padding=4)
         logs.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        self.log = ScrolledText(logs, height=7, wrap="word", state="disabled", font=("TkFixedFont", 9))
+        self.log = ScrolledText(logs, height=4, wrap="word", state="disabled", font=("TkFixedFont", 9))
         self.log.pack(fill="both", expand=True)
 
         right.columnconfigure(0, weight=1)
@@ -566,17 +581,27 @@ class OptimizationApp:
         self.vehicle = tk.StringVar(value="Falcon 9")
         self.recovery = tk.StringVar(value=next(iter(RECOVERY)))
         for row, (label, variable, choices) in enumerate((("Vehicle", self.vehicle, self.vehicles), ("Recovery", self.recovery, RECOVERY))):
+            row *= 2
             ttk.Label(settings, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
             combo = ttk.Combobox(settings, textvariable=variable, values=list(choices), state="readonly", width=28)
             combo.grid(row=row, column=1, sticky="ew", pady=4)
             if row == 0:
                 self.vehicle_combo = combo
             self.controls.append((combo, "readonly"))
-        self.new_vehicle_button = ttk.Button(settings, text="New vehicle…", command=self.open_vehicle_dialog)
-        self.new_vehicle_button.grid(row=0, column=2, sticky="e", padx=(6, 0))
-        self.controls.append((self.new_vehicle_button, "normal"))
+        vehicle_actions = ttk.Frame(settings)
+        vehicle_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.new_vehicle_button = ttk.Button(vehicle_actions, text="New vehicle…", command=self.open_vehicle_dialog)
+        self.edit_vehicle_button = ttk.Button(vehicle_actions, text="Edit…", width=6,
+                                              command=lambda: self.open_vehicle_dialog(edit=True))
+        self.save_vehicle_button = ttk.Button(vehicle_actions, text="Save…", width=6, command=self.save_vehicle_file)
+        self.load_vehicle_button = ttk.Button(vehicle_actions, text="Load…", width=6, command=self.load_vehicle_file)
+        for column, button in enumerate((self.new_vehicle_button, self.edit_vehicle_button,
+                                         self.save_vehicle_button, self.load_vehicle_button)):
+            vehicle_actions.columnconfigure(column, weight=1)
+            button.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 4, 0))
+            self.controls.append((button, "normal"))
         orbit_form = ttk.LabelFrame(settings, text="Target orbit", padding=6)
-        orbit_form.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        orbit_form.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         orbit_form.columnconfigure(1, weight=1)
         self.orbit_variables = {}
         for row, (name, label, default) in enumerate((
@@ -590,16 +615,16 @@ class OptimizationApp:
             self.orbit_variables[name] = variable
             self.controls.append((entry, "normal"))
             variable.trace_add("write", self.inputs_changed)
-        ttk.Label(settings, text="Payload mass [kg]").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(settings, text="Payload mass [kg]").grid(row=4, column=0, sticky="w", pady=(8, 0))
         self.payload_mass = tk.StringVar(value="-1")
         payload_entry = ttk.Entry(settings, textvariable=self.payload_mass, width=12)
-        payload_entry.grid(row=3, column=1, sticky="ew", pady=(8, 0))
+        payload_entry.grid(row=4, column=1, sticky="ew", pady=(8, 0))
         self.controls.append((payload_entry, "normal"))
         self.payload_mass.trace_add("write", self.inputs_changed)
         ttk.Label(settings, text="Positive: fixed payload · 0 or negative: maximize").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+            row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
         site_form = ttk.LabelFrame(settings, text="Launch site", padding=6)
-        site_form.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        site_form.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         site_form.columnconfigure(1, weight=1)
         self.launch_site = tk.StringVar(value=DEFAULT_LAUNCH_SITE)
         site_combo = ttk.Combobox(site_form, textvariable=self.launch_site,
@@ -817,6 +842,8 @@ class OptimizationApp:
                 for key, options in (("vehicle", self.vehicles), ("recovery", RECOVERY)):
                     if source.get(key) in options:
                         draft[key] = source[key]
+                if isinstance(self.vehicles[draft['vehicle']], dict):
+                    draft['vehicle_definition'] = deepcopy(self.vehicles[draft['vehicle']])
                 if isinstance(source.get("payload_mass"), str):
                     draft["payload_mass"] = source["payload_mass"]
                 for group in ("orbit", "dispersion", "launch_site"):
@@ -837,6 +864,9 @@ class OptimizationApp:
                 case.computed_inputs = saved.get("computed_inputs")
                 if case.computed_inputs is not None:
                     case.computed_inputs.setdefault("launch_site", launch_site_inputs())
+                    if (case.request and isinstance(case.request.get('configuration'), dict)
+                            and 'vehicle_definition' not in case.computed_inputs):
+                        case.computed_inputs['vehicle_definition'] = deepcopy(case.request['configuration'])
                 case.run_dir = Path(saved["run_dir"]) if saved.get("run_dir") else None
                 case.state = saved.get("state", "Complete" if case.result is not None else "Not run")
                 case.fit_report = saved.get("fit_report")
@@ -951,11 +981,15 @@ class OptimizationApp:
             self.inputs_changed()
 
     def capture_inputs(self):
-        return {"vehicle": self.vehicle.get(), "recovery": self.recovery.get(),
+        draft = {"vehicle": self.vehicle.get(), "recovery": self.recovery.get(),
                 "payload_mass": self.payload_mass.get(),
                 "launch_site": dict(name=self.launch_site.get(), **{k: v.get() for k, v in self.site_variables.items()}),
                 "dispersion": {k: v.get() for k, v in self.variables.items()},
                 "orbit": {k: v.get() for k, v in self.orbit_variables.items()}}
+        configuration = self.vehicles[draft['vehicle']]
+        if isinstance(configuration, dict):
+            draft['vehicle_definition'] = deepcopy(configuration)
+        return draft
 
     def refresh_dispersion_nominals(self, *args):
         values = nominal_dispersion_values(self.vehicles[self.vehicle.get()], self.site_variables['altitude'].get())
@@ -1011,14 +1045,28 @@ class OptimizationApp:
             self.color_buttons[index].configure(background=color, activebackground=color)
             self.refresh_comparison()
 
+    def toggle_scenario_details(self):
+        if self.scenario_details.winfo_manager():
+            self.scenario_details.grid_remove()
+            self.scenario_details_button.configure(text="Show scenario details")
+        else:
+            self.scenario_details.grid()
+            self.scenario_details_button.configure(text="Hide scenario details")
+
+    def refresh_scenario_details(self, *args):
+        self.scenario_details_view.configure(state="normal")
+        self.scenario_details_view.delete("1.0", "end")
+        self.scenario_details_view.insert("1.0", self.summary.get())
+        self.scenario_details_view.configure(state="disabled")
+
     def update_case_labels(self):
         for index, case in enumerate(self.cases):
             text = case.state
             if case.result is not None:
-                text += (f" · Payload: {float(case.result['payload_mass']):,.1f} kg"
-                         f" · S2 propellant left (est.): {remaining_propellant_text(case)}")
                 if case.edited:
                     text += " · edited inputs; showing previous result"
+                text += (f" · Payload: {float(case.result['payload_mass']):,.1f} kg"
+                         f" · S2 propellant left (est.): {remaining_propellant_text(case)}")
             self.case_status[index].set(text)
         case = self.cases[self.selected_case]
         self.run_button.configure(text=f"{'Recompute' if case.result is not None else 'Run'} {case.name}")
@@ -1416,18 +1464,93 @@ class OptimizationApp:
         self.status.set(f"Created {name}. Run the selected case to simulate it.")
         self.schedule_save()
 
-    def open_vehicle_dialog(self):
+    def update_vehicle(self, selected, definition):
+        """Update a custom library entry and its drafts, retaining computed inputs."""
+        if not isinstance(self.vehicles[selected], dict):
+            raise ValueError('Create a custom copy to edit a built-in vehicle.')
+        definitions = [definition if name == selected else value
+                       for name, value in self.vehicles.items() if isinstance(value, dict)]
+        catalog = vehicle_catalog(definitions)
+        name = definition['name'].strip()
+        self.vehicles = catalog
+        for case in self.cases:
+            if case.draft['vehicle'] == selected:
+                case.draft['vehicle'] = name
+                case.draft['vehicle_definition'] = deepcopy(catalog[name])
+        self.vehicle_combo.configure(values=list(catalog))
+        self.vehicle.set(name)
+        self.update_case_labels()
+        self.status.set(f'Updated {name}. Recompute cases using it to apply the changes.')
+        self.schedule_save()
+
+    def import_vehicle(self, definition):
+        """Select identical imports; keep conflicting configurations as new copies."""
+        definition = validate_vehicle_definition(definition)
+        for name, configuration in self.vehicles.items():
+            if configuration == definition:
+                self.vehicle.set(name)
+                self.schedule_save()
+                return name
+        base = definition['name']
+        number = 2
+        names = {name.casefold() for name in self.vehicles}
+        while definition['name'].casefold() in names:
+            suffix = f' ({number})'
+            definition['name'] = base[:80 - len(suffix)] + suffix
+            number += 1
+        self.add_vehicle(definition)
+        return definition['name']
+
+    def save_vehicle_file(self):
+        from tkinter import filedialog, messagebox
+        if self.process is not None:
+            return
+        selected = self.vehicle.get()
+        configuration = self.vehicles[selected]
+        definition = (configuration if isinstance(configuration, dict) else
+                      vehicle_from_editor(selected, vehicle_editor_values(configuration)))
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title='Save launch vehicle configuration', defaultextension='.json',
+            initialdir=str(self.output_root), initialfile='launch_vehicle.json',
+            filetypes=(('Launch vehicle configuration', '*.json'), ('All files', '*.*')))
+        if not path:
+            return
+        try:
+            write_vehicle_definition(path, definition)
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror('Could not save vehicle', str(exc), parent=self.root)
+            return
+        self.status.set(f'Saved {selected} to {path}')
+
+    def load_vehicle_file(self):
+        from tkinter import filedialog, messagebox
+        if self.process is not None:
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root, title='Load launch vehicle configuration', initialdir=str(self.output_root),
+            filetypes=(('Launch vehicle configuration', '*.json'), ('All files', '*.*')))
+        if not path:
+            return
+        try:
+            name = self.import_vehicle(read_vehicle_definition(path))
+        except (OSError, ValueError, TypeError, UnicodeError) as exc:
+            messagebox.showerror('Could not load vehicle', str(exc), parent=self.root)
+            return
+        self.status.set(f'Loaded {name} from {path}. Run the selected case to simulate it.')
+
+    def open_vehicle_dialog(self, edit=False):
         import tkinter as tk
         from tkinter import ttk, messagebox
         if self.process is not None:
             return
         selected = self.vehicle.get()
         configuration = self.vehicles[selected]
+        editing = edit and isinstance(configuration, dict)
         defaults = vehicle_editor_values(configuration)
         model = VLType()
         model.ApplyVehicleConfiguration(configuration)
         dialog = tk.Toplevel(self.root)
-        dialog.title(f"New vehicle from {selected}")
+        dialog.title(f'Edit {selected}' if editing else f'New vehicle from {selected}')
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.geometry('760x640')
@@ -1437,10 +1560,11 @@ class OptimizationApp:
         name_row = ttk.Frame(panel)
         name_row.pack(fill='x')
         ttk.Label(name_row, text='Vehicle name').pack(side='left', padx=(0, 8))
-        name = f"{selected} copy"
+        name = selected if editing else f"{selected[:75]} copy"
         number = 2
-        while name.casefold() in {key.casefold() for key in self.vehicles}:
-            name = f"{selected} copy {number}"
+        while not editing and name.casefold() in {key.casefold() for key in self.vehicles}:
+            suffix = f' copy {number}'
+            name = selected[:80 - len(suffix)] + suffix
             number += 1
         name_input = tk.StringVar(value=name)
         name_entry = ttk.Entry(name_row, textvariable=name_input)
@@ -1449,6 +1573,12 @@ class OptimizationApp:
                   "t = metric tons; tf = metric ton-force; s = seconds. "
                   "Launch site, target orbit, and payload use the selected case's settings."),
                   wraplength=710).pack(fill='x', pady=10)
+        if editing:
+            ttk.Label(panel, text='Changes apply to all cases selecting this vehicle; recompute to update results.',
+                      wraplength=710).pack(fill='x', pady=(0, 8))
+        elif edit:
+            ttk.Label(panel, text='Editing a built-in creates a custom copy. Enter a unique name.',
+                      wraplength=710).pack(fill='x', pady=(0, 8))
         notebook = ttk.Notebook(panel)
         notebook.pack(fill='both', expand=True)
         variables = {}
@@ -1490,13 +1620,16 @@ class OptimizationApp:
         def create():
             try:
                 definition = vehicle_from_editor(name_input.get(), {key: value.get() for key, value in variables.items()})
-                self.add_vehicle(definition)
+                if editing:
+                    self.update_vehicle(selected, definition)
+                else:
+                    self.add_vehicle(definition)
             except ValueError as exc:
                 messagebox.showerror('Invalid vehicle', str(exc), parent=dialog)
                 return
             dialog.destroy()
         ttk.Button(footer, text='Cancel', command=dialog.destroy).pack(side='left')
-        ttk.Button(footer, text='Create vehicle', command=create).pack(side='right')
+        ttk.Button(footer, text='Apply changes' if editing else 'Create vehicle', command=create).pack(side='right')
         name_entry.focus_set()
 
     def open_fit_dialog(self):

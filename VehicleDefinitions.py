@@ -1,5 +1,9 @@
 """Portable custom vehicle definitions and the units used by their editor."""
 import math
+import json
+import os
+from pathlib import Path
+import tempfile
 
 
 BUILTIN_VEHICLES = {"Falcon 9": 1, "Starship": 2, "Starship V3": 3, "New Glenn": 4}
@@ -132,3 +136,32 @@ def vehicle_name(configuration):
     if isinstance(configuration, dict):
         return configuration['name']
     return next(name for name, number in BUILTIN_VEHICLES.items() if number == configuration)
+
+
+def read_vehicle_definition(path):
+    """Read a standalone vehicle file and validate its complete SI parameters."""
+    payload = json.loads(Path(path).read_text(encoding='utf-8'))
+    if (not isinstance(payload, dict) or payload.get('format') != 'launch-vehicle-configuration'
+            or type(payload.get('version')) is not int or payload['version'] != 1):
+        raise ValueError('Unrecognized launch vehicle configuration format.')
+    return validate_vehicle_definition(payload.get('vehicle'))
+
+
+def write_vehicle_definition(path, definition):
+    """Atomically export a validated vehicle, independently of GUI sessions."""
+    definition = validate_vehicle_definition(definition)
+    payload = json.dumps({'format': 'launch-vehicle-configuration', 'version': 1,
+                          'vehicle': definition}, ensure_ascii=False, indent=2, allow_nan=False)
+    path = Path(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                         prefix='.vehicle_', suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

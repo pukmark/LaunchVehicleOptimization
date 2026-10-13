@@ -58,6 +58,26 @@ a unique name and click **Create vehicle** to add it to the selector and select
 it for the active case. Existing cases retain their own vehicle selections.
 Custom vehicles can also be used as templates for another new vehicle.
 
+The plots use most of the available height. Scenario summaries are collapsed
+by default; click **Show scenario details** above the graphs to open a compact,
+scrollable summary, and **Hide scenario details** to reclaim that space. Case
+selection, display controls, and a single-line status remain visible.
+
+The **Edit…**, **Save…**, and **Load…** buttons appear alongside **New vehicle…**
+below the vehicle selector. **Edit…** opens the selected custom configuration;
+click **Apply changes** to update it, including any cases that select it. You
+can rename it in the same editor. Previous computed results remain visible and
+are marked as edited until those cases are recomputed. Editing a built-in
+vehicle opens a new custom copy instead.
+
+**Save…** exports the selected vehicle's nominal parameters to a standalone
+JSON file, with values stored in SI units. **Load…** validates that file, adds
+the vehicle to the library, and selects it for the active case. An identical
+existing custom configuration is selected again; a conflicting name receives
+a numbered suffix so existing configurations are preserved. These files contain
+only the vehicle definition. Use **Save state…** and **Load state…** to transfer
+complete sessions with case settings and results.
+
 The **3D trajectory** tab shows first- and second-stage ascent in ECI coordinates,
 Earth, the equatorial plane, and parking/final orbits, with XY, YZ, and XZ
 projections as in `Main.py`. Drag the 3D view to rotate it and use the plot
@@ -425,6 +445,19 @@ settings, for example `{'linear_solver': 'mumps', 'max_iter': 250}`. The default
 uses MA97 when `/usr/local/lib/libcoinhsl.so` exists, otherwise MUMPS.
 `LV_IPOPT_LINEAR_SOLVER` and `LV_IPOPT_HSL_LIBRARY` can override those defaults.
 Plotting respects Matplotlib's configured backend, including `MPLBACKEND=Agg`.
+
+After calculating each phase's initial guess, `SolveOptimiztion` prints a
+constraint check using the actual CasADi constraints and their bounds. Reports
+identify violated constraints, node/state components, values, bounds, and the
+excess or shortfall in physical units where applicable, alongside the residual
+in solver units. Dynamics and state equalities show residuals against zero.
+Checks include phase transitions, terminal constraints, and all modeled booster
+return segments. Nonfinite values are flagged explicitly. A supplied warm start
+receives a separate check after it replaces the generated guesses. Feasibility
+uses a `1e-6` tolerance in solver units; the checks do not modify guesses or
+prevent solving. Output also appears in the GUI solver log. Pass
+`initial_guess_diagnostics=False` to suppress these reports independently of
+IPOPT verbosity.
 
 Results are written to `output_dir` (default `Results`; use `None` to disable
 saving). Filenames include vehicle configuration and a hash of the precise
