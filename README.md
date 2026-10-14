@@ -43,6 +43,30 @@ the bottom right. The selected orbit is saved with the run and used in the
 result plots. Multipliers are marked `×`; mass and
 altitude offsets use kg and m, and stage partition is a fractional offset.
 **Reset dispersion to defaults** restores the nominal factors.
+The **Sensitivity** tab has a dedicated **Run payload sensitivities** button.
+Choose the vehicle, recovery strategy, target orbit, launch site, and baseline
+dispersion in the right panel. The sweep always maximizes payload, independently
+of the fixed-payload entry, and holds the other settings fixed while changing
+one parameter at a time. All 13 dispersion fields are selected by default;
+**Parameters / steps…** lets you select a subset and edit the positive step sizes.
+Default steps are 1% of current multipliers or physical stage masses, 100 m for
+launch altitude, and 0.001 for stage partition. Mass steps remain meaningful
+when the baseline dispersion offsets are zero. Stage partition retains the
+model's coupled dry-mass/propellant changes.
+
+The sweep re-solves the baseline and both ±step cases (27 solves for all fields),
+using the optimized baseline as each perturbed trajectory's initial guess.
+The table shows both maximum payloads, the central derivative
+`dP/dp = (P+ - P-) / (2 step)` in kg per parameter unit, and estimated payload
+change in kg and percent for a positive step. The chart ranks those signed
+changes; its ranking depends on the configured steps. These are local numerical
+estimates: compare a second step size to check solver noise and nonlinear effects.
+Failed solves show their status and contribute no derivative. The GUI stays
+responsive, displays progress, and supports **Cancel** with partial results.
+Each case retains its own sensitivity settings and report in saved GUI states;
+editing its inputs marks the displayed report as using its saved baseline.
+Reports and solver logs are saved under `Results/gui/sensitivity_caseN_*`.
+
 Each dispersion name shows its nominal vehicle quantity in the main panel and
 fit dialog: Isp in seconds (`s`), thrust in metric ton-force (`tf`), and mass in
 metric tons (`t`). First-stage propulsion shows both sea-level (SL) and vacuum
@@ -463,13 +487,30 @@ IPOPT verbosity.
 
 Generated guesses keep each trajectory, its controls, and its propagated time
 step together, including when a duration search reaches its iteration limit.
-Stage-two and landing candidates that stop early or become nonfinite are
-discarded; the last complete candidate is retained, or generation reports an
-error if none exists. Fixed-payload guesses use the entire requested payload.
-Recovery guesses target 71 km before reentry (above the 70 km minimum), use
-reentry thrust within its bounds, and clip landing thrust after all adjustments
-using the same limits as the optimizer. Remaining orbit, landing, aerodynamic,
-or fuel-reserve violations are still shown by the constraint reports.
+Incomplete or nonfinite candidates are discarded. Searches retain the best
+complete candidate by worst normalized constraint violation, with mean squared
+error as a tie-breaker. Ranking runs even when printed diagnostics are disabled.
+First-stage ranking also accounts for the recovery fuel budget. Fixed-payload
+guesses use the entire requested payload.
+
+Launch azimuth is fitted within the optimizer's heading bounds using the actual
+local-to-ECI transform, launch latitude, and Earth rotation. When direct injection
+cannot reach the requested inclination, the closest permitted heading is used.
+The nominal parking orbit uses the configured perigee altitude; its final-burn
+estimate includes plane change and the same 0.99 Isp adjustment as the optimizer.
+The reserve calculation budgets enough mass before the burn to leave the dry
+stage and payload afterward. Candidate scoring and optimization share the same
+final-burn calculation.
+
+Recovery starts from propagated heuristic seeds and jointly fits coast and burn
+durations, reentry throttle, and landing feedback gain. RTLS also fits boostback
+duration and direction using the full propagated return trajectory. A bounded
+least-squares fit evaluates the actual recovery constraints, including pressure,
+heat flux, landing position/speed, and dry mass, using physical reference scales.
+The best complete candidate, including the seed, is retained. Reentry begins
+at or above 70 km, and thrust stays within the optimizer's bounds. This fit
+reduces initial infeasibility but does not guarantee a feasible trajectory;
+remaining violations are still shown by the constraint reports.
 
 Results are written to `output_dir` (default `Results`; use `None` to disable
 saving). Filenames include vehicle configuration and a hash of the precise

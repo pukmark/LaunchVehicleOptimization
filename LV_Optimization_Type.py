@@ -1,17 +1,208 @@
 #!/usr/bin/env python3
 
 from dataclasses import asdict, dataclass, field
+from copy import deepcopy
 import hashlib
 import json
 import os
 from pathlib import Path
 import numpy as np
 import casadi as ca
+from scipy.optimize import least_squares, minimize_scalar
 import Atmosphere_Type as Atm_Type
 import LV_Type_scaled as LV_Type
 import LV_Plot as LVp
 import pickle
 from LaunchSites import parse_launch_site
+
+
+def _guess_score(residuals):
+    """Rank finite guesses by worst normalized violation, then mean squared error."""
+    residuals = np.asarray(residuals, dtype=float).reshape(-1)
+    if not np.isfinite(residuals).all():
+        return (float('inf'), float('inf'))
+    return (float(np.max(np.abs(residuals), initial=0.)),
+            float(np.mean(residuals**2)) if residuals.size else 0.)
+
+
+class _BestInitialGuess:
+    def __init__(self):
+        self.score = (float('inf'), float('inf'))
+        self.candidate = None
+
+    def consider(self, residuals, candidate):
+        score = _guess_score(residuals)
+        if score < self.score:
+            self.score = score
+            # Searches reuse their arrays; keep the states, controls and times together.
+            self.candidate = deepcopy(candidate)
+
+
+def _orbit_burn_quantities(model, state, target):
+    """Shared symbolic/numeric parking orbit and final-burn reserve calculation."""
+    h = ca.cross(state[:3], state[3:6])
+    e = ca.cross(state[3:6], h) / model.mu - state[:3] / ca.norm_2(state[:3])
+    energy = 0.5 * ca.sumsqr(state[3:6]) - model.mu / ca.norm_2(state[:3])
+    semimajor = -model.mu / (2. * energy)
+    normal = h / ca.norm_2(h)
+    eccentricity_squared = ca.sumsqr(e)
+    vertical_squared = ca.if_else(eccentricity_squared > 1e-16,
+                                 e[2]**2 / ca.fmax(eccentricity_squared, 1e-16), 0.)
+    rho_squared = ca.fmax(1. - vertical_squared, 0.)
+    cos_target = np.cos(target['i'])
+    margin = rho_squared - cos_target**2
+    tangent_squared = ca.fmax(rho_squared - normal[2]**2, 0.)
+    plane_term = tangent_squared * ca.fmax(margin, 0.)
+    # Preserve zero plane change while avoiding sqrt(0) derivatives at
+    # equatorial/polar headings and the boundary of attainable inclinations.
+    plane_root = ca.if_else(plane_term > 0., ca.sqrt(ca.fmax(plane_term, 1e-30)), 0.)
+    cos_change = (normal[2] * cos_target + plane_root) / ca.fmax(rho_squared, 1e-16)
+    cos_change = ca.if_else(rho_squared > 1e-16, cos_change, 1.)
+    cos_change = ca.fmin(ca.fmax(cos_change, -1.), 1.)
+    v_apogee = ca.sqrt(model.mu * (2. / target['perigee'] - 1. / semimajor))
+    v_target = ca.sqrt(model.mu * (2. / target['perigee'] - 1. / target['a']))
+    delta_v_squared = (v_target - v_apogee)**2 + 2. * v_apogee * v_target * (1. - cos_change)
+    delta_v = ca.if_else(delta_v_squared > 0., ca.sqrt(ca.fmax(delta_v_squared, 1e-30)), 0.)
+    retained_fraction = ca.exp(-delta_v / (0.99 * model.SecondStage_Vac_Isp * model.g0))
+    final_mass = ca.if_else(margin >= 0., state[6] * retained_fraction, 0.)
+    return {'a': semimajor, 'apogee': semimajor * (1. + ca.norm_2(e)),
+            'perigee': semimajor * (1. - ca.norm_2(e)), 'delta_v': delta_v,
+            'retained_fraction': retained_fraction, 'mass_after_burn': final_mass,
+            'reserve': state[6] - final_mass, 'plane_margin': margin}
+
+
+def _initial_launch_azimuth(model, local_state, inclination):
+    """Fit the permitted heading to inclination using the actual ECI transform."""
+    local_state = np.asarray(local_state, dtype=float).reshape(-1)
+    def error(azimuth):
+        position, velocity = model.local_to_eci_func(
+            [local_state[0], 0., local_state[1]], [local_state[2], 0., local_state[3]], azimuth)
+        h = np.cross(np.asarray(position).reshape(-1), np.asarray(velocity).reshape(-1))
+        norm = np.linalg.norm(h)
+        return (h[2] / norm - np.cos(inclination))**2 if norm > 1e-12 else float('inf')
+
+    headings = np.linspace(-np.pi/2., np.pi/2., 65)
+    errors = np.array([error(heading) for heading in headings])
+    best = int(np.argmin(errors))
+    result = minimize_scalar(error, bounds=(headings[max(best-1, 0)],
+                                           headings[min(best+1, len(headings)-1)]),
+                             method='bounded', options={'xatol': 1e-12})
+    return float(result.x if result.success and result.fun < errors[best] else headings[best])
+
+
+def _nominal_orbit_burn(model, local_state, azimuth, target):
+    """Estimate the final burn at an equatorial node of the predicted parking plane."""
+    state = np.asarray(local_state, dtype=float).reshape(-1)
+    position, velocity = model.local_to_eci_func([state[0], 0., state[1]],
+                                               [state[2], 0., state[3]], azimuth)
+    normal = np.cross(np.asarray(position).reshape(-1), np.asarray(velocity).reshape(-1))
+    normal /= np.linalg.norm(normal)
+    radial = np.cross([0., 0., 1.], normal)
+    if np.linalg.norm(radial) < 1e-12:
+        radial = np.array([1., 0., 0.])
+    radial /= np.linalg.norm(radial)
+    parking_perigee = model.R0 + model.ParkingOrbit_PerigeeAlt
+    semimajor = 0.5 * (parking_perigee + target['perigee'])
+    speed = np.sqrt(model.mu * (2. / target['perigee'] - 1. / semimajor))
+    parking_state = ca.DM(np.r_[target['perigee'] * radial,
+                               speed * np.cross(normal, radial), 1.])
+    return _orbit_burn_quantities(model, parking_state, target)
+
+
+def _landing_guess_control(model, minimum_thrust, maximum_thrust, gain):
+    def control(state):
+        speed = max(np.linalg.norm(state[2:4]), 1.)
+        height = float(model.local_to_alt(state))
+        safe_height = max(height, 1.)
+        gravity_direction = -np.array([state[0], model.R0 + state[1]])
+        gravity_direction /= np.linalg.norm(gravity_direction)
+        gravity = model.g0 * (model.R0 / (model.R0 + state[1]))**2
+        thrust = np.dot(gravity_direction, state[2:4]) / speed * gravity
+        if speed > 30. and height > 50.:
+            thrust += 3. * speed**2 / (2. * safe_height)
+        if height < 50.:
+            thrust += 0.5 * (speed - 0.5)**2 / safe_height
+        return [np.clip(gain * thrust * state[4] / model.scaleU[0],
+                        minimum_thrust, maximum_thrust)]
+    return control
+
+
+def _fit_recovery_guess(model, boostback_model, initial_state, seed, strategy,
+                        thrust_limits, residuals, reentry_altitude_min=70000.):
+    """Fit recovery durations, thrust and boostback direction as one propagated guess."""
+    minimum_landing, maximum_landing, maximum_reentry = thrust_limits
+    keys = ['ballistic_time', 'reentry_time', 'reentry_thrust', 'coast_time',
+            'landing_time', 'landing_gain']
+    lower = [200., .1, model.FirstStage_MinThrust_Factor, .1, .1 * model.N, .1]
+    upper = [max(600., seed['ballistic_time'] * 1.5),
+             max(120., seed['reentry_time'] * 1.5), maximum_reentry,
+             max(250., seed['coast_time'] * 1.5), max(120., seed['landing_time'] * 1.5), 3.]
+    scales = [100., 10., .1, 20., 10., .5]
+    if strategy == 'RTLS':
+        keys += ['boostback_time', 'boostback_angle']
+        lower += [1., -np.pi/2.]
+        upper += [max(120., seed['boostback_time'] * 1.5), np.pi/2.]
+        scales += [20., .1]
+    initial = np.clip([seed[key] for key in keys], lower, upper)
+    best = _BestInitialGuess()
+    seed_residuals = np.asarray(residuals(seed), dtype=float).reshape(-1)
+    best.consider(seed_residuals, seed)
+
+    def evaluate(parameters):
+        candidate = dict(zip(keys, parameters))
+        state = model.scale_x(initial_state)
+        if strategy == 'RTLS':
+            angle = candidate['boostback_angle']
+            candidate['boostback_control'] = np.array([-np.cos(angle), -np.sin(angle)])
+            candidate['boostback_state'] = boostback_model.dynamics_kp1_M20(
+                boostback_model.scale_x(initial_state), candidate['boostback_control'],
+                candidate['boostback_time'] / boostback_model.scaleT)
+            state = model.scale_x(boostback_model.unscale_x(candidate['boostback_state']))
+        candidate['before_reentry'] = model.dynamics_kp1_M50(
+            state, 0., candidate['ballistic_time'] / model.scaleT)
+        candidate['after_reentry'] = model.dynamics_kp1_M20(
+            candidate['before_reentry'], candidate['reentry_thrust'], candidate['reentry_time'] / model.scaleT)
+        candidate['before_landing'] = model.dynamics_kp1_M20(
+            candidate['after_reentry'], 0., candidate['coast_time'] / model.scaleT)
+        for name in ('before_reentry', 'after_reentry', 'before_landing'):
+            physical = np.asarray(model.unscale_x(candidate[name])).reshape(-1)
+            if not np.isfinite(physical).all() or physical[-1] <= 0:
+                raise _IncompleteInitialGuess('Recovery fit', 0)
+        candidate['landing_states'], candidate['landing_controls'] = _rollout_initial_guess(
+            model, candidate['before_landing'], model.N,
+            candidate['landing_time'] / model.N / model.scaleT,
+            _landing_guess_control(model, minimum_landing, maximum_landing, candidate['landing_gain']),
+            'Recovery fit', stop_below_ground=True)
+        values = np.asarray(residuals(candidate), dtype=float).reshape(-1)
+        if not np.isfinite(values).all():
+            raise _IncompleteInitialGuess('Recovery fit', model.N)
+        # Preserve the reentry altitude bound already respected by the seed.
+        # Penalized trial points may cross it while the fit searches for a solution.
+        if float(model.local_to_alt(model.unscale_x(candidate['before_reentry']))) >= reentry_altitude_min:
+            best.consider(values, candidate)
+        return values
+
+    def objective(parameters):
+        try:
+            return evaluate(parameters)
+        except (_IncompleteInitialGuess, RuntimeError, FloatingPointError):
+            return np.full(seed_residuals.size, 1e6)
+
+    # Every evaluation is a complete rollout; the final optimizer iterate need
+    # not be the best guess. Preserve the best finite candidate including the seed.
+    initial = np.asarray(initial, dtype=float)
+    lower, upper, scales = map(np.asarray, (lower, upper, scales))
+    free = upper > lower
+    def reduced_objective(parameters):
+        full = initial.copy()
+        full[free] = parameters
+        return objective(full)
+    if free.any():
+        least_squares(reduced_objective, initial[free], bounds=(lower[free], upper[free]),
+                      x_scale=scales[free], max_nfev=60, ftol=1e-5, xtol=1e-5, gtol=1e-5)
+    if best.candidate is None:
+        raise ValueError('Recovery initial guess could not generate a complete finite trajectory.')
+    return best.candidate
 
 
 class _IncompleteInitialGuess(ValueError):
@@ -57,6 +248,23 @@ class InitialGuessConstraintDiagnostics:
         self.tolerance = tolerance
         self.constraints = {}
         self.next_index = opti.ng
+        self.score_functions = {}
+
+    def residual_function(self, phases, inputs, physical_tolerance=None):
+        entries = [entry for phase in phases for entry in self.constraints[phase]]
+        indices = [entry[0] for entry in entries]
+        values, lower, upper = self.opti.g[indices], self.opti.lbg[indices], self.opti.ubg[indices]
+        residuals = ca.if_else(lower == upper, values - lower,
+                              ca.fmax(lower - values, ca.fmax(values - upper, 0.)))
+        if physical_tolerance is not None:
+            residuals *= ca.DM([entry[2] / physical_tolerance(entry) for entry in entries])
+        return ca.Function('initial_guess_residuals', inputs, [residuals])
+
+    def residuals(self, phase):
+        if phase not in self.score_functions:
+            self.score_functions[phase] = self.residual_function([phase], [self.opti.x])
+        initial = self.opti.debug.value(self.opti.x, self.opti.initial())
+        return np.asarray(self.score_functions[phase](initial)).reshape(-1)
 
     def add(self, phase, name, constraint, scale=1., unit='dimensionless', components=None, squared=False):
         self.opti.subject_to(constraint)
@@ -350,64 +558,10 @@ class LV_Optimization(VLType):
 
         # set the final state constraints (Parking orbit)
         x3f = self.eci.unscale_x(x3[:,self.eci.N[1]])
-        h = ca.cross(x3f[0:3], x3f[3:6])
-        i = ca.acos(ca.fmin(ca.fmax(h[2] / ca.norm_2(h), -1.0), 1.0))
-        e = ca.cross(x3f[3:6], h) / (self.eci.mu) - x3f[0:3] / ca.norm_2(x3f[0:3])
-        eps = 0.5*ca.sumsqr(x3f[3:6]) - self.eci.mu / ca.norm_2(x3f[0:3])
-        a = -self.eci.mu / (2.0*eps)
-        apogee = a * (1.0 + ca.norm_2(e))
-        perigee = a * (1.0 - ca.norm_2(e))
+        orbit_burn = _orbit_burn_quantities(self.eci, x3f, Target_Orbit)
+        apogee, perigee = orbit_burn['apogee'], orbit_burn['perigee']
+        propellent_mass_for_final_dv = orbit_burn['reserve']
 
-        # The optimzed orbit is a parking orbit where:
-        # 1. The apogee is the same as the target orbit perigee
-        # 2. The perigee is at least 100 km above the earth surface
-        # 3. Need to calculate the propellent mass needed to reach the target orbit - raise the current perigee to the target orbit apogee
-        # 3a. This manuever is done in the current apogee (which is the same as the target orbit perigee)
-
-        v_apogee = ca.sqrt(self.eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / a))
-        v_desired = ca.sqrt(self.eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["a"]))
-        # propellent_mass_for_final_dv = x3f[6] * (1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / ((0.99*self.eci.SecondStage_Vac_Isp) * self.eci.g0)))
-        
-        # Current orbital-plane normal.
-        n = h / ca.norm_2(h)
-        cos_i_target = np.cos(Target_Orbit["i"])
-
-        # At apogee, the position direction is opposite to e.
-        # Only its squared vertical component is needed.
-        e_squared = ca.sumsqr(e)
-        rhat_z_squared = ca.if_else(e_squared > 1e-16, e[2]**2 / ca.fmax(e_squared, 1e-16), 0.0)  # Circular orbit: choose an equatorial crossing.
-
-        # An attainable final plane must contain the burn position.
-        rho_squared = ca.fmax(1.0 - rhat_z_squared, 0.0)
-        target_margin = rho_squared - cos_i_target**2
-
-        # Minimum plane rotation, allowing final RAAN to vary.
-        normal_vertical = n[2]
-        tangent_vertical_squared = ca.fmax(rho_squared - normal_vertical**2, 0.0)
-
-        cos_plane_change = (normal_vertical * cos_i_target + ca.sqrt(tangent_vertical_squared * ca.fmax(target_margin, 0.0))) / ca.fmax(rho_squared, 1e-16)
-
-        # At a geographic pole, every possible orbit is polar.
-        cos_plane_change = ca.if_else(rho_squared > 1e-16, cos_plane_change, 1.0)
-        cos_plane_change = ca.fmin(ca.fmax(cos_plane_change, -1.0), 1.0)
-
-        delta_v_final = ca.sqrt((v_desired - v_apogee)**2 + 2.0 * v_apogee * v_desired * (1.0 - cos_plane_change))
-
-        exhaust_velocity = (0.99 * self.eci.SecondStage_Vac_Isp * self.eci.g0)
-
-        # If target inclination is geometrically unreachable at apogee,
-        # zero remaining mass makes the existing mass constraint reject
-        # this candidate. No additional subject_to constraint is added.
-        mass_after_final_burn = ca.if_else(target_margin >= 0.0, x3f[6] * ca.exp(-delta_v_final / exhaust_velocity), 0.0)
-
-        propellent_mass_for_final_dv = (x3f[6] - mass_after_final_burn)
-       
-        # v_final_apogee = ca.sqrt(self.rocket_eci.mu * (1.0 / Target_Orbit["a"]))
-        # dv_for_inclination_fix = 2 * v_apogee * ca.sin(Target_Orbit["i"]/2.0)
-        # propellent_mass_for_inclination_fix = (x3[6,self.rocket_eci.N[1]]-propellent_mass_for_final_dv) * (1.0 - ca.exp(-ca.fabs(dv_for_inclination_fix) / (self.rocket_eci.SecondStage_Vac_Isp * self.rocket_eci.g0)))
-
-
-        # propellent_mass_for_final_dv = 0.0
         x3f_mass_scaled = (self.eci.SecondStage_EmptyMass + payload_mass + propellent_mass_for_final_dv) / self.eci.scaleX[6]
         diagnostics.add(phase3, 'Final mass including orbit-burn reserve',
                         x3[6,self.eci.N[1]] >= x3f_mass_scaled, self.eci.scaleX[6], 'kg')
@@ -608,16 +762,13 @@ class LV_Optimization(VLType):
         x1_guess = np.zeros((self.booster.nx, self.booster.N+1))
         u1_guess = np.zeros((self.booster.nu, self.booster.N))
         dt1_guess = (150.0-init_time) / self.booster.N / self.booster.scaleT
-        LaunchAz_guess = np.pi/2.0 - Target_Orbit["i"]
 
-        a_parking = 0.5 * (150.0*1e3 + self.eci.R0 + Target_Orbit["perigee"])
-        v_apogee = ca.sqrt(self.eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / a_parking))
-        v_desired = ca.sqrt(self.eci.mu * (2.0 / Target_Orbit["perigee"] - 1.0 / Target_Orbit["a"]))
-        v_parking = ca.sqrt(self.eci.mu * (2.0 / (150.0*1e3 + self.eci.R0) - 1.0 / a_parking))
+        parking_radius = self.eci.R0 + self.eci.ParkingOrbit_PerigeeAlt
+        a_parking = 0.5 * (parking_radius + Target_Orbit["perigee"])
+        v_parking = ca.sqrt(self.eci.mu * (2.0 / parking_radius - 1.0 / a_parking))
         
 
         if RecoveryStrategy == 'RTLS':
-            v3_0_guess = 2300.0
             v3_0_guess = 1500.0
         elif RecoveryStrategy == 'ASDS':
             v3_0_guess = 2000.0
@@ -625,15 +776,19 @@ class LV_Optimization(VLType):
         else:
             v3_0_guess = 2700.0
 
+        nominal_separation = np.array([0., self.eci.LaunchAltitude, v3_0_guess, 0., 1.])
+        LaunchAz_guess = _initial_launch_azimuth(self.eci, nominal_separation, Target_Orbit['i'])
+        nominal_burn = _nominal_orbit_burn(self.eci, nominal_separation, LaunchAz_guess, Target_Orbit)
+        final_burn_ratio = float(nominal_burn['delta_v']) / (0.99 * self.eci.SecondStage_Vac_Isp * self.eci.g0)
+
         if payload_mass_predefined <= 0.0:
-            alpha = ca.exp(ca.fabs(v_parking-v3_0_guess) / (self.eci.SecondStage_Vac_Isp * self.eci.g0))
+            alpha = ca.exp(ca.fabs(v_parking-v3_0_guess) / (self.eci.SecondStage_Vac_Isp * self.eci.g0) + final_burn_ratio)
             if type(init_guess) == float:
-                payload_mass_guess = init_guess*(self.eci.SecondStage_FullMass - alpha*self.eci.SecondStage_EmptyMass)/(alpha-1.0)
+                payload_mass_guess = max(0., float(init_guess*(self.eci.SecondStage_FullMass - alpha*self.eci.SecondStage_EmptyMass)/(alpha-1.0)))
             else:
                 payload_mass_guess = init_guess['payload_mass']
         else:
             payload_mass_guess = payload_mass_predefined
-        m3_final = (self.eci.SecondStage_EmptyMass + payload_mass_guess)*(1.0 - ca.exp(-ca.fabs(v_apogee - v_desired) / (self.eci.SecondStage_Vac_Isp * self.eci.g0)))
 
         init_acc_guess = self.booster.FirstStage_SL_Thrust / (self.booster.LV_total_mass + payload_mass_guess) - self.booster.g0 * (self.booster.R0 / (self.booster.R0 + self.booster.LaunchAltitude))**2
         init_vz_guess = init_acc_guess * init_time
@@ -649,8 +804,13 @@ class LV_Optimization(VLType):
             dm = self.booster.FirstStagePropellentMass * 0.035
         else:    
             dm = 0.0
+        separation_mass_target = float(self.booster.EmptyFirstStageMass +
+                                       self.eci.SecondStage_FullMass + payload_mass_guess + dm)
 
         x1_guess[:,0] = self.booster.scale_x(x0_guess).full().flatten()
+        if type(payload_mass_scaled) == ca.MX:
+            opti.set_initial(payload_mass_scaled, payload_mass_guess/self.booster.scaleX[4])
+        best_stage1 = _BestInitialGuess()
         iter=0
         while iter < 30:
             for k in range(self.booster.N):
@@ -679,21 +839,30 @@ class LV_Optimization(VLType):
             alt_N1 = self.booster.local_to_alt(xN)
             Q = 0.5 * (xN[2]**2 + xN[3]**2) * self.atmosphere.rho_fun(alt_N1)
 
-            # Keep the last fully propagated duration when the search is exhausted.
+            if np.isfinite(x1_guess).all() and np.isfinite(u1_guess).all() and (x1_guess[4] > 0).all():
+                opti.set_initial(dt1, dt1_guess)
+                opti.set_initial(x1, x1_guess)
+                opti.set_initial(u1, u1_guess)
+                reserve_shortfall = max(separation_mass_target - float(xN[4]), 0.) / self.booster.scaleX[4]
+                best_stage1.consider(np.r_[diagnostics.residuals(phase1), reserve_shortfall],
+                                    (x1_guess, u1_guess, float(dt1_guess)))
+
+            # Each complete candidate is scored before changing its duration.
             if iter == 29:
                 break
             if Q > self.booster.FirstStage_StageSeparationMaxDynamicPressure:
                 dt1_guess += 0.5 / self.booster.N / self.booster.scaleT
                 iter += 1
-            elif xN[4] <= self.booster.FirstStage_EmptyMass + payload_mass_guess + dm:
+            elif xN[4] <= separation_mass_target:
                 dt1_guess = max(0.1/self.booster.scaleT,
                                 dt1_guess - 1.0 / self.booster.N / self.booster.scaleT)
                 iter += 1
             else:
                 break
 
-        if type(payload_mass_scaled) == ca.MX:
-            opti.set_initial(payload_mass_scaled, payload_mass_guess/self.booster.scaleX[4])
+        if best_stage1.candidate is None:
+            raise ValueError('First-stage initial guess could not generate a complete finite trajectory.')
+        x1_guess, u1_guess, dt1_guess = best_stage1.candidate
         opti.set_initial(dt1, dt1_guess)
         opti.set_initial(x1, x1_guess)
         opti.set_initial(u1, u1_guess)
@@ -704,6 +873,11 @@ class LV_Optimization(VLType):
         x2_guess = np.zeros((self.eci.nx, self.eci.N[0]+1))
         u2_guess = np.zeros((self.eci.nu, self.eci.N[0]))
         x1f_guess = self.booster.unscale_x(x1_guess[:,self.booster.N])
+        LaunchAz_guess = _initial_launch_azimuth(self.eci, x1f_guess, Target_Orbit['i'])
+        nominal_burn = _nominal_orbit_burn(self.eci, x1f_guess, LaunchAz_guess, Target_Orbit)
+        final_burn_ratio = float(nominal_burn['delta_v']) / (0.99 * self.eci.SecondStage_Vac_Isp * self.eci.g0)
+        m3_final = float(self.eci.SecondStage_EmptyMass + payload_mass_guess) * np.expm1(final_burn_ratio)
+        opti.set_initial(LaunchAz, LaunchAz_guess)
         pos, vel = self.eci.local_to_eci_func(
             ca.vertcat(x1f_guess[0], 0.0, x1f_guess[1]),
             ca.vertcat(x1f_guess[2], 0.0, x1f_guess[3]), LaunchAz_guess)
@@ -713,6 +887,7 @@ class LV_Optimization(VLType):
             self.eci.scale_x(x2_init), 1e-8*np.ones(self.eci.nu),
             self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT).full().flatten()
         alt2_initial_guess = self.eci.eci_to_alt(self.eci.unscale_x(x2_guess[:,0]))
+        best_stage2 = _BestInitialGuess()
         iter=0
         while iter < 20:
             for k in range(self.eci.N[0]):
@@ -721,13 +896,20 @@ class LV_Optimization(VLType):
                 x2_guess[:,k+1] = self.eci.dynamics_kp1(x2_guess[:,k], u2_guess[:,k], dt2_guess).full().flatten()
             xN = self.eci.unscale_x(x2_guess[:,self.eci.N[0]])
             alt = self.eci.eci_to_alt(xN)
+            if np.isfinite(x2_guess).all() and np.isfinite(u2_guess).all() and (x2_guess[6] > 0).all():
+                opti.set_initial(dt2, dt2_guess)
+                opti.set_initial(x2, x2_guess)
+                opti.set_initial(u2, u2_guess)
+                best_stage2.consider(diagnostics.residuals(phase2), (x2_guess, u2_guess, float(dt2_guess)))
             if alt >= self.eci.FairingSeparationAltitude or iter == 19:
                 break
             else:
                 dt2_guess += 4.0/self.eci.N[0]/self.eci.scaleT
                 iter += 1
 
-        opti.set_initial(LaunchAz, LaunchAz_guess)
+        if best_stage2.candidate is None:
+            raise ValueError('Second-stage initial guess could not generate a complete finite trajectory.')
+        x2_guess, u2_guess, dt2_guess = best_stage2.candidate
         opti.set_initial(dt2, dt2_guess)
         opti.set_initial(x2, x2_guess)
         opti.set_initial(u2, u2_guess)
@@ -738,7 +920,7 @@ class LV_Optimization(VLType):
         x3_initial = x2_guess[:,-1].copy()
         x3_initial[6] -= self.eci.FairingMass / self.eci.scaleX[6]
         minimum_stage3_mass = float(m3_final + self.eci.SecondStage_EmptyMass + payload_mass_guess)
-        last_complete_stage3 = None
+        best_stage3 = _BestInitialGuess()
         iter=0
 
         alpha3_init = 0.0
@@ -765,7 +947,10 @@ class LV_Optimization(VLType):
                                 dt3_guess * max(0.1, min(0.9, exc.step / self.eci.N[1])))
                 iter += 1
                 continue
-            last_complete_stage3 = (x3_guess, u3_guess, float(dt3_guess))
+            opti.set_initial(dt3, dt3_guess)
+            opti.set_initial(x3, x3_guess)
+            opti.set_initial(u3, u3_guess)
+            best_stage3.consider(diagnostics.residuals(phase3), (x3_guess, u3_guess, float(dt3_guess)))
             xkp1 = self.eci.unscale_x(x3_guess[:,-1]).full().flatten()
             h_guess = np.cross(xkp1[0:3], xkp1[3:6])
             e_guess = ca.cross(xkp1[3:6], h_guess) / self.eci.mu - xkp1[0:3] / ca.norm_2(xkp1[0:3])
@@ -790,9 +975,9 @@ class LV_Optimization(VLType):
                 iter += 1
             else:
                 break
-        if last_complete_stage3 is None:
+        if best_stage3.candidate is None:
             raise ValueError('Second-stage initial guess could not generate a complete finite trajectory.')
-        x3_guess, u3_guess, dt3_guess = last_complete_stage3
+        x3_guess, u3_guess, dt3_guess = best_stage3.candidate
         opti.set_initial(dt3, dt3_guess)
         opti.set_initial(x3, x3_guess)
         opti.set_initial(u3, u3_guess)
@@ -812,29 +997,17 @@ class LV_Optimization(VLType):
                 dt4_boostback_guess = 22.0 / self.boostback.scaleT
                 x4_boostback_guess = np.zeros((self.boostback.nx, 1))
                 u4_boostback_guess = np.zeros((self.boostback.nu, 1))
-                iter = 0
-                while iter < 50:
-                    u4_boostback_guess[0] = -np.cos(np.deg2rad(-10.0))
-                    u4_boostback_guess[1] = -np.sin(np.deg2rad(-10.0))
-                    x4_boostback_guess = self.boostback.dynamics_kp1_M20(self.boostback.scale_x(x4_0_guess), u4_boostback_guess, dt4_boostback_guess).full().flatten()
-                    x4_boostback_guess_unscaled = self.boostback.unscale_x(x4_boostback_guess)
-                    alt = self.booster.local_to_alt(x4_boostback_guess_unscaled)
-                    vel = np.linalg.norm(x4_boostback_guess_unscaled[2:4])
-                    t_bal = (-x4_boostback_guess_unscaled[3]  + np.sqrt(x4_boostback_guess_unscaled[3]**2 +2*self.boostback.g0*alt))/(0.5*self.boostback.g0)
-                    x_bal = x4_boostback_guess_unscaled[0] + x4_boostback_guess_unscaled[2]*400
-                    if iter == 49:
-                        break
-                    if abs(x_bal) > 100.0:
-                        dt4_boostback_guess = max(1./self.boostback.scaleT,
-                            dt4_boostback_guess + np.clip(x_bal / max(abs(float(x4_boostback_guess_unscaled[2])), 1.)/400, -1.0, 1.0) / self.boostback.scaleT)
-                        iter += 1
-                    else:
-                        break
+                # A short boostback is only a seed. Its endpoint is fitted using
+                # the full return trajectory below, rather than vx * 400 seconds.
+                boostback_angle = np.deg2rad(-10.)
+                u4_boostback_guess[:,0] = [-np.cos(boostback_angle), -np.sin(boostback_angle)]
+                x4_boostback_guess = self.boostback.dynamics_kp1_M20(
+                    self.boostback.scale_x(x4_0_guess), u4_boostback_guess, dt4_boostback_guess)
+                x4_boostback_guess_unscaled = self.boostback.unscale_x(x4_boostback_guess)
 
                 opti.set_initial(dt4_boostback, dt4_boostback_guess)
                 opti.set_initial(x4_boostback, x4_boostback_guess)
                 opti.set_initial(u4_boostback, u4_boostback_guess)
-                diagnostics.report(boostback)
 
             # calculate the initial guess for self.booster return
             dt4_ballistic_guess = 300 / self.rocket_return.scaleT
@@ -859,7 +1032,6 @@ class LV_Optimization(VLType):
             
             opti.set_initial(dt4_ballistic, dt4_ballistic_guess)
             opti.set_initial(x4_before_reentry, x4_before_reentry_guess)
-            diagnostics.report(ballistic)
 
             u4_reentry_guess = reentry_thrust_max
             dt4_reentry_guess = 1.0 / self.rocket_return.scaleT
@@ -883,7 +1055,6 @@ class LV_Optimization(VLType):
             opti.set_initial(dt4_reentry, dt4_reentry_guess)
             opti.set_initial(x4_after_reentryburn, x4_after_reentry_guess)
             opti.set_initial(u4_reentry, u4_reentry_guess)
-            diagnostics.report(reentry)
 
             # after reentry burn before landing burn
             iter = 0
@@ -905,7 +1076,6 @@ class LV_Optimization(VLType):
 
             opti.set_initial(dt4_before_landing, dt4_before_landing_guess)
             opti.set_initial(x4_before_landing, x4_before_landing_guess)
-            diagnostics.report(coast)
 
             # initial guess for the landing burn
             vel = np.linalg.norm(x4_before_landing_guess_unscaled[2:4])
@@ -916,22 +1086,10 @@ class LV_Optimization(VLType):
                 vel/max(landing_deceleration, 1.) / self.rocket_return.N / self.rocket_return.scaleT)
             iter = 0
             thrust_factor = 1.0
-            last_complete_landing = None
+            best_landing = _BestInitialGuess()
             while iter < 20:
-                def landing_control(xk):
-                    speed = max(np.linalg.norm(xk[2:4]), 1.)
-                    height = float(self.rocket_return.local_to_alt(xk))
-                    safe_height = max(height, 1.)
-                    g_vec = -np.array([xk[0], self.rocket_return.R0 + xk[1]])
-                    g_vec /= np.linalg.norm(g_vec)
-                    g = self.rocket_return.g0 * (self.rocket_return.R0/(self.rocket_return.R0 + xk[1]))**2
-                    g_v = np.dot(g_vec, xk[2:4])/speed * g
-                    thrust = g_v * xk[4]/self.rocket_return.scaleU[0]
-                    if speed > 30.0 and height > 50.0:
-                        thrust += (3*speed**2)/(2*safe_height)*xk[4]/self.rocket_return.scaleU[0]
-                    if height < 50.0:
-                        thrust += 0.5*(speed-0.5)**2/safe_height*xk[4]/self.rocket_return.scaleU[0]
-                    return [np.clip(thrust_factor * thrust, landing_thrust_min, landing_thrust_max)]
+                landing_control = _landing_guess_control(
+                    self.rocket_return, landing_thrust_min, landing_thrust_max, thrust_factor)
 
                 try:
                     x4_landing_guess, u4_landing_guess = _rollout_initial_guess(
@@ -942,7 +1100,11 @@ class LV_Optimization(VLType):
                         dt4_landing_guess * max(0.1, min(0.9, exc.step / self.rocket_return.N)))
                     iter += 1
                     continue
-                last_complete_landing = (x4_landing_guess, u4_landing_guess, float(dt4_landing_guess))
+                opti.set_initial(dt4_landing, dt4_landing_guess)
+                opti.set_initial(x4_landing, x4_landing_guess)
+                opti.set_initial(u4_landing, u4_landing_guess)
+                best_landing.consider(diagnostics.residuals(landing),
+                                     (x4_landing_guess, u4_landing_guess, float(dt4_landing_guess), thrust_factor))
                 xkp1 = self.rocket_return.unscale_x(x4_landing_guess[:,-1]).full().flatten()
                 alt = self.rocket_return.local_to_alt(xkp1)
                 vel = np.linalg.norm(xkp1[2:4])
@@ -960,13 +1122,89 @@ class LV_Optimization(VLType):
                     iter += 1
                 else:
                     break
-            if last_complete_landing is None:
+            if best_landing.candidate is None:
                 raise ValueError('Landing initial guess could not generate a complete finite trajectory.')
-            x4_landing_guess, u4_landing_guess, dt4_landing_guess = last_complete_landing
+            x4_landing_guess, u4_landing_guess, dt4_landing_guess, thrust_factor = best_landing.candidate
             opti.set_initial(dt4_landing, dt4_landing_guess)
             opti.set_initial(x4_landing, x4_landing_guess)
             opti.set_initial(u4_landing, u4_landing_guess)
-            diagnostics.report(landing)
+
+            recovery_phases = ([boostback] if RecoveryStrategy == 'RTLS' else []) + [ballistic, reentry, coast, landing]
+            recovery_inputs = [x4_0, dt4_ballistic, dt4_reentry, u4_reentry, dt4_before_landing,
+                               dt4_landing, x4_before_reentry, x4_after_reentryburn,
+                               x4_before_landing, x4_landing, u4_landing]
+            if RecoveryStrategy == 'RTLS':
+                recovery_inputs += [dt4_boostback, x4_boostback, u4_boostback]
+
+            def recovery_tolerance(entry):
+                _, name, _, unit, _ = entry
+                if name in ('Final altitude target', 'Final local height target'):
+                    return 10.  # meters
+                if name == 'Final speed upper bound':
+                    return 10.  # m/s
+                if unit == 'kPa':
+                    return self.rocket_return.Booster_MaxDynamicPressure / 1000.
+                if unit == 'kW/m²':
+                    return self.rocket_return.Booster_MaxHeatFlux / 1000.
+                return {'m': 1000., 'm/s': 100., 'kg': 1000., 's': 10.}.get(unit, 1.)
+
+            recovery_residual_function = diagnostics.residual_function(
+                recovery_phases, [opti.x], recovery_tolerance)
+            recovery_indices = ca.Function('recovery_guess_indices', [opti.x],
+                                           [ca.vertcat(*[ca.vec(variable) for variable in recovery_inputs])])
+            recovery_indices = np.asarray(recovery_indices(np.arange(opti.nx))).reshape(-1).astype(int)
+            recovery_reference = np.asarray(opti.debug.value(opti.x, opti.initial())).reshape(-1)
+
+            def recovery_residuals(candidate):
+                values = [return_model.scale_x(x4_0_guess),
+                          candidate['ballistic_time'] / self.rocket_return.scaleT,
+                          candidate['reentry_time'] / self.rocket_return.scaleT,
+                          candidate['reentry_thrust'],
+                          candidate['coast_time'] / self.rocket_return.scaleT,
+                          candidate['landing_time'] / self.rocket_return.N / self.rocket_return.scaleT,
+                          candidate['before_reentry'], candidate['after_reentry'],
+                          candidate['before_landing'], candidate['landing_states'], candidate['landing_controls']]
+                if RecoveryStrategy == 'RTLS':
+                    values += [candidate['boostback_time'] / self.boostback.scaleT,
+                               candidate['boostback_state'], candidate['boostback_control']]
+                packed = recovery_reference.copy()
+                packed[recovery_indices] = np.concatenate(
+                    [np.asarray(value, dtype=float).reshape(-1, order='F') for value in values])
+                return recovery_residual_function(packed)
+
+            recovery_seed = {
+                'ballistic_time': float(dt4_ballistic_guess) * self.rocket_return.scaleT,
+                'reentry_time': float(dt4_reentry_guess) * self.rocket_return.scaleT,
+                'reentry_thrust': float(u4_reentry_guess),
+                'coast_time': float(dt4_before_landing_guess) * self.rocket_return.scaleT,
+                'landing_time': float(dt4_landing_guess) * self.rocket_return.N * self.rocket_return.scaleT,
+                'landing_gain': thrust_factor, 'before_reentry': x4_before_reentry_guess,
+                'after_reentry': x4_after_reentry_guess, 'before_landing': x4_before_landing_guess,
+                'landing_states': x4_landing_guess, 'landing_controls': u4_landing_guess}
+            if RecoveryStrategy == 'RTLS':
+                recovery_seed.update(boostback_time=float(dt4_boostback_guess) * self.boostback.scaleT,
+                                     boostback_angle=boostback_angle,
+                                     boostback_state=x4_boostback_guess, boostback_control=u4_boostback_guess)
+            recovery_guess = _fit_recovery_guess(
+                self.rocket_return, self.boostback, x4_0_guess, recovery_seed, RecoveryStrategy,
+                (landing_thrust_min, landing_thrust_max, reentry_thrust_max), recovery_residuals,
+                reentry_altitude_min=reentry_altitude_min)
+            opti.set_initial(dt4_ballistic, recovery_guess['ballistic_time'] / self.rocket_return.scaleT)
+            opti.set_initial(dt4_reentry, recovery_guess['reentry_time'] / self.rocket_return.scaleT)
+            opti.set_initial(u4_reentry, recovery_guess['reentry_thrust'])
+            opti.set_initial(dt4_before_landing, recovery_guess['coast_time'] / self.rocket_return.scaleT)
+            opti.set_initial(dt4_landing, recovery_guess['landing_time'] / self.rocket_return.N / self.rocket_return.scaleT)
+            opti.set_initial(x4_before_reentry, recovery_guess['before_reentry'])
+            opti.set_initial(x4_after_reentryburn, recovery_guess['after_reentry'])
+            opti.set_initial(x4_before_landing, recovery_guess['before_landing'])
+            opti.set_initial(x4_landing, recovery_guess['landing_states'])
+            opti.set_initial(u4_landing, recovery_guess['landing_controls'])
+            if RecoveryStrategy == 'RTLS':
+                opti.set_initial(dt4_boostback, recovery_guess['boostback_time'] / self.boostback.scaleT)
+                opti.set_initial(x4_boostback, recovery_guess['boostback_state'])
+                opti.set_initial(u4_boostback, recovery_guess['boostback_control'])
+            for phase in recovery_phases:
+                diagnostics.report(phase)
 
         if type(init_guess) == dict:
             if type(payload_mass_scaled) == ca.MX:

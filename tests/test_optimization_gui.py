@@ -54,6 +54,7 @@ class DispersionFormTests(unittest.TestCase):
                 app.figures = {'Booster': Figure()}
                 app.canvases = {'Booster': Mock()}
                 app.update_case_labels, app.schedule_save = Mock(), Mock()
+                app.render_sensitivity_report = Mock()
                 def draw(figure, phase, *args, **kwargs):
                     make_plot_axes(figure, phase)
                 with patch('OptimizationGUI.draw_phase', side_effect=draw), \
@@ -428,6 +429,79 @@ class ResultRenderingTests(unittest.TestCase):
             root.destroy()
         self.addCleanup(cleanup)
         return OptimizationApp(root, output_root=directory)
+
+    def test_sensitivity_tab_restores_reports_steps_and_marks_changed_baselines(self):
+        from PayloadSensitivity import compute_sensitivities
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(directory)
+            app.payload_mass.set('1234')
+            app.site_variables['latitude'].set('34')
+            request = app.sensitivity_form_request()
+            self.assertEqual(request['payload_mass_predefined'], -1)
+            app.cases[0].sensitivity_settings = {'SecondStageIsp': .01}
+            solve = Mock(side_effect=[{'success': True, 'payload_mass': 10000},
+                                      {'success': True, 'payload_mass': 9900},
+                                      {'success': True, 'payload_mass': 10100}])
+            report = compute_sensitivities(request, app.cases[0].sensitivity_settings, solve=solve)
+            app.cases[0].sensitivity_report = report
+            app.render_sensitivity_report()
+            app.notebook.select(app.tabs['Sensitivity'])
+            self.assertEqual(len(app.sensitivity_table.get_children()), 1)
+            self.assertIn('10,000.00 kg', app.sensitivity_summary.get())
+            self.assertTrue(app.save_state())
+            restored = self.make_app(directory)
+            self.assertEqual(restored.cases[0].sensitivity_report, report)
+            self.assertEqual(restored.cases[0].sensitivity_settings, {'SecondStageIsp': .01})
+            self.assertEqual(restored.notebook.tab(restored.notebook.select(), 'text'), 'Sensitivity')
+            self.assertEqual(len(restored.sensitivity_table.get_children()), 1)
+            restored.orbit_variables['inclination'].set('70')
+            self.assertIn('Inputs changed', restored.sensitivity_summary.get())
+            restored.select_case(1)
+            self.assertEqual(restored.sensitivity_table.get_children(), ())
+            restored.select_case(0)
+            self.assertEqual(len(restored.sensitivity_table.get_children()), 1)
+            restored.reset_gui()
+            self.assertIsNone(restored.cases[0].sensitivity_report)
+            self.assertEqual(restored.sensitivity_table.get_children(), ())
+
+    def test_sensitivity_gui_cancellation_retains_partial_report_and_original_case(self):
+        from PayloadSensitivity import compute_sensitivities
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(directory)
+            case = app.cases[0]
+            case.result = self.results['EXP']
+            case.request = self.requests['EXP']
+            original = case.result
+            case.sensitivity_settings = {'SecondStageIsp': .01}
+            report = compute_sensitivities(app.sensitivity_form_request(), case.sensitivity_settings,
+                                           solve=Mock(side_effect=[{'success': True, 'payload_mass': 10000},
+                                                                   {'success': True, 'payload_mass': 9900},
+                                                                   {'success': True, 'payload_mass': 10100}]))
+            report['termination'] = 'Running'
+            report['evaluations'] = 2
+            report['rows'][0].update(plus_payload=None, derivative=None, delta_payload=None,
+                                     percent=None, status='Running')
+            process = Mock(poll=Mock(return_value=None))
+
+            def start(command, **kwargs):
+                (Path(command[-1]) / 'sensitivity_report.json').write_text(json.dumps(report))
+                return process
+
+            with patch('OptimizationGUI.subprocess.Popen', side_effect=start):
+                app.sensitivity_button.invoke()
+            self.assertEqual(str(app.sensitivity_button['state']), 'disabled')
+            self.assertIn('2/3 solves', app.status.get())
+            app.cancel()
+            app.root.after_cancel(app.poll_id)
+            process.poll.return_value = -15
+            app.poll()
+            self.assertIs(case.result, original)
+            self.assertEqual(case.sensitivity_report['rows'][0]['status'], 'Cancelled')
+            self.assertIsNone(case.sensitivity_report['rows'][0]['derivative'])
+            self.assertIn('partial results', case.sensitivity_report['termination'])
+            self.assertEqual(str(app.sensitivity_button['state']), 'normal')
+            restored = self.make_app(directory)
+            self.assertEqual(restored.cases[0].sensitivity_report, case.sensitivity_report)
 
     def test_custom_vehicle_selection_and_library_survive_restart(self):
         from VehicleDefinitions import vehicle_editor_values, vehicle_from_editor

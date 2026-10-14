@@ -23,6 +23,7 @@ import numpy as np
 from DispersionFit import DEFAULT_PARAMETERS, ERROR_SCALES, CHANNEL_UNITS, default_fit_bounds, fit_report
 from LaunchSites import LAUNCH_SITES, DEFAULT_LAUNCH_SITE, launch_site_inputs, parse_launch_site
 from GUIState import read_gui_state, write_gui_state
+from PayloadSensitivity import default_steps, sensitivity_request, validate_steps, draw_sensitivities
 from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name,
                                 read_vehicle_definition, write_vehicle_definition,
@@ -62,6 +63,8 @@ class ComparisonCase:
     state: str = "Not run"
     fit_report: dict = None
     fit_settings: dict = None
+    sensitivity_report: dict = None
+    sensitivity_settings: dict = None
 
     @property
     def edited(self):
@@ -565,6 +568,43 @@ class OptimizationApp:
         self.notebook.add(fit_tab, text="Fit results")
         self.fit_report_view = ScrolledText(fit_tab, wrap="word", state="disabled", font=("TkFixedFont", 10))
         self.fit_report_view.pack(fill="both", expand=True, padx=10, pady=10)
+        sensitivity_tab = ttk.Frame(self.notebook, padding=6)
+        self.tabs['Sensitivity'] = sensitivity_tab
+        self.notebook.add(sensitivity_tab, text='Sensitivity')
+        sensitivity_header = ttk.Frame(sensitivity_tab)
+        sensitivity_header.pack(fill='x')
+        self.sensitivity_button = ttk.Button(sensitivity_header, text='Run payload sensitivities',
+                                             command=self.run_sensitivities)
+        self.sensitivity_button.pack(side='left')
+        step_button = ttk.Button(sensitivity_header, text='Parameters / steps…', command=self.open_sensitivity_dialog)
+        step_button.pack(side='left', padx=8)
+        self.controls.extend(((self.sensitivity_button, 'normal'), (step_button, 'normal')))
+        self.sensitivity_summary = tk.StringVar(value='')
+        ttk.Label(sensitivity_tab, textvariable=self.sensitivity_summary, wraplength=950,
+                  justify='left').pack(fill='x', pady=6)
+        self.sensitivity_figure = Figure(figsize=(10, 4), dpi=100, constrained_layout=True)
+        self.sensitivity_canvas = FigureCanvasTkAgg(self.sensitivity_figure, master=sensitivity_tab)
+        NavigationToolbar2Tk(self.sensitivity_canvas, sensitivity_tab, pack_toolbar=False).pack(side='bottom', fill='x')
+        table_frame = ttk.Frame(sensitivity_tab)
+        table_frame.pack(side='bottom', fill='x')
+        columns = ('base', 'step', 'minus', 'plus', 'derivative', 'delta', 'percent', 'status')
+        self.sensitivity_table = ttk.Treeview(table_frame, columns=columns, height=6)
+        self.sensitivity_table.heading('#0', text='Parameter')
+        self.sensitivity_table.column('#0', width=185, minwidth=130)
+        for key, title in zip(columns, ('Baseline', '± step', 'P− [kg]', 'P+ [kg]', 'dP/dp', '+step ΔP [kg]', 'ΔP [%]', 'Status')):
+            self.sensitivity_table.heading(key, text=title)
+            self.sensitivity_table.column(key, width=85 if key != 'status' else 140, minwidth=65, anchor='e')
+        table_bar = ttk.Scrollbar(table_frame, orient='vertical', command=self.sensitivity_table.yview)
+        horizontal_bar = ttk.Scrollbar(table_frame, orient='horizontal', command=self.sensitivity_table.xview)
+        self.sensitivity_table.configure(yscrollcommand=table_bar.set, xscrollcommand=horizontal_bar.set)
+        self.sensitivity_detail = tk.StringVar(value='Select a parameter row to see its units and solver status.')
+        ttk.Label(table_frame, textvariable=self.sensitivity_detail, wraplength=950).pack(side='bottom', fill='x', pady=4)
+        self.sensitivity_table.bind('<<TreeviewSelect>>', self.sensitivity_row_selected)
+        table_bar.pack(side='right', fill='y')
+        horizontal_bar.pack(side='bottom', fill='x')
+        self.sensitivity_table.pack(fill='x', expand=True)
+        self.sensitivity_canvas.get_tk_widget().pack(fill='both', expand=True)
+        self.render_sensitivity_report()
         self.clear_plots("Run optimization to display this phase.")
         logs = ttk.Frame(self.notebook)
         self.tabs["Solver output"] = logs
@@ -753,7 +793,8 @@ class OptimizationApp:
             cases.append({"draft": case.draft, "color": case.color, "visible": visible.get(),
                           "computed_inputs": case.computed_inputs, "request": case.request,
                           "result": case.result, "run_dir": str(case.run_dir) if case.run_dir else None,
-                          "state": state, "fit_report": case.fit_report, "fit_settings": case.fit_settings})
+                          "state": state, "fit_report": case.fit_report, "fit_settings": case.fit_settings,
+                          "sensitivity_report": case.sensitivity_report, "sensitivity_settings": case.sensitivity_settings})
         return {"cases": cases, "selected_case": self.selected_case,
                 "custom_vehicles": [value for value in self.vehicles.values() if isinstance(value, dict)],
                 "telemetry": {"path": str(self.telemetry.path.resolve()) if self.telemetry else None,
@@ -872,6 +913,8 @@ class OptimizationApp:
                 case.state = saved.get("state", "Complete" if case.result is not None else "Not run")
                 case.fit_report = saved.get("fit_report")
                 case.fit_settings = saved.get("fit_settings")
+                case.sensitivity_report = saved.get('sensitivity_report')
+                case.sensitivity_settings = saved.get('sensitivity_settings')
             # Populate the editor before selecting another case, preserving drafts.
             self.load_case_form(0)
             index = state.get("selected_case", 0)
@@ -1003,6 +1046,7 @@ class OptimizationApp:
         if self.process is None:
             self.cases[self.selected_case].draft = self.capture_inputs()
             self.update_case_labels()
+            self.render_sensitivity_report()
             self.status.set(f"{self.cases[self.selected_case].name}: inputs changed — run to apply.")
             self.schedule_save()
 
@@ -1035,6 +1079,7 @@ class OptimizationApp:
         self.result = case.result
         self.settings_title.set(f"{case.name} settings")
         self.update_case_labels()
+        self.render_sensitivity_report()
         self.status.set(f"Editing {case.name}. Run to apply its current settings.")
         self.schedule_save()
 
@@ -1238,6 +1283,7 @@ class OptimizationApp:
                          f"Telemetry only · {telemetry.path.name}" if telemetry and matched_tabs else
                          "No cases displayed. Compute a case and enable Display.")
         self.update_case_labels()
+        self.render_sensitivity_report()
         self.schedule_save()
 
     def reset_defaults(self):
@@ -1269,6 +1315,9 @@ class OptimizationApp:
         if running and self.job_kind == "fit":
             self.progress.stop()
             self.progress.configure(mode="determinate", maximum=self.fit_options["max_evaluations"], value=0)
+        elif running and self.job_kind == 'sensitivity':
+            self.progress.stop()
+            self.progress.configure(mode='determinate', maximum=1 + 2 * len(self.sensitivity_steps), value=0)
         elif running:
             self.progress.configure(mode="indeterminate")
             self.progress.start(12)
@@ -1337,6 +1386,8 @@ class OptimizationApp:
         if code is None:
             if self.job_kind == "fit":
                 self.poll_fit_progress()
+            elif self.job_kind == 'sensitivity':
+                self.poll_sensitivity_progress()
             else:
                 self.status.set(f"{'Cancelling' if self.cancelled else 'Optimizing'} · {time.monotonic() - self.started:.0f} s elapsed")
             self.poll_id = self.root.after(200, self.poll)
@@ -1359,6 +1410,10 @@ class OptimizationApp:
         if self.job_kind == "fit":
             self.finish_fit(case, code)
             self.job_kind = "optimization"
+            return
+        if self.job_kind == 'sensitivity':
+            self.finish_sensitivities(case, code)
+            self.job_kind = 'optimization'
             return
         if self.cancelled:
             case.state = "Cancelled; previous result retained" if case.result is not None else "Cancelled"
@@ -1449,6 +1504,206 @@ class OptimizationApp:
             self.fit_report_view.insert("1.0", text)
             self.fit_report_view.configure(state="disabled")
             self._fit_report_text = text
+
+    def sensitivity_form_request(self):
+        # Sensitivities always maximize payload, independently of fixed-payload runs.
+        draft = self.capture_inputs()
+        return nominal_request(draft['dispersion'], self.vehicles[draft['vehicle']], RECOVERY[draft['recovery']],
+                               draft['orbit'], payload_mass=-1, launch_site=draft['launch_site'])
+
+    def open_sensitivity_dialog(self):
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+        if self.process is not None:
+            return
+        try:
+            request = self.sensitivity_form_request()
+        except ValueError as exc:
+            messagebox.showerror('Invalid sensitivity settings', str(exc), parent=self.root)
+            return
+        case = self.cases[self.selected_case]
+        defaults = default_steps(request)
+        saved = case.sensitivity_settings
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f'{case.name} · sensitivity parameters')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        panel = ttk.Frame(dialog, padding=12)
+        panel.pack(fill='both', expand=True)
+        ttk.Label(panel, text='Change one parameter at a time around the current dispersion values.\n'
+                  'Defaults: ±1% of multipliers / physical masses, ±100 m altitude, ±0.001 stage fraction.\n'
+                  'Stage partition also changes dry masses according to the existing vehicle model.').grid(
+                      row=0, column=0, columnspan=4, sticky='w', pady=(0, 10))
+        for col, title in enumerate(('Parameter', 'Current value', '± step', 'Units')):
+            ttk.Label(panel, text=title).grid(row=1, column=col, sticky='w', padx=5)
+        variables = {}
+        for row, (name, step) in enumerate(defaults.items(), start=2):
+            selected = tk.BooleanVar(value=saved is None or name in saved)
+            value = tk.StringVar(value=f'{(saved or {}).get(name, step):g}')
+            ttk.Checkbutton(panel, text=name, variable=selected).grid(row=row, column=0, sticky='w', pady=3)
+            ttk.Label(panel, text=f"{request['dispersion'][name]:g}").grid(row=row, column=1, padx=8)
+            ttk.Entry(panel, textvariable=value, width=14).grid(row=row, column=2, padx=8)
+            ttk.Label(panel, text=field_unit(name)).grid(row=row, column=3, sticky='w')
+            variables[name] = selected, value
+
+        def reset():
+            for name, (selected, value) in variables.items():
+                selected.set(True)
+                value.set(f'{defaults[name]:g}')
+
+        def apply():
+            try:
+                case.sensitivity_settings = validate_steps(request, {name: value.get() for name, (selected, value)
+                                                                     in variables.items() if selected.get()})
+            except ValueError as exc:
+                messagebox.showerror('Invalid parameter steps', str(exc), parent=dialog)
+                return
+            self.render_sensitivity_report()
+            self.schedule_save()
+            dialog.destroy()
+
+        buttons = ttk.Frame(panel)
+        buttons.grid(row=len(defaults) + 2, column=0, columnspan=4, sticky='ew', pady=(12, 0))
+        ttk.Button(buttons, text='Reset steps', command=reset).pack(side='left')
+        ttk.Button(buttons, text='Apply steps', command=apply).pack(side='right')
+
+    def render_sensitivity_report(self, report=None):
+        case = self.cases[self.selected_case]
+        report = report if report is not None else case.sensitivity_report
+        self.sensitivity_table.delete(*self.sensitivity_table.get_children())
+        if report is None:
+            count = len(case.sensitivity_settings) if case.sensitivity_settings else len(asdict(DispesrionFactorsType()))
+            text = (f'{case.name}: choose vehicle, recovery, orbit and launch site in the right panel, then run. '
+                    f'{count} parameters selected. Maximum payload is re-optimized at the baseline and at ±each step. '
+                    'dP/dp is kg per parameter unit; chart compares the configured steps. '
+                    'Very small steps can be dominated by solver noise; compare results at a second step size.')
+        else:
+            request = report['request']
+            orbit, site = request['target_orbit'], request['launch_site']
+            baseline = report.get('baseline') or {}
+            payload = baseline.get('payload')
+            text = (f"{case.name} · {vehicle_name(request['configuration'])} · {request['recovery']} · "
+                    f"{(orbit['apogee'] - 6378137) / 1000:g} × {(orbit['perigee'] - 6378137) / 1000:g} km, "
+                    f"{np.rad2deg(orbit['i']):g}° · {site['name']} "
+                    f"({site['latitude']:g}°, {site['longitude']:g}°, {site['altitude']:g} m). "
+                    f"Baseline maximum payload: {f'{payload:,.2f} kg' if payload is not None else 'failed'}. "
+                    f"{report['termination']} · {report['evaluations']}/{report['total']} solves. "
+                    'dP/dp: kg per parameter unit. ΔP: central estimate for +one step. '
+                    'Chart ranking depends on step sizes; compare a second step size to check solver noise.')
+            try:
+                if sensitivity_request(self.sensitivity_form_request()) != request:
+                    text += ' Inputs changed; displayed results use the saved baseline.'
+                if case.sensitivity_settings is not None and case.sensitivity_settings != report['steps']:
+                    text += ' Parameter steps changed; rerun to apply.'
+            except ValueError:
+                text += ' Current inputs are invalid; displayed results use the saved baseline.'
+            if baseline.get('error'):
+                text += ' ' + baseline['error']
+
+            def number(value):
+                return '—' if value is None else f'{value:,.5g}'
+
+            for row in report['rows']:
+                status = row['status']
+                if row.get('errors'):
+                    status += ': ' + '; '.join(f'{side}: {error}' for side, error in row['errors'].items())
+                values = [number(row.get(key)) for key in ('base', 'step', 'minus_payload', 'plus_payload',
+                                                          'derivative', 'delta_payload', 'percent')]
+                values[1] += ' ' + field_unit(row['parameter']).replace('Δ ', '')
+                self.sensitivity_table.insert('', 'end', text=row['parameter'], values=(*values, status))
+        self.sensitivity_summary.set(text)
+        draw_sensitivities(self.sensitivity_figure, report)
+        self.sensitivity_canvas.draw_idle()
+
+    def sensitivity_row_selected(self, event=None):
+        selected = self.sensitivity_table.selection()
+        if not selected:
+            self.sensitivity_detail.set('Select a parameter row to see its units and solver status.')
+            return
+        row = self.sensitivity_table.item(selected[0])
+        unit = field_unit(row['text']).replace('Δ ', '')
+        self.sensitivity_detail.set(f"{row['text']}: dP/dp in kg per {unit}. {row['values'][-1]}")
+
+    def run_sensitivities(self):
+        from tkinter import messagebox
+        if self.process is not None:
+            return
+        try:
+            request = sensitivity_request(self.sensitivity_form_request())
+            case = self.cases[self.selected_case]
+            steps = validate_steps(request, case.sensitivity_settings if case.sensitivity_settings is not None
+                                   else default_steps(request))
+            self.output_root.mkdir(parents=True, exist_ok=True)
+            directory = Path(tempfile.mkdtemp(prefix=f'sensitivity_case{self.selected_case + 1}_', dir=self.output_root))
+            (directory / 'sensitivity_inputs.json').write_text(json.dumps(dict(base_request=request, steps=steps), indent=2))
+            # Only use compatible successful computed cases as the baseline's initial guess.
+            if case.result is not None and case.result.get('success') and case.request == request:
+                with (directory / 'initial_solution.pickle').open('wb') as stream:
+                    pickle.dump(case.result, stream)
+            env = dict(os.environ, MPLBACKEND='Agg', PYTHONUNBUFFERED='1')
+            with (directory / 'solver.log').open('wb') as output:
+                self.process = subprocess.Popen([sys.executable, str(PROJECT_DIR / 'PayloadSensitivity.py'), '--worker', str(directory)],
+                                                stdout=output, stderr=subprocess.STDOUT, cwd=PROJECT_DIR, env=env)
+            self.log_stream = (directory / 'solver.log').open(errors='replace')
+        except (ValueError, OSError) as exc:
+            if self.process is not None:
+                self.process.kill()
+                self.process.wait()
+                self.process = None
+            self.status.set(str(exc))
+            messagebox.showerror('Could not start sensitivities', str(exc), parent=self.root)
+            return
+        self.run_dir = directory
+        self.sensitivity_steps = steps
+        self.sensitivity_progress_evaluations = -1
+        self.job_kind = 'sensitivity'
+        self.running_case = self.selected_case
+        self.cancelled = False
+        self.started = time.monotonic()
+        case.draft = self.capture_inputs()
+        self.log.configure(state='normal')
+        self.log.delete('1.0', 'end')
+        self.log.configure(state='disabled')
+        self.append_log(f'{case.name} · Payload sensitivity files: {directory}\n')
+        self.notebook.select(self.tabs['Sensitivity'])
+        self.set_running(True)
+        self.poll()
+
+    def poll_sensitivity_progress(self):
+        text = f"{'Cancelling sensitivities' if self.cancelled else 'Computing sensitivities'} · {time.monotonic() - self.started:.0f} s"
+        try:
+            report = json.loads((self.run_dir / 'sensitivity_report.json').read_text())
+            self.progress.configure(value=report['evaluations'])
+            text += f" · {report['evaluations']}/{report['total']} solves"
+            # Render after each solve, without re-drawing the chart every polling tick.
+            if report['evaluations'] != self.sensitivity_progress_evaluations:
+                self.sensitivity_progress_evaluations = report['evaluations']
+                self.render_sensitivity_report(report)
+        except (OSError, ValueError, KeyError):
+            pass
+        self.status.set(text)
+
+    def finish_sensitivities(self, case, code):
+        try:
+            path = self.run_dir / 'sensitivity_report.json'
+            if code != 0 and not self.cancelled:
+                raise RuntimeError(f'Sensitivity worker exited with code {code}. See Solver output.')
+            report = json.loads(path.read_text())
+            if self.cancelled:
+                report['termination'] = 'Cancelled; partial results'
+                for row in report['rows']:
+                    if row['status'] == 'Running':
+                        row['status'] = 'Cancelled'
+                path.write_text(json.dumps(report, indent=2))
+            case.sensitivity_report = report
+            self.render_sensitivity_report()
+            self.status.set(f"{case.name} sensitivities: {report['termination']}. Report saved.")
+            self.append_log(f'\nSensitivity report: {path}\n')
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.render_sensitivity_report()
+            self.status.set(f"{case.name}: {'Sensitivities cancelled' if self.cancelled else exc}; previous report retained.")
+            self.append_log(f'\n{exc}\n')
+        self.save_state()
 
     def form_request(self):
         draft = self.capture_inputs()
@@ -1899,7 +2154,7 @@ class OptimizationApp:
         for callback in (self.save_id, self.poll_id, self.kill_id, self.layout_id):
             if callback is not None:
                 self.root.after_cancel(callback)
-        for canvas in self.canvases.values():
+        for canvas in (*self.canvases.values(), self.sensitivity_canvas):
             if canvas._idle_draw_id is not None:
                 canvas.get_tk_widget().after_cancel(canvas._idle_draw_id)
                 canvas._idle_draw_id = None

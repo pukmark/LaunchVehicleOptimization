@@ -10,9 +10,40 @@ import LV_Optimization_Type as optimization
 
 from LV_Optimization_Type import InitialGuessConstraintDiagnostics, LV_Optimization
 from LV_Type_scaled import DispesrionFactorsType
+from LaunchSites import launch_site_inputs
 
 
 class ConstraintDiagnosticTests(unittest.TestCase):
+    def test_best_candidate_keeps_consistent_arrays_and_prefers_worst_violation(self):
+        best = optimization._BestInitialGuess()
+        states, controls = np.ones((2, 3)), np.ones((1, 2))
+        best.consider([.4, 0.], (states, controls, 2.))
+        states[:] = 9.
+        controls[:] = 8.
+        best.consider([.5, 0.], (states, controls, 3.))
+        best.consider([np.nan, 0.], (states, controls, 4.))
+        np.testing.assert_equal(best.candidate[0], 1.)
+        np.testing.assert_equal(best.candidate[1], 1.)
+        self.assertEqual(best.candidate[2], 2.)
+        # A smaller worst error wins even when the sum of squares increases.
+        best.consider([.3, .3], (states, controls, 5.))
+        self.assertEqual(best.candidate[2], 5.)
+        # With the same worst error, prefer the smaller total error.
+        best.consider([.3, 0.], (states, controls, 6.))
+        self.assertEqual(best.candidate[2], 6.)
+
+    def test_scoring_uses_actual_bounds_when_reports_are_disabled(self):
+        opti = ca.Opti()
+        x = opti.variable(3)
+        diagnostics = InitialGuessConstraintDiagnostics(opti, enabled=False)
+        diagnostics.add('Phase', 'Equal', x[0] == 2.)
+        diagnostics.add('Phase', 'Lower', x[1] >= 1.)
+        diagnostics.add('Phase', 'Upper', x[2] <= 1.)
+        opti.set_initial(x, [1., .5, .8])
+        np.testing.assert_allclose(diagnostics.residuals('Phase'), [-1., .5, 0.])
+        opti.set_initial(x, [2., 1., 1.])
+        np.testing.assert_allclose(diagnostics.residuals('Phase'), 0.)
+
     def report(self, diagnostics, phase):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             report = diagnostics.report(phase)
@@ -230,6 +261,90 @@ class PhaseDiagnosticTests(unittest.TestCase):
         phase3 = next(report for report in reports if report['phase'] == 'Second stage after fairing separation')
         self.assertFalse(any(item['constraint'].startswith(('Dynamics', 'Initial state'))
                              or item['nonfinite'] for item in phase3['violations']))
+
+    def test_coupled_recovery_improves_seed_and_preserves_propagation(self):
+        original_fit = optimization._fit_recovery_guess
+        for strategy in ('ASDS', 'RTLS'):
+            comparisons = []
+            def fit(*args, **kwargs):
+                seed, residuals = args[3], args[6]
+                result = original_fit(*args, **kwargs)
+                comparisons.append((optimization._guess_score(residuals(seed)),
+                                    optimization._guess_score(residuals(result))))
+                return result
+            with self.subTest(strategy=strategy), patch.object(optimization, '_fit_recovery_guess', fit):
+                model = LV_Optimization(DispesrionFactorsType())
+                solution, reports, _, _ = self.solve(strategy, model=model)
+                self.assertLessEqual(comparisons[0][1], comparisons[0][0])
+                self.assertLess(comparisons[0][1][0], comparisons[0][0][0])
+                for report in reports:
+                    self.assertFalse(any(item['constraint'].startswith(('Dynamics', 'Initial state'))
+                                         or item['nonfinite'] for item in report['violations']))
+                if strategy == 'RTLS':
+                    self.assertLess(abs(solution['x4_landing'][0,-1]), 100.)
+                    self.assertLessEqual(np.linalg.norm(solution['x4_landing'][2:4,-1]), 10.)
+                    self.assertGreaterEqual(solution['x4_landing'][4,-1], model.rocket_return.EmptyFirstStageMass)
+
+
+class OrbitGuessTests(unittest.TestCase):
+    def test_launch_heading_matches_eci_geometry_including_earth_rotation(self):
+        model = LV_Optimization(DispesrionFactorsType()).eci
+        state = np.array([100000., 50000., 2000., 600., 100000.])
+        inclination = np.deg2rad(53.)
+
+        def error(azimuth):
+            position, velocity = model.local_to_eci_func([state[0], 0., state[1]],
+                                                        [state[2], 0., state[3]], azimuth)
+            h = np.cross(np.asarray(position).ravel(), np.asarray(velocity).ravel())
+            return abs(h[2] / np.linalg.norm(h) - np.cos(inclination))
+
+        heading = optimization._initial_launch_azimuth(model, state, inclination)
+        self.assertLess(error(heading), 1e-8)
+        self.assertLess(error(heading), error(np.pi/2. - inclination))
+        model.omega_earth = 0.
+        model.local_to_eci()
+        unrotating_heading = optimization._initial_launch_azimuth(model, state, inclination)
+        self.assertGreater(abs(heading - unrotating_heading), np.deg2rad(.5))
+
+    def test_unreachable_direct_inclination_and_polar_sites_keep_heading_in_bounds(self):
+        for site, inclination in ((None, 0.), ('Equator', 180.), ('North Pole', 90.)):
+            with self.subTest(site=site):
+                model = LV_Optimization(DispesrionFactorsType(),
+                                        launch_site=launch_site_inputs(site) if site else None).eci
+                heading = optimization._initial_launch_azimuth(
+                    model, [0., model.LaunchAltitude, 2000., 0., 1.], np.deg2rad(inclination))
+                self.assertTrue(np.isfinite(heading))
+                self.assertGreaterEqual(heading, -np.pi/2.)
+                self.assertLessEqual(heading, np.pi/2.)
+
+    def test_final_reserve_includes_plane_change_and_leaves_required_dry_mass(self):
+        model = LV_Optimization(DispesrionFactorsType()).eci
+        apogee, perigee = model.R0 + 300000., model.R0 + 150000.
+        semimajor = .5 * (apogee + perigee)
+        v_apogee = np.sqrt(model.mu * (2./apogee - 1./semimajor))
+        target = {'perigee': apogee, 'a': apogee, 'i': np.deg2rad(20.)}
+        dry_mass = model.SecondStage_EmptyMass + 10000.
+        state = ca.DM([apogee, 0., 0., 0., v_apogee, 0., dry_mass])
+        burn = optimization._orbit_burn_quantities(model, state, target)
+        v_target = np.sqrt(model.mu / apogee)
+        expected_dv = np.sqrt((v_target-v_apogee)**2 +
+                              2.*v_target*v_apogee*(1.-np.cos(target['i'])))
+        self.assertAlmostEqual(float(burn['delta_v']), expected_dv, places=7)
+        reserve = dry_mass * np.expm1(expected_dv / (.99 * model.SecondStage_Vac_Isp * model.g0))
+        state[6] += reserve
+        burn = optimization._orbit_burn_quantities(model, state, target)
+        self.assertAlmostEqual(float(burn['mass_after_burn']), dry_mass, places=7)
+        self.assertAlmostEqual(float(burn['reserve']), reserve, places=7)
+
+    def test_final_burn_rejects_inclination_unreachable_at_apogee(self):
+        model = LV_Optimization(DispesrionFactorsType()).eci
+        radius = model.R0 + 300000.
+        speed = np.sqrt(model.mu * (2./radius - 1./(model.R0 + 225000.)))
+        state = ca.DM([0., 0., radius, speed, 0., 0., 20000.])
+        target = {'perigee': radius, 'a': radius, 'i': 0.}
+        burn = optimization._orbit_burn_quantities(model, state, target)
+        self.assertLess(float(burn['plane_margin']), 0.)
+        self.assertEqual(float(burn['mass_after_burn']), 0.)
 
 
 if __name__ == '__main__':
