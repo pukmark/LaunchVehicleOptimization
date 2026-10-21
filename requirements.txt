@@ -1,11 +1,17 @@
-# Simulation versions verified with this project on Python 3.10.
+# Install with Python 3.10: python -m pip install -r requirements.txt
+# Direct dependency versions verified in the project's Linux environment.
+# Tk, FFmpeg, and Tesseract are system packages; see README.md.
+
+# Optimization, dynamics, and plotting. CasADi supplies IPOPT/MUMPS.
 numpy==1.24.3
 scipy==1.15.3
 casadi==3.6.5
 matplotlib==3.5.3
 
-# Telemetry comparison, video processing, OCR, and downloads.
+# Telemetry CSV loading and comparison.
 pandas==1.5.3
+
+# Video processing, Tesseract integration, and broadcast downloads.
 # PaddleOCR also uses this OpenCV distribution; install only one cv2 provider.
 opencv-contrib-python==4.10.0.84
 pytesseract==0.3.13

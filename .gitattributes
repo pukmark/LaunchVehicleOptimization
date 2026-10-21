@@ -1,0 +1,11 @@
+# Keep source and documentation diffs consistent across platforms.
+* text=auto
+.gitignore text eol=lf
+.gitattributes text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.csv text eol=lf
+*.json text eol=lf
+*.pdf binary
+*.pptx binary

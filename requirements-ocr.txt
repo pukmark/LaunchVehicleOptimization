@@ -1,4 +1,6 @@
-# ExtractTelemetry.py's secondary reader. Includes the project's pinned packages.
+# Optional CPU PaddleOCR fallback for ExtractTelemetry.py (Python 3.10).
+# Install with: python -m pip install -r requirements-ocr.txt
+# Includes all base dependencies. Model weights download on first use.
 -r requirements.txt
 paddleocr==3.7.0
 paddlepaddle==3.3.1
