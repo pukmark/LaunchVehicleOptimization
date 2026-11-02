@@ -693,7 +693,6 @@ class LV_Optimization(VLType):
             # final state constraints
             x4f_landing_unscaled = self.rocket_return.unscale_x(x4_landing[:,self.rocket_return.N])
             if RecoveryStrategy == 'RTLS':
-                # opti.subject_to(ca.norm_2(x4_landing[0:2,self.rocket_return.N]) == 0.0)
                 diagnostics.add(landing, 'Final downrange target', x4_landing[0,self.rocket_return.N] == 0.0,
                                 self.rocket_return.scaleX[0], 'm')
                 diagnostics.add(landing, 'Final local height target',
@@ -704,7 +703,7 @@ class LV_Optimization(VLType):
                 diagnostics.add(landing, 'Final altitude target', self.rocket_return.local_to_alt(x4f_landing_unscaled) == 0.0, unit='m')
             # minimal velocity at the end of the flight
             diagnostics.add(landing, 'Final speed upper bound',
-                            ca.norm_2(x4_landing[2:4,self.rocket_return.N]) <= 10/self.rocket_return.scaleX[2],
+                            ca.norm_2(x4_landing[2:4,self.rocket_return.N]) <= 2.5/self.rocket_return.scaleX[2],
                             self.rocket_return.scaleX[2], 'm/s')
             diagnostics.add(landing, 'Final mass lower bound',
                             x4_landing[4,self.rocket_return.N] >= self.rocket_return.EmptyFirstStageMass/self.rocket_return.scaleX[4],

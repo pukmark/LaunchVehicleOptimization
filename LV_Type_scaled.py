@@ -577,7 +577,11 @@ class LaunchVehicle_ECI(VLType):
 
 @dataclass
 class BoosterReturn_2D(VLType):
-    def __init__(self, atmosphere: Atm_Type.AtmosphereType, LV_Configuration: int, ScenarioDispersion: DispesrionFactorsType, N: int = 20, launch_site=None):
+    def __init__(self,  atmosphere: Atm_Type.AtmosphereType, 
+                        LV_Configuration: int, 
+                        ScenarioDispersion: DispesrionFactorsType, 
+                        N: int = 10, 
+                        launch_site=None):
         super().__init__(atmosphere=atmosphere)
 
         self.ApplyVehicleConfiguration(LV_Configuration)
