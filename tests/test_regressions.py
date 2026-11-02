@@ -144,6 +144,39 @@ class OptimizerOutputTests(unittest.TestCase):
         with patch.object(ca.Opti, 'solve', lambda opti: InitialValues(opti)), patch.object(ca.Opti, 'return_status', return_value='test'), patch.object(ca.Opti, 'stats', return_value={'success': True}):
             return model.SolveOptimiztion(RecoveryStrategy=strategy, Target_Orbit=target, **kwargs)
 
+    def test_second_stage_coast_delays_ignition_and_subsequent_results(self):
+        for coast_seconds in (0., 10., 25.):
+            with self.subTest(coast_seconds=coast_seconds):
+                model = LV_Optimization(DispesrionFactorsType())
+                model.eci.SecondStage_CoastTimeAfterSep = coast_seconds
+                result = self.solve(model, 'EXP', payload_mass_predefined=10000.,
+                                    initial_guess_diagnostics=False)
+
+                separation_time = result['t1_vec'][-1]
+                ignition_time = result['t2_vec'][0]
+                self.assertAlmostEqual(ignition_time - separation_time, coast_seconds)
+                self.assertAlmostEqual(result['t3_vec'][0], result['t2_vec'][-1])
+                self.assertAlmostEqual(result['t3_vec'][-1] - separation_time,
+                                       coast_seconds + model.eci.N[0] * float(result['dt2'])
+                                       + model.eci.N[1] * float(result['dt3']))
+                np.testing.assert_allclose(np.diff(result['t2_vec']), result['dt2'])
+                np.testing.assert_allclose(np.diff(result['t3_vec']), result['dt3'])
+
+                # Ignition must use the propagated separation state, not just
+                # attach a delayed timestamp to the pre-coast state.
+                booster_final = result['x1'][:, -1]
+                position, velocity = model.eci.local_to_eci_func(
+                    [booster_final[0], 0., booster_final[1]],
+                    [booster_final[2], 0., booster_final[3]], result['LaunchAz'])
+                separation_state = ca.vertcat(position, velocity,
+                                               model.eci.SecondStage_FullMass + result['payload_mass'])
+                expected_ignition = model.eci.unscale_x(model.eci.dynamics_kp1(
+                    model.eci.scale_x(separation_state), np.full(model.eci.nu, 1e-8),
+                    coast_seconds / model.eci.scaleT)).full().ravel()
+                np.testing.assert_allclose(result['x2'][:, 0], expected_ignition)
+                if coast_seconds:
+                    self.assertGreater(np.linalg.norm(result['x2'][:3, 0] - position.full().ravel()), 1.)
+
     def test_warm_start_round_trip_and_legacy_units(self):
         model = LV_Optimization(DispesrionFactorsType())
         original = self.solve(model, 'ASDS')

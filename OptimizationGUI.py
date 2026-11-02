@@ -31,6 +31,7 @@ from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehi
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from TelemetryFrames import local_to_ecef_velocity, eci_to_ecef_velocity
 from Trajectory3D import draw_trajectory_3d, maneuver_summary_text
+from IntegratedResults import draw_integrated_results
 from TelemetryCSV import (load_telemetry_csv, overlay_telemetry, phase_group,
                           aerodynamic_loads, make_plot_axes, interpolate_speed_time,
                           numerical_acceleration, PRIMARY_GROUPS)
@@ -40,7 +41,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 RECOVERY = {"EXP — Expendable": "EXP", "ASDS — Drone ship": "ASDS",
             "RTLS — Return to launch site": "RTLS"}
 VEHICLES = BUILTIN_VEHICLES
-RESULT_TABS = ("First stage", "S1 details", "Second stage", "S2 propulsion", "S2 orbit", "3D trajectory", "Booster")
+RESULT_TABS = ("First stage", "S1 details", "Second stage", "S2 propulsion", "S2 orbit", "Integrated results", "3D trajectory", "Booster")
 MULTIPLIERS = {"FirstStageIsp", "SecondStageIsp", "FirstStageThrust",
                "SecondStageThrust", "FirstStageCx0", "BoosterStageCx0", "AtmosphereDensity"}
 
@@ -506,6 +507,12 @@ class OptimizationApp:
                                      foreground="white", activebackground=case.color,
                                      command=lambda i=index: self.choose_color(i), width=6)
             color_button.grid(row=index, column=2, padx=4)
+            import_button = ttk.Menubutton(case_panel, text="Import settings")
+            import_menu = tk.Menu(import_button, tearoff=False)
+            import_menu.configure(postcommand=lambda m=import_menu, i=index: self.populate_case_import_menu(m, i))
+            import_button.configure(menu=import_menu)
+            import_button.grid(row=index, column=4, padx=4)
+            self.controls.append((import_button, "normal"))
             status = tk.StringVar(value="Not run")
             ttk.Label(case_panel, textvariable=status, width=1, anchor="w").grid(
                 row=index, column=3, sticky="ew", padx=8)
@@ -513,7 +520,7 @@ class OptimizationApp:
             self.case_status.append(status)
             self.color_buttons.append(color_button)
         telemetry_panel = ttk.Frame(case_panel)
-        telemetry_panel.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        telemetry_panel.grid(row=3, column=0, columnspan=5, sticky="ew", pady=(6, 0))
         load_csv = ttk.Button(telemetry_panel, text="Load telemetry CSV…", command=self.load_telemetry)
         load_csv.grid(row=0, column=0, sticky="w")
         self.controls.append((load_csv, "normal"))
@@ -530,7 +537,7 @@ class OptimizationApp:
                                       state="disabled")
         self.sync_button.grid(row=0, column=4, padx=(8, 0))
         options = ttk.Frame(case_panel)
-        options.grid(row=4, column=0, columnspan=4, sticky="ew", pady=4)
+        options.grid(row=4, column=0, columnspan=5, sticky="ew", pady=4)
         ttk.Label(options, text="Column routing:").pack(side="left")
         self.telemetry_primary = tk.StringVar(value="Stage 1 / booster")
         primary = ttk.Combobox(options, textvariable=self.telemetry_primary, state="readonly", width=17,
@@ -550,7 +557,7 @@ class OptimizationApp:
         ttk.Label(options, text="Velocity comparison: ECEF").pack(side="left", padx=(10, 4))
         self.telemetry_info = tk.StringVar(value="No telemetry CSV loaded. Positive time shift moves telemetry later.")
         ttk.Label(case_panel, textvariable=self.telemetry_info, wraplength=850).grid(
-            row=5, column=0, columnspan=4, sticky="w", padx=4)
+            row=5, column=0, columnspan=5, sticky="w", padx=4)
         self.notebook = ttk.Notebook(left)
         self.notebook.grid(row=3, column=0, sticky="nsew")
         for phase in RESULT_TABS:
@@ -1057,6 +1064,38 @@ class OptimizationApp:
         self.cases[self.selected_case].draft = self.capture_inputs()
         self.load_case_form(index)
 
+    def populate_case_import_menu(self, menu, target_index):
+        menu.delete(0, "end")
+        for source_index, source in enumerate(self.cases):
+            if source_index == target_index:
+                continue
+            settings = "last-run settings" if source.computed_inputs is not None else "current settings"
+            menu.add_command(label=f"From {source.name} · {settings}",
+                             command=lambda s=source_index: self.import_case_settings(target_index, s))
+
+    def import_case_settings(self, target_index, source_index):
+        """Copy run inputs into another case's editor, retaining both results."""
+        if self.process is not None or target_index == source_index:
+            return
+        self.cases[self.selected_case].draft = self.capture_inputs()
+        source = self.cases[source_index]
+        inputs = source.computed_inputs if source.computed_inputs is not None else source.draft
+        imported = deepcopy(inputs)
+        if 'vehicle_definition' in imported:
+            # A custom vehicle may have been edited since the source was run.
+            # Restore its computed definition without changing the source draft.
+            self.loading_case = True
+            try:
+                name = self.import_vehicle(imported['vehicle_definition'])
+                imported['vehicle'] = name
+                imported['vehicle_definition'] = deepcopy(self.vehicles[name])
+            finally:
+                self.loading_case = False
+        self.cases[target_index].draft = imported
+        self.load_case_form(target_index)
+        settings = "last-run settings" if source.computed_inputs is not None else "current settings"
+        self.status.set(f"Imported {source.name} {settings} into {self.cases[target_index].name}. Run to apply.")
+
     def load_case_form(self, index):
         self.selected_case = index
         self.case_selection.set(index)
@@ -1224,6 +1263,10 @@ class OptimizationApp:
             self.notebook.hide(self.tabs["Booster"])
         matched_tabs = 0
         for phase, figure in self.figures.items():
+            if phase == 'Integrated results':
+                draw_integrated_results(figure, [(case.result, case.color, case.name) for case in displayed])
+                self.canvases[phase].draw_idle()
+                continue
             if phase == '3D trajectory':
                 draw_trajectory_3d(figure, [(case.result, case.request['target_orbit'], case.color, case.name)
                                           for case in displayed])

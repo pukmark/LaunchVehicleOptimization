@@ -16,13 +16,94 @@ import casadi as ca
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from IntegratedResults import draw_integrated_results, second_stage_coast, return_controls
 
 from OptimizationGUI import (
     DispesrionFactorsType, OptimizationApp, draw_phase, nominal_request,
     parse_dispersion, parse_target_orbit, run_optimization, worker,
     orbital_diagnostics, thrust_velocity_angle, second_stage_propellant_remaining,
-    default_case_inputs, RECOVERY, VEHICLES, VLType, stage_two_speed_acceleration,
+    default_case_inputs, RECOVERY, VEHICLES, VLType, stage_two_speed_acceleration, ComparisonCase,
 )
+
+
+class CaseSettingsImportTests(unittest.TestCase):
+    def make_app(self):
+        app = OptimizationApp.__new__(OptimizationApp)
+        app.process, app.selected_case, app.loading_case = None, 0, False
+        app.cases = [ComparisonCase(f'Case {i + 1}', color) for i, color in enumerate(('blue', 'red', 'green'))]
+        app.capture_inputs = Mock(side_effect=lambda: deepcopy(app.cases[app.selected_case].draft))
+        app.load_case_form, app.status = Mock(), Mock()
+        return app
+
+    def test_import_uses_last_run_inputs_preserves_results_and_copies_independently(self):
+        app = self.make_app()
+        source, target = app.cases[:2]
+        source.computed_inputs = default_case_inputs()
+        source.computed_inputs.update(payload_mass='12000', recovery='ASDS — Drone ship')
+        source.computed_inputs['orbit']['apogee'] = '420'
+        source.computed_inputs['dispersion']['FirstStageThrust'] = '1.025'
+        source.computed_inputs['launch_site']['latitude'] = '30.0'
+        source.draft['payload_mass'] = '9999'  # Edits made after the run.
+        source.result, target.result = {'payload_mass': 12000}, {'payload_mass': 5000}
+        target.computed_inputs, target.request = default_case_inputs(), {'configuration': 1}
+        previous_result, previous_request = target.result, target.request
+        app.import_case_settings(1, 0)
+        self.assertEqual(target.draft, source.computed_inputs)
+        self.assertEqual(source.draft['payload_mass'], '9999')
+        self.assertIs(target.result, previous_result)
+        self.assertIs(target.request, previous_request)
+        self.assertEqual(target.name, 'Case 2')
+        self.assertEqual(target.color, 'red')
+        self.assertTrue(target.edited)
+        target.draft['orbit']['apogee'] = '500'
+        target.draft['dispersion']['FirstStageThrust'] = '1.1'
+        self.assertEqual(source.computed_inputs['orbit']['apogee'], '420')
+        self.assertEqual(source.computed_inputs['dispersion']['FirstStageThrust'], '1.025')
+        app.load_case_form.assert_called_once_with(1)
+        self.assertIn('last-run settings', app.status.set.call_args.args[0])
+
+    def test_import_unrun_case_captures_current_form_and_blocks_during_run(self):
+        app = self.make_app()
+        latest = default_case_inputs()
+        latest['payload_mass'] = '7000'
+        app.capture_inputs.return_value = latest
+        app.capture_inputs.side_effect = None
+        app.import_case_settings(2, 0)
+        self.assertEqual(app.cases[2].draft, latest)
+        self.assertIsNot(app.cases[2].draft, app.cases[0].draft)
+        self.assertIn('current settings', app.status.set.call_args.args[0])
+        app.process = Mock()
+        app.load_case_form.reset_mock()
+        app.import_case_settings(1, 0)
+        app.load_case_form.assert_not_called()
+
+    def test_import_restores_custom_vehicle_snapshot(self):
+        app = self.make_app()
+        source = app.cases[0]
+        source.computed_inputs = default_case_inputs()
+        original = {'name': 'Custom rocket', 'parameters': {'SecondStage_Thrust': 123.}}
+        source.computed_inputs.update(vehicle='Custom rocket', vehicle_definition=deepcopy(original))
+        restored = dict(original, name='Custom rocket (2)')
+        app.vehicles = {'Custom rocket (2)': restored}
+        app.import_vehicle = Mock(return_value='Custom rocket (2)')
+        app.import_case_settings(1, 0)
+        app.import_vehicle.assert_called_once_with(original)
+        self.assertEqual(app.cases[1].draft['vehicle'], 'Custom rocket (2)')
+        self.assertEqual(app.cases[1].draft['vehicle_definition'], restored)
+        self.assertEqual(source.computed_inputs['vehicle_definition'], original)
+        self.assertFalse(app.loading_case)
+
+    def test_menu_excludes_target_and_imports_chosen_source(self):
+        app = self.make_app()
+        app.cases[0].computed_inputs = default_case_inputs()
+        app.import_case_settings = Mock()
+        menu = Mock()
+        app.populate_case_import_menu(menu, 1)
+        commands = menu.add_command.call_args_list
+        self.assertEqual([call.kwargs['label'] for call in commands],
+                         ['From Case 1 · last-run settings', 'From Case 3 · current settings'])
+        commands[0].kwargs['command']()
+        app.import_case_settings.assert_called_once_with(1, 0)
 
 
 class DispersionFormTests(unittest.TestCase):
@@ -374,6 +455,59 @@ class ResultRenderingTests(unittest.TestCase):
                  patch.object(ca.Opti, "stats", return_value={"success": True, "iter_count": 0}):
                 cls.results[recovery] = run_optimization(request, None)
             cls.requests[recovery] = request
+
+    def test_integrated_results_show_all_phases_with_return_dashed(self):
+        from TelemetryFrames import eci_to_ecef_velocity
+        for recovery, solution in self.results.items():
+            with self.subTest(recovery=recovery):
+                figure = Figure(figsize=(13, 8), constrained_layout=True)
+                draw_integrated_results(figure, [(solution, 'blue', 'Case 1')])
+                FigureCanvasAgg(figure).draw()
+                self.assertEqual(len(figure.axes), 5)
+                for axis in figure.axes:
+                    for line in axis.lines:
+                        self.assertEqual(line.get_linestyle(), '--' if 'Booster return' in line.get_label() else '-')
+                        self.assertEqual(line.get_color(), 'blue')
+                        self.assertEqual(len(line.get_xdata()), len(line.get_ydata()))
+                altitude = figure.axes[0].lines
+                self.assertEqual(sum('Booster return' in line.get_label() for line in altitude), recovery != 'EXP')
+                coast = next(line for line in altitude if line.get_label().endswith('Stage 2 coast'))
+                self.assertEqual(coast.get_xdata()[0], solution['t1_vec'][-1])
+                self.assertEqual(coast.get_xdata()[-1], solution['t2_vec'][0])
+                burn_speed = [line for line in figure.axes[1].lines if line.get_label().endswith('Stage 2')][0]
+                state = solution['x2']
+                np.testing.assert_allclose(burn_speed.get_ydata(), np.linalg.norm(
+                    eci_to_ecef_velocity(state[:3], state[3:6], solution['t2_vec']), axis=0))
+                if recovery != 'EXP':
+                    time, throttle, angle = return_controls(solution, VLType())
+                    self.assertAlmostEqual(time[-1], float(np.ravel(solution['t4_vec'])[-1]))
+                    self.assertTrue(np.any(throttle == 0.))
+                    self.assertTrue(np.any(throttle > 0.))
+                    self.assertTrue(np.isnan(angle).any())
+                    angle_lines = [line for line in figure.axes[4].lines if 'Booster return' in line.get_label()]
+                    if recovery == 'RTLS':
+                        self.assertTrue(np.isfinite(angle[:2]).all())
+                        self.assertTrue(np.isnan(angle[2:]).all())
+                        self.assertEqual(len(angle_lines), 1)
+                        finite = np.isfinite(angle_lines[0].get_ydata())
+                        self.assertLessEqual(max(angle_lines[0].get_xdata()[finite]),
+                                             time[0] + float(solution['dt4_boostback']))
+                    else:
+                        self.assertTrue(np.isnan(angle).all())
+                        self.assertEqual(angle_lines, [])
+
+    def test_integrated_results_redraw_cases_and_zero_coast(self):
+        figure = Figure(figsize=(13, 8), constrained_layout=True)
+        solution = deepcopy(self.results['EXP'])
+        solution['t2_vec'] -= solution['t2_vec'][0] - solution['t1_vec'][-1]
+        self.assertIsNone(second_stage_coast(solution))
+        draw_integrated_results(figure, [(solution, 'blue', 'Case 1'),
+                                          (self.results['RTLS'], 'red', 'Case 2')])
+        self.assertEqual({line.get_color() for line in figure.axes[0].lines}, {'blue', 'red'})
+        draw_integrated_results(figure, [(solution, 'blue', 'Case 1')])
+        self.assertFalse(any('Booster' in line.get_label() for line in figure.axes[0].lines))
+        draw_integrated_results(figure, [])
+        self.assertEqual(len(figure.axes), 0)
 
     def test_all_phases_accept_actual_result_shapes_and_units(self):
         for recovery, solution in self.results.items():

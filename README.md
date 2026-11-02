@@ -92,8 +92,12 @@ python OptimizationGUI.py
 3. Click **Run Case 1**. Follow progress in **Solver output**; **Cancel** stops
    the active worker.
 4. After convergence, inspect the first-stage, upper-stage, and 3D trajectory
-   tabs. Select another case to compare a different vehicle, orbit, or recovery
-   strategy.
+   tabs. **Integrated results** combines altitude, Earth-fixed speed, mass,
+   throttle, and AoA/thrust angle on a shared timeline, including coasts.
+   Ascent uses solid lines and booster return uses dashed lines. Select another
+   case to compare a different vehicle, orbit, or recovery strategy.
+   Use **Import settings** beside a case to copy another case's last-run inputs
+   (or its current inputs if it has not been run), then run the destination case.
 5. Use **Load telemetry CSV…** to overlay a file from `falcon9_telemetry/`, then
    **Sync to Case N** to align it with a computed case.
 
