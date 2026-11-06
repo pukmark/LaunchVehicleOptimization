@@ -79,6 +79,37 @@ class DispersionFitTests(unittest.TestCase):
         self.calls.append(deepcopy(request))
         return simulation(request['dispersion']['FirstStageThrust'], request['payload_mass_predefined'])
 
+    def test_loss_selection_scores_measurements_and_timing(self):
+        data, solution = timed_telemetry(), timed_simulation(110)
+        samples = fitting._comparison_samples(solution, data, 'Stage 1 / booster', {'shift': 7})
+        sample = deepcopy(next(item for item in samples if item['channel'] == 'altitude'))
+        predicted = fitting._sample_prediction(
+            sample, fitting.simulation_channels(solution, 'stage1'), 7.)
+        sample['values'] = predicted - 3000.
+        squared = fitting.score_candidate(solution, data, [sample], loss='squared')
+        robust = fitting.score_candidate(solution, data, [sample])
+        self.assertAlmostEqual(squared['measurement_score'], 9.)
+        self.assertAlmostEqual(robust['measurement_score'], 2*(np.sqrt(10.)-1))
+        timing = squared['phase_timing']['stage1']
+        self.assertAlmostEqual(timing['duration_penalty'], (timing['duration_error']/5.)**2)
+        lateness = np.maximum(solution['t1_vec'] - 7. - timing['telemetry_end'], 0.)
+        self.assertAlmostEqual(timing['late_penalty'], np.mean((lateness/5.)**2))
+        with self.assertRaisesRegex(ValueError, 'Unknown fitting loss'):
+            fitting.score_candidate(solution, data, [sample], loss='invalid')
+
+    def test_squared_loss_fits_and_is_saved_in_checkpoints_and_report(self):
+        checkpoints = []
+        result = fitting.fit_dispersion_to_telemetry(
+            self.request, telemetry(), solver=self.solve, loss='squared',
+            checkpoint_callback=checkpoints.append, **self.options)
+        self.assertAlmostEqual(result['best']['request']['dispersion']['FirstStageThrust'], 1.08, places=3)
+        self.assertEqual(fitting.fit_report(result)['settings']['loss'], 'squared')
+        self.assertTrue(checkpoints)
+        self.assertTrue(all(item['settings']['loss'] == 'squared' for item in checkpoints))
+        with self.assertRaisesRegex(ValueError, 'Unknown fitting loss'):
+            fitting.fit_dispersion_to_telemetry(
+                self.request, telemetry(), solver=self.solve, loss='invalid', **self.options)
+
     def test_new_three_phase_csv_fits_upper_stage_and_only_nonexp_booster(self):
         t = np.arange(221)
         raw_time = t - 7

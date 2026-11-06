@@ -32,6 +32,8 @@ from LV_Type_scaled import DispesrionFactorsType, VLType
 from TelemetryFrames import local_to_ecef_velocity, eci_to_ecef_velocity
 from Trajectory3D import draw_trajectory_3d, maneuver_summary_text
 from IntegratedResults import draw_integrated_results
+from PaperResults import draw_paper_results, paper_comparison_costs
+from BoosterResults import draw_booster_altitude_results
 from TelemetryCSV import (load_telemetry_csv, overlay_telemetry, phase_group,
                           aerodynamic_loads, make_plot_axes, interpolate_speed_time,
                           numerical_acceleration, PRIMARY_GROUPS)
@@ -41,7 +43,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 RECOVERY = {"EXP — Expendable": "EXP", "ASDS — Drone ship": "ASDS",
             "RTLS — Return to launch site": "RTLS"}
 VEHICLES = BUILTIN_VEHICLES
-RESULT_TABS = ("First stage", "S1 details", "Second stage", "S2 propulsion", "S2 orbit", "Integrated results", "3D trajectory", "Booster")
+RESULT_TABS = ("Summery", "First stage", "S1 details", "Second stage", "S2 propulsion", "S2 orbit", "3D trajectory", "Booster", "Booster 2", "Paper figures")
 MULTIPLIERS = {"FirstStageIsp", "SecondStageIsp", "FirstStageThrust",
                "SecondStageThrust", "FirstStageCx0", "BoosterStageCx0", "AtmosphereDensity"}
 
@@ -477,6 +479,11 @@ class OptimizationApp:
         left.rowconfigure(3, weight=1)
         plot_header = ttk.Frame(left)
         plot_header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        logo = tk.PhotoImage(master=root, file=str(PROJECT_DIR / "assets" / "Launch Optimization GUI.png"))
+        # Keep the Tk image alive and preserve its proportions within 224 × 224 px.
+        logo_scale = max(1, (max(logo.width(), logo.height()) + 223) // 224)
+        self.logo_image = logo.subsample(logo_scale, logo_scale)
+        root.iconphoto(True, self.logo_image)
         ttk.Label(plot_header, text="Flight simulation", style="Title.TLabel").pack(side="left")
         self.scenario_details_button = ttk.Button(plot_header, text="Show scenario details",
                                                   command=self.toggle_scenario_details)
@@ -490,8 +497,13 @@ class OptimizationApp:
         self.summary.trace_add("write", self.refresh_scenario_details)
         self.refresh_scenario_details()
         self.scenario_details.grid_remove()
-        case_panel = ttk.LabelFrame(left, text="Compare cases · select to edit, check to display", padding=4)
-        case_panel.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        comparison_header = ttk.Frame(left)
+        comparison_header.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        comparison_header.columnconfigure(1, weight=1)
+        self.logo_label = ttk.Label(comparison_header, image=self.logo_image)
+        self.logo_label.grid(row=0, column=0, padx=(0, 12))
+        case_panel = ttk.LabelFrame(comparison_header, text="Compare cases · select to edit, check to display", padding=4)
+        case_panel.grid(row=0, column=1, sticky="ew")
         case_panel.columnconfigure(3, weight=1)
         self.case_selection = tk.IntVar(value=0)
         self.case_visible, self.case_status, self.color_buttons = [], [], []
@@ -566,10 +578,17 @@ class OptimizationApp:
             canvas = FigureCanvasTkAgg(figure, master=tab)
             toolbar = NavigationToolbar2Tk(canvas, tab, pack_toolbar=False)
             toolbar.pack(side="bottom", fill="x")
+            if phase == 'Paper figures':
+                figure.set_size_inches(7.2, 6.0)
+                ttk.Button(tab, text="Export paper figure…", command=self.export_paper_figure).pack(side="bottom", anchor="e")
+                self.paper_cost_text = tk.StringVar(value="Load telemetry and display cases to compare costs.")
+                ttk.Label(tab, textvariable=self.paper_cost_text, justify='left',
+                          font=('TkFixedFont', 9), padding=6).pack(side='bottom', fill='x')
             canvas.get_tk_widget().pack(fill="both", expand=True)
             self.tabs[phase], self.figures[phase], self.canvases[phase] = tab, figure, canvas
             self.notebook.add(tab, text=phase)
         self.notebook.hide(self.tabs["Booster"])
+        self.notebook.hide(self.tabs["Booster 2"])
         fit_tab = ttk.Frame(self.notebook)
         self.tabs["Fit results"] = fit_tab
         self.notebook.add(fit_tab, text="Fit results")
@@ -956,6 +975,8 @@ class OptimizationApp:
                 self.pending_sash = layout["sash"]
                 self.panes.sashpos(0, min(layout["sash"], max(1, self.panes.winfo_width() - 380)))
             tab = layout.get("tab", "First stage")
+            if tab == "Integrated results":
+                tab = "Summery"
             if tab in self.tabs and self.notebook.tab(self.tabs[tab], "state") != "hidden":
                 self.notebook.select(self.tabs[tab])
             self.status.set("GUI settings and completed cases restored." if not notes else notes[0])
@@ -1255,16 +1276,41 @@ class OptimizationApp:
         primary = self.telemetry_primary.get()
         if telemetry and (telemetry.groups["booster"] or primary == "Booster" and telemetry.groups["primary"]):
             has_booster = True
-        if has_booster:
-            self.notebook.add(self.tabs["Booster"], text="Booster")
-        else:
-            if self.notebook.select() == str(self.tabs["Booster"]):
-                self.notebook.select(self.tabs["First stage"])
-            self.notebook.hide(self.tabs["Booster"])
+        for booster_tab in ("Booster", "Booster 2"):
+            if has_booster:
+                self.notebook.add(self.tabs[booster_tab], text=booster_tab)
+            else:
+                if self.notebook.select() == str(self.tabs[booster_tab]):
+                    self.notebook.select(self.tabs["First stage"])
+                self.notebook.hide(self.tabs[booster_tab])
         matched_tabs = 0
         for phase, figure in self.figures.items():
-            if phase == 'Integrated results':
-                draw_integrated_results(figure, [(case.result, case.color, case.name) for case in displayed])
+            if phase == 'Summery':
+                overlaid = draw_integrated_results(
+                    figure, [(case.result, case.color, case.name) for case in displayed],
+                    telemetry=telemetry, primary_group=primary,
+                    telemetry_color=self.telemetry_color, telemetry_shift=self.telemetry_shift)
+                if overlaid:
+                    matched_tabs += 1
+                self.canvases[phase].draw_idle()
+                continue
+            if phase == 'Paper figures':
+                self.refresh_paper_costs(displayed, telemetry, primary)
+                overlaid = draw_paper_results(
+                    figure, [(case.result, case.color, case.name) for case in displayed],
+                    telemetry=telemetry, primary_group=primary,
+                    telemetry_color=self.telemetry_color, telemetry_shift=self.telemetry_shift)
+                if overlaid:
+                    matched_tabs += 1
+                self.canvases[phase].draw_idle()
+                continue
+            if phase == 'Booster 2':
+                overlaid = draw_booster_altitude_results(
+                    figure, [(case.result, case.color, case.name) for case in displayed if 'x4' in case.result],
+                    telemetry=telemetry if has_booster else None, primary_group=primary,
+                    telemetry_color=self.telemetry_color, telemetry_shift=self.telemetry_shift)
+                if overlaid:
+                    matched_tabs += 1
                 self.canvases[phase].draw_idle()
                 continue
             if phase == '3D trajectory':
@@ -1333,6 +1379,52 @@ class OptimizationApp:
         for name, value in asdict(DispesrionFactorsType()).items():
             self.variables[name].set(str(value))
         self.status.set("Nominal dispersion values restored. Run to apply.")
+
+    def refresh_paper_costs(self, displayed, telemetry, primary):
+        if not hasattr(self, 'paper_cost_text'):
+            return
+        costs = paper_comparison_costs(
+            [(case.result, case.color, case.name) for case in displayed],
+            telemetry=telemetry, primary_group=primary, telemetry_shift=self.telemetry_shift,
+            altitude_scale=ERROR_SCALES['altitude_scale'], speed_scale=ERROR_SCALES['speed_scale'])
+        lines = ["Comparison costs: robust = 2(√(1+r²)−1), squared = r² (lower is better)",
+                 f"r = error / scale; altitude: {ERROR_SCALES['altitude_scale']:g} m, velocity: {ERROR_SCALES['speed_scale']:g} m/s.",
+                 "Displayed time shift; overlap only; equal phase/channel weights; no timing or parameter penalty."]
+        if costs:
+            lines += [f"{'Case':24s} {'Robust':>12s} {'Squared':>12s} {'Samples compared':>20s}"]
+            for item in costs:
+                robust = '—' if item['robust'] is None else f"{item['robust']:.6g}"
+                squared = '—' if item['squared'] is None else f"{item['squared']:.6g}"
+                coverage = f"{item['matched']}/{item['observed']}"
+                lines.append(f"{item['case']:24s} {robust:>12s} {squared:>12s} {coverage:>20s}")
+        else:
+            lines.append("Load/display telemetry and enable Display for cases to compare costs.")
+        self.paper_cost_text.set('\n'.join(lines))
+
+    def export_paper_figure(self):
+        from tkinter import filedialog, messagebox
+        from matplotlib import rc_context
+        filename = filedialog.asksaveasfilename(
+            parent=self.root, title="Export paper figure", defaultextension=".pdf",
+            initialfile="telemetry_comparison.pdf",
+            filetypes=[("PDF", "*.pdf"), ("SVG", "*.svg"), ("PNG (600 dpi)", "*.png")])
+        if not filename:
+            return
+        # Render a separate figure at a fixed publication size, independent of
+        # the dimensions of the on-screen Tk canvas.
+        from matplotlib.figure import Figure
+        figure = Figure(figsize=(7.2, 6.0), constrained_layout=True)
+        displayed = [(case.result, case.color, case.name) for case, visible in zip(self.cases, self.case_visible)
+                     if visible.get() and case.result is not None]
+        try:
+            with rc_context({'pdf.fonttype': 42, 'ps.fonttype': 42, 'svg.fonttype': 'none'}):
+                draw_paper_results(figure, displayed,
+                    telemetry=self.telemetry if self.telemetry_visible.get() else None,
+                    primary_group=self.telemetry_primary.get(), telemetry_color=self.telemetry_color,
+                    telemetry_shift=self.telemetry_shift)
+                figure.savefig(filename, dpi=600, bbox_inches='tight', facecolor='white')
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not export figure", str(exc), parent=self.root)
 
     def clear_plots(self, message):
         for name, figure in self.figures.items():
@@ -1510,6 +1602,7 @@ class OptimizationApp:
                 low, high = report['bounds'][name]
                 lines.append(f"{name:26s} {a:12.6g} → {b:12.6g}   bounds [{low:g}, {high:g}]")
             if report.get('settings'):
+                lines.append(f"Cost function: {report['settings'].get('loss', 'robust')}")
                 lines += ["", "Error scales (smaller means a stronger penalty)"]
                 for channel, unit in CHANNEL_UNITS.items():
                     key = f'{channel}_scale'
@@ -1993,6 +2086,11 @@ class OptimizationApp:
             ttk.Label(panel, text=label).grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
             ttk.Entry(panel, textvariable=settings[key], width=12).grid(row=row, column=2, columnspan=2, sticky="ew", padx=4)
             row += 1
+        settings['loss'] = tk.StringVar(value=saved.get('loss', 'robust'))
+        ttk.Label(panel, text="Cost function").grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Combobox(panel, textvariable=settings['loss'], values=['robust', 'squared'], state="readonly").grid(
+            row=row, column=2, columnspan=2, sticky="ew", padx=4)
+        row += 1
         default_target = next((i for i, case in enumerate(self.cases)
                                if i != self.selected_case and case.result is None), self.selected_case)
         destination = tk.StringVar(value=self.cases[default_target].name)
@@ -2004,6 +2102,8 @@ class OptimizationApp:
                   "Bounds open at their nominal defaults; the initial guess uses the selected case's current values. "
                   "Nominal units: s = seconds, t = metric tons, tf = metric ton-force; SL = sea level, vac = vacuum. "
                   "Payload is held fixed; maximize mode uses the current result's payload or a preliminary nominal solve. "
+                  "Cost: robust = 2(√(1+r²)−1); squared = r², with r = error / scale. "
+                  "The selected cost applies to measurements and phase timing. "
                   "Smaller error scales give stronger mismatch penalties. Supplied acceleration is specific "
                   "acceleration; missing values use ECEF dv/dt. Pressure uses supplied values or ½ρv². "
                   "Acceleration and pressure penalties apply only to ascent. ASDS and RTLS also fit "
@@ -2042,7 +2142,9 @@ class OptimizationApp:
             raise ValueError('Load telemetry before fitting.')
         request = self.form_request()
         # Older sessions and callers may only contain altitude/speed scales.
-        options = dict(ERROR_SCALES, **options)
+        options = {**ERROR_SCALES, 'loss': 'robust', **options}
+        if options['loss'] not in ('robust', 'squared'):
+            raise ValueError("Unknown fitting loss; choose 'robust' or 'squared'.")
         if not options['parameters'] or options['max_evaluations'] < 2:
             raise ValueError('Select factors and allow at least two evaluations.')
         scales = [options[key] for key in ERROR_SCALES]

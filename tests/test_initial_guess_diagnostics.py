@@ -143,6 +143,45 @@ class PhaseDiagnosticTests(unittest.TestCase):
                                              output_dir=None, **kwargs)
         return solution, reports, captured, output.getvalue()
 
+    def test_pre_reentry_load_limits_use_ballistic_state_and_flag_excess_loads(self):
+        phase = 'Ballistic coast to reentry'
+        names = {'Dynamic pressure Reentry start', 'Heat flux Reentry start'}
+        for strategy in ('ASDS', 'RTLS'):
+            with self.subTest(strategy=strategy):
+                model = LV_Optimization(DispesrionFactorsType())
+                solution, _, captured, _ = self.solve(strategy, model=model)
+                diagnostics, opti = captured['diagnostics'], captured['opti']
+                entries = {entry[1]: entry for entry in diagnostics.constraints[phase] if entry[1] in names}
+                self.assertEqual(set(entries), names)
+                self.assertFalse(any(entry[1] in names for entry in
+                                     diagnostics.constraints['Coast before landing']))
+                checks = {
+                    'Dynamic pressure Reentry start': (model.rocket_return.dynamic_pressure_fun,
+                        model.rocket_return.Booster_MaxDynamicPressure, 'kPa'),
+                    'Heat flux Reentry start': (model.rocket_return.heat_flux_fun,
+                        model.rocket_return.Booster_MaxHeatFlux, 'kW/m²'),
+                }
+                state = model.rocket_return.scale_x(solution['x4_before_reentry'])
+                for name, (function, limit, unit) in checks.items():
+                    row, _, scale, actual_unit, _ = entries[name]
+                    self.assertEqual(actual_unit, unit)
+                    self.assertAlmostEqual(scale, limit / 1000.)
+                    self.assertAlmostEqual(float(opti.debug.value(opti.g[row], opti.initial())),
+                                           float(function(state)) / limit)
+                    self.assertAlmostEqual(float(opti.debug.value(opti.ubg[row], opti.initial())), 1.)
+
+                # Both load limits depend only on the pre-ignition state.
+                variables = [ca.symvar(opti.g[entry[0]]) for entry in entries.values()]
+                self.assertTrue(all(len(items) == 1 for items in variables))
+                self.assertEqual(variables[0][0].name(), variables[1][0].name())
+                for physical, should_violate in (([0., 120000., 100., -100., 40000.], False),
+                                                 ([0., 10000., 2500., -1000., 40000.], True)):
+                    opti.set_initial(variables[0][0], model.rocket_return.scale_x(physical))
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        report = diagnostics.report(phase)
+                    violated = {item['constraint'] for item in report['violations']}
+                    self.assertEqual(names.intersection(violated), names if should_violate else set())
+
     def test_every_active_constraint_is_checked_once_after_its_phase_guess(self):
         ascent = ['First-stage ascent', 'Second stage before fairing separation',
                   'Second stage after fairing separation']

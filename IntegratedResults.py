@@ -72,12 +72,60 @@ def return_controls(solution, model):
     return np.asarray(times), np.asarray(throttles), np.asarray(angles)
 
 
-def draw_integrated_results(figure, cases):
+def integrated_telemetry_curves(telemetry, primary_group, solutions, shift=0.):
+    """Route measured channels without truncating explicit phase telemetry."""
+    time = np.asarray(telemetry.time).ravel() + shift
+    shared = primary_group == 'Stage 1 / booster' and bool(telemetry.groups['primary'])
+    windows = {
+        'stage1': [(min(0., float(np.min(s['t1_vec']))), float(np.max(s['t1_vec']))) for s in solutions],
+        'booster': [(float(np.min(s['t4_vec'])), float(np.max(s['t4_vec']))) for s in solutions if 't4_vec' in s],
+    }
+    boostback = [(float(np.min(s['t4_vec'])), float(np.min(s['t4_vec'])) + float(s['dt4_boostback']))
+                 for s in solutions if 't4_vec' in s and 'dt4_boostback' in s]
+
+    def within(intervals):
+        mask = np.zeros(time.size, dtype=bool)
+        for start, end in intervals:
+            mask |= (time >= start) & (time <= end)
+        return mask
+
+    for group, label in (('stage1', 'Stage 1'), ('stage2', 'Stage 2'), ('booster', 'Booster return')):
+        explicit = telemetry.channels(group, 'Phase columns')
+        routed = telemetry.channels(group, primary_group)
+        if shared and group in windows:
+            # A shared broadcast feed needs simulation windows to distinguish
+            # ascent from return. Without results, show that feed just once.
+            if not solutions:
+                if group == 'booster':
+                    routed = explicit
+                else:
+                    label = 'Stage 1 / booster'
+            else:
+                mask = within(windows[group])
+                routed = {key: np.where(mask, values, explicit.get(key, np.full(time.size, np.nan)))
+                          for key, values in routed.items()}
+        for index, key, scale in ((0, 'altitude', 1.), (1, 'speed', 1.), (2, 'mass', 1.),
+                                   (3, 'thrust_factor', 100.), (4, 'alpha', 1.), (4, 'thrust_angle', 1.)):
+            if key not in routed:
+                continue
+            values = np.asarray(routed[key], dtype=float).ravel() * scale
+            if group == 'booster' and index == 4:
+                values = np.where(within(boostback), values, np.nan)
+            if not (np.isfinite(time) & np.isfinite(values)).any():
+                continue
+            suffix = ' · thrust/velocity angle' if key == 'thrust_angle' else ''
+            yield index, time, values, f'Telemetry · {label}{suffix}', '--' if group == 'booster' else ':'
+
+
+def draw_integrated_results(figure, cases, *, telemetry=None, primary_group='Phase columns',
+                            telemetry_color='#CC79A7', telemetry_shift=0.):
     """Draw all visible cases; each tuple is (solution, color, case label)."""
     figure.clear()
-    if not cases:
-        figure.text(.5, .5, 'No displayed optimization results.', ha='center', va='center', color='#666666')
-        return
+    curves = list(integrated_telemetry_curves(telemetry, primary_group, [s for s, _, _ in cases],
+                                             telemetry_shift)) if telemetry is not None else []
+    if not cases and not curves:
+        figure.text(.5, .5, 'No displayed results or matching telemetry.', ha='center', va='center', color='#666666')
+        return False
     grid = figure.add_gridspec(2, 6)
     axes = [figure.add_subplot(grid[0, :2])]
     axes += [figure.add_subplot(grid[0, 2:4], sharex=axes[0]),
@@ -131,6 +179,10 @@ def draw_integrated_results(figure, cases):
             if np.isfinite(angle).any():
                 line(4, time, angle, 'Booster return · boostback', '--', control=True)
 
+    for index, time, values, label, style in curves:
+        axes[index].plot(time, values, color=telemetry_color, linestyle=style,
+                         marker='.', markersize=3, linewidth=1.2, label=label)
+
     for axis, title, unit in zip(axes, ('Altitude', 'Velocity (Earth-fixed)', 'Mass', 'Throttle',
                                        'AoA / thrust–velocity angle'),
                                  ('Altitude [km]', 'Speed [m/s]', 'Mass [t]', 'Throttle [%]', 'Angle [deg]')):
@@ -143,3 +195,4 @@ def draw_integrated_results(figure, cases):
     figure.suptitle('Integrated flight results', fontsize=12)
     figure.supxlabel('S2/boostback angle: thrust vs. air-relative velocity; booster angle shown only during boostback. '
                      'Throttle uses each phase’s reference thrust.', fontsize=8)
+    return bool(curves)

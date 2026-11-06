@@ -318,10 +318,19 @@ def _comparison_samples(solution, telemetry, primary_group, synchronization, win
     return samples
 
 
+def _residual_cost(residual, loss):
+    if loss == 'robust':
+        return 2 * (np.hypot(1., residual) - 1.)
+    if loss == 'squared':
+        return np.square(residual)
+    raise ValueError("Unknown fitting loss; choose 'robust' or 'squared'.")
+
+
 def score_candidate(solution, telemetry, samples, primary_group='Stage 1 / booster',
                     altitude_scale=ERROR_SCALES['altitude_scale'], speed_scale=ERROR_SCALES['speed_scale'],
                     acceleration_scale=ERROR_SCALES['acceleration_scale'], pressure_scale=ERROR_SCALES['pressure_scale'],
-                    phase_time_scale=ERROR_SCALES['phase_time_scale']):
+                    phase_time_scale=ERROR_SCALES['phase_time_scale'], loss='robust'):
+    _residual_cost(0., loss)
     # Synchronization is deliberately performed inside EVERY scoring call.
     synchronization = synchronize_candidate(solution, telemetry, primary_group)
     errors, losses = {}, {}
@@ -346,9 +355,9 @@ def score_candidate(solution, telemetry, samples, primary_group='Stage 1 / boost
             raise ValueError(f'{phase} candidate covers less than 90% of the fixed telemetry window.')
         residual = interpolated[valid] - sample['values'][valid]
         normalized = residual / scales[channel]
-        robust = 2 * (np.hypot(1., normalized) - 1.)
+        cost = _residual_cost(normalized, loss)
         # Missing coverage has a large fixed penalty, never a reduced denominator.
-        losses.setdefault(phase, []).append(float((robust.sum() + 10000 * (observed & ~valid).sum()) / observed.sum()))
+        losses.setdefault(phase, []).append(float((cost.sum() + 10000 * (observed & ~valid).sum()) / observed.sum()))
         key = f'{phase}.{channel}'
         errors[key] = {'rmse': float(np.sqrt(np.mean(residual**2))),
                        'unit': CHANNEL_UNITS[channel],
@@ -367,8 +376,8 @@ def score_candidate(solution, telemetry, samples, primary_group='Stage 1 / boost
         telemetry_duration = end - start
         duration_error = simulated_duration - telemetry_duration
         lateness = np.maximum(time - synchronization['shift'] - end, 0.)
-        duration_penalty = float(2 * (np.hypot(1., duration_error / phase_time_scale) - 1.))
-        late_penalty = float(np.mean(2 * (np.hypot(1., lateness / phase_time_scale) - 1.)))
+        duration_penalty = float(_residual_cost(duration_error / phase_time_scale, loss))
+        late_penalty = float(np.mean(_residual_cost(lateness / phase_time_scale, loss)))
         timing[phase] = {'telemetry_start': start, 'telemetry_end': end,
                          'telemetry_duration': telemetry_duration,
                          'simulation_duration': simulated_duration,
@@ -396,7 +405,7 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
                                 phase_time_scale=ERROR_SCALES['phase_time_scale'], regularization=.01,
                                 initial_solution=None, windows=None, progress_callback=None,
                                 checkpoint_callback=None, cancel_callback=None,
-                                solver=None, ipopt_options=None):
+                                solver=None, ipopt_options=None, loss='robust'):
     """Return the best successful fit, its trajectory, baseline, and diagnostics.
 
     max_evaluations counts all solver calls, including optional payload bootstrap.
@@ -411,6 +420,7 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
     Missing measurements are skipped. Each observed phase also pays for its
     duration mismatch and simulated samples later than its last telemetry point.
     """
+    _residual_cost(0., loss)
     telemetry = load_telemetry_csv(telemetry) if isinstance(telemetry, (str, Path)) else telemetry
     request = deepcopy(base_request)
     request['dispersion'] = dict(asdict(DispesrionFactorsType()), **request['dispersion'])
@@ -507,7 +517,7 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
                 synchronization = synchronize_candidate(solution, telemetry, primary_group)
                 samples = _comparison_samples(solution, telemetry, primary_group, synchronization,
                                               windows, recovery=request['recovery'])
-            metrics = score_candidate(solution, telemetry, samples, primary_group, **scales)
+            metrics = score_candidate(solution, telemetry, samples, primary_group, loss=loss, **scales)
             penalty = float(regularization * np.mean((normalized - initial)**2))
             score = metrics['score'] + penalty
             candidate = dict(metrics, score=score, data_score=metrics['score'], request=candidate_request,
@@ -523,7 +533,7 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
                     checkpoint_callback({'best': best, 'baseline': baseline, 'history': history + [record],
                                          'evaluations': calls, 'termination': 'Searching',
                                          'parameters': list(parameters), 'bounds': dict(zip(parameters, limits.tolist())),
-                                         'settings': dict(scales, regularization=regularization,
+                                         'settings': dict(scales, loss=loss, regularization=regularization,
                                                           primary_group=primary_group)})
         except (ValueError, RuntimeError, FloatingPointError) as exc:
             score = 1e12
@@ -546,7 +556,7 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
     return {'best': best, 'baseline': baseline, 'history': history, 'evaluations': calls,
             'termination': termination, 'elapsed': time.monotonic() - started,
             'parameters': list(parameters), 'bounds': dict(zip(parameters, limits.tolist())),
-            'settings': dict(scales, regularization=regularization, primary_group=primary_group),
+            'settings': dict(scales, loss=loss, regularization=regularization, primary_group=primary_group),
             'windows': [{'phase': sample['phase'], 'channel': sample['channel'],
                          'telemetry_start': float(sample['time'][0]), 'telemetry_end': float(sample['time'][-1])}
                         for sample in samples]}

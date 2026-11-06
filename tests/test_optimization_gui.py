@@ -131,7 +131,7 @@ class DispersionFormTests(unittest.TestCase):
                 app.telemetry_shift = -1.
                 app.telemetry_color = '#CC79A7'
                 app.telemetry_info, app.summary, app.notebook = Mock(), Mock(), Mock()
-                app.tabs = {'Booster': Mock(), 'First stage': Mock()}
+                app.tabs = {'Booster': Mock(), 'Booster 2': Mock(), 'First stage': Mock()}
                 app.figures = {'Booster': Figure()}
                 app.canvases = {'Booster': Mock()}
                 app.update_case_labels, app.schedule_save = Mock(), Mock()
@@ -189,7 +189,7 @@ class DispersionFormTests(unittest.TestCase):
         from DispersionFit import ERROR_SCALES
         interpreter = tk.Tcl()
         string_var, boolean_var = tk.StringVar, tk.BooleanVar
-        for saved in ({}, {'acceleration_scale': '2.5', 'pressure_scale': '8', 'phase_time_scale': '3'}):
+        for saved in ({}, {'acceleration_scale': '2.5', 'pressure_scale': '8', 'phase_time_scale': '3', 'loss': 'squared'}):
             with self.subTest(saved=saved), ExitStack() as stack:
                 stack.enter_context(patch.object(tk, 'Toplevel'))
                 stack.enter_context(patch.object(tk, 'Canvas'))
@@ -200,7 +200,8 @@ class DispersionFormTests(unittest.TestCase):
                 labels = stack.enter_context(patch.object(ttk, 'Label'))
                 entries = stack.enter_context(patch.object(ttk, 'Entry'))
                 buttons = stack.enter_context(patch.object(ttk, 'Button'))
-                for name in ('Frame', 'Checkbutton', 'Combobox', 'Scrollbar'):
+                combos = stack.enter_context(patch.object(ttk, 'Combobox'))
+                for name in ('Frame', 'Checkbutton', 'Scrollbar'):
                     stack.enter_context(patch.object(ttk, name))
                 app = OptimizationApp.__new__(OptimizationApp)
                 app.process, app.telemetry, app.root = None, Mock(), Mock()
@@ -220,6 +221,10 @@ class DispersionFormTests(unittest.TestCase):
                 fields = dict(zip(('max_evaluations', *ERROR_SCALES, 'regularization'), settings))
                 for key in ('acceleration_scale', 'pressure_scale', 'phase_time_scale'):
                     self.assertEqual(float(fields[key].get()), float(saved.get(key, ERROR_SCALES[key])))
+                loss = combos.call_args_list[0].kwargs['textvariable']
+                self.assertEqual(loss.get(), saved.get('loss', 'robust'))
+                loss.set('squared')
+                self.assertEqual(app.cases[0].fit_settings['loss'], 'squared')
                 fields['acceleration_scale'].set('3.5')
                 fields['pressure_scale'].set('7.5')
                 fields['phase_time_scale'].set('4')
@@ -230,6 +235,7 @@ class DispersionFormTests(unittest.TestCase):
                              if call.kwargs['text'] == 'Start search')
                 start()
                 options, target = app.start_fit.call_args.args
+                self.assertEqual(options['loss'], 'squared')
                 self.assertEqual(options['acceleration_scale'], 3.5)
                 self.assertEqual(options['pressure_scale'], 7.5)
                 self.assertEqual(options['phase_time_scale'], 4.)
@@ -456,6 +462,20 @@ class ResultRenderingTests(unittest.TestCase):
                 cls.results[recovery] = run_optimization(request, None)
             cls.requests[recovery] = request
 
+    def test_paper_results_render_all_recovery_modes(self):
+        from PaperResults import draw_paper_results
+        for recovery, solution in self.results.items():
+            with self.subTest(recovery=recovery):
+                figure = Figure(figsize=(7.2, 6.0), constrained_layout=True)
+                draw_paper_results(figure, [(solution, 'blue', 'Case 1')])
+                FigureCanvasAgg(figure).draw()
+                self.assertEqual(len(figure.axes), 3)
+                self.assertTrue(figure.axes[0].lines)
+                self.assertTrue(figure.axes[1].lines)
+                self.assertEqual(len(figure.axes[2].lines), len(figure.axes[1].lines))
+                self.assertEqual(len(figure.axes[0].lines), 4 if recovery == 'EXP' else 5)
+                self.assertEqual([text.get_text() for text in figure.legends[0].texts], ['Case 1'])
+
     def test_integrated_results_show_all_phases_with_return_dashed(self):
         from TelemetryFrames import eci_to_ecef_velocity
         for recovery, solution in self.results.items():
@@ -495,6 +515,9 @@ class ResultRenderingTests(unittest.TestCase):
                     else:
                         self.assertTrue(np.isnan(angle).all())
                         self.assertEqual(angle_lines, [])
+                figure.axes[3].set_xlim(100., 150.)
+                for axis in figure.axes:
+                    np.testing.assert_allclose(axis.get_xlim(), (100., 150.))
 
     def test_integrated_results_redraw_cases_and_zero_coast(self):
         figure = Figure(figsize=(13, 8), constrained_layout=True)

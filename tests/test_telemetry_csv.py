@@ -6,7 +6,39 @@ import unittest
 import numpy as np
 from matplotlib.figure import Figure
 
-from TelemetryCSV import aerodynamic_loads, load_telemetry_csv, mission_seconds, overlay_telemetry, interpolate_speed_time, numerical_acceleration
+from TelemetryCSV import aerodynamic_loads, load_telemetry_csv, mission_seconds, overlay_telemetry, interpolate_speed_time, numerical_acceleration, make_plot_axes
+
+
+class TimeAxisTests(unittest.TestCase):
+    def test_zoom_and_pan_propagate_from_each_time_plot_without_changing_trajectory(self):
+        for phase in ('First stage', 'S1 details', 'Second stage', 'S2 propulsion', 'S2 orbit', 'Booster'):
+            with self.subTest(phase=phase):
+                axes = make_plot_axes(Figure(), phase)
+                spatial = phase in ('First stage', 'Booster')
+                time_axes = axes[1:] if spatial else axes
+                if spatial:
+                    axes[0].set_xlim(-20., 30.)
+                for index, source in enumerate(time_axes):
+                    limits = (10. + index, 50. + index)
+                    source.set_xlim(*limits)
+                    for axis in time_axes:
+                        np.testing.assert_allclose(axis.get_xlim(), limits)
+                    if spatial:
+                        np.testing.assert_allclose(axes[0].get_xlim(), (-20., 30.))
+
+    def test_steering_twin_axis_shares_time_and_other_tabs_stay_independent(self):
+        figure = Figure()
+        axes = make_plot_axes(figure, 'First stage')
+        steering = axes[4].twinx()
+        other_tab = make_plot_axes(Figure(), 'Second stage')
+        other_tab[0].set_xlim(100., 200.)
+        steering.set_xlim(20., 40.)
+        for axis in axes[1:]:
+            np.testing.assert_allclose(axis.get_xlim(), (20., 40.))
+        for axis in other_tab:
+            np.testing.assert_allclose(axis.get_xlim(), (100., 200.))
+        axes[1].set_xlim(30., 35.)
+        np.testing.assert_allclose(steering.get_xlim(), (30., 35.))
 
 
 class TelemetryTests(unittest.TestCase):

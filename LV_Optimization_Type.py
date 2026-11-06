@@ -562,37 +562,24 @@ class LV_Optimization(VLType):
         apogee, perigee = orbit_burn['apogee'], orbit_burn['perigee']
         propellent_mass_for_final_dv = orbit_burn['reserve']
 
-        x3f_mass_scaled = (self.eci.SecondStage_EmptyMass + payload_mass + propellent_mass_for_final_dv) / self.eci.scaleX[6]
+        x3f_minmass_scaled = (self.eci.SecondStage_EmptyMass + payload_mass + propellent_mass_for_final_dv) / self.eci.scaleX[6]
         diagnostics.add(phase3, 'Final mass including orbit-burn reserve',
-                        x3[6,self.eci.N[1]] >= x3f_mass_scaled, self.eci.scaleX[6], 'kg')
+                        x3[6,self.eci.N[1]] >= x3f_minmass_scaled, self.eci.scaleX[6], 'kg')
         diagnostics.add(phase3, 'Parking apogee target', apogee/Target_Orbit["perigee"] == 1.0,
                         Target_Orbit['perigee'], 'm')
         diagnostics.add(phase3, 'Parking perigee lower bound',
                         perigee/(self.eci.R0 + self.eci.ParkingOrbit_PerigeeAlt) >= 1.0,
                         self.eci.R0 + self.eci.ParkingOrbit_PerigeeAlt, 'm')
-        # opti.subject_to(h_final[2] / ca.norm_2(h_final) == np.cos(Target_Orbit["i"]))
         
-        # if Target_Orbit["i"] == 0.0 or Target_Orbit["i"] == np.pi:
-        #     # Equatorial planes require both horizontal angular-momentum
-        #     # components to vanish, without dividing by zero or differentiating
-        #     # acos at its singular endpoints. The sign selects pro/retrograde.
-        #     h_scaled = h / np.sqrt(self.eci.mu * self.eci.R0)
-        #     opti.subject_to(h_scaled[:2] == 0.0)
-        #     opti.subject_to(h_scaled[2] >= 0.0 if Target_Orbit["i"] == 0.0 else h_scaled[2] <= 0.0)
-        # else:
-        #     opti.subject_to(i/Target_Orbit["i"] == 1.0)
-            
-
-
     # Phase 4 - Booster Return:
         if RecoveryStrategy != 'EXP':
-            reentry_altitude_min = 70000.
+            reentry_altitude_min = 50000.
             reentry_thrust_max = 0.8
             landing_thrust_max = 1./3.
             landing_thrust_min = (0.75/3. * self.rocket_return.EmptyFirstStageMass
                                   * self.rocket_return.g0/self.rocket_return.scaleU[0])
             if self.rocket_return.FirstStage_MinThrust_Factor > reentry_thrust_max:
-                raise ValueError('Reentry minimum thrust exceeds the permitted maximum of 0.8.')
+                raise ValueError('Reentry minimum thrust exceeds the permitted maximum of 0.6.')
             if landing_thrust_min > landing_thrust_max:
                 raise ValueError('Landing minimum thrust exceeds the permitted maximum of 1/3.')
             if RecoveryStrategy == 'RTLS':
@@ -656,6 +643,16 @@ class LV_Optimization(VLType):
             ### set the thrust constraints
             diagnostics.add(reentry, 'Thrust factor upper bound', u4_reentry[0] <= reentry_thrust_max)
             diagnostics.add(reentry, 'Thrust factor lower bound', u4_reentry[0] >= self.rocket_return.FirstStage_MinThrust_Factor)
+            # N_reentry_constraints = 5
+            # x4_reentry_intren = x4_before_reentry
+            # for i in range(N_reentry_constraints):
+            #     diagnostics.add(reentry, f'Dynamic pressure reentry sample={i+1}/{N_reentry_constraints}',
+            #                     self.rocket_return.dynamic_pressure_fun(x4_reentry_intren)/self.rocket_return.Booster_MaxDynamicPressure <= 1.0,
+            #                     self.rocket_return.Booster_MaxDynamicPressure / 1000., 'kPa')
+            #     diagnostics.add(reentry, f'Heat flux reentry sample={i+1}/{N_reentry_constraints}',
+            #                     self.rocket_return.heat_flux_fun(x4_reentry_intren)/self.rocket_return.Booster_MaxHeatFlux <= 1.0,
+            #                     self.rocket_return.Booster_MaxHeatFlux / 1000., 'kW/m²')
+            #     x4_reentry_intren = self.rocket_return.dynamics_kp1(x4_reentry_intren, 0, dt4_reentry/N_reentry_constraints)
 
             ### After Reentry, before landing burn (ballistic)
             diagnostics.add(coast, 'Dynamics',
@@ -665,13 +662,13 @@ class LV_Optimization(VLType):
             N_before_landing_constraints = 20
             x4_before_landing_intren = x4_after_reentryburn
             for i in range(N_before_landing_constraints):
-                x4_before_landing_intren = self.rocket_return.dynamics_kp1(x4_before_landing_intren, 0, dt4_before_landing/N_before_landing_constraints)
                 diagnostics.add(coast, f'Dynamic pressure sample={i+1}/{N_before_landing_constraints}',
                                 self.rocket_return.dynamic_pressure_fun(x4_before_landing_intren)/self.rocket_return.Booster_MaxDynamicPressure <= 1.0,
                                 self.rocket_return.Booster_MaxDynamicPressure / 1000., 'kPa')
                 diagnostics.add(coast, f'Heat flux sample={i+1}/{N_before_landing_constraints}',
                                 self.rocket_return.heat_flux_fun(x4_before_landing_intren)/self.rocket_return.Booster_MaxHeatFlux <= 1.0,
                                 self.rocket_return.Booster_MaxHeatFlux / 1000., 'kW/m²')
+                x4_before_landing_intren = self.rocket_return.dynamics_kp1(x4_before_landing_intren, 0, dt4_before_landing/N_before_landing_constraints)
 
             ### Landing Burn:
             diagnostics.add(landing, 'Initial state', x4_landing[:,0] == x4_before_landing,
@@ -700,10 +697,10 @@ class LV_Optimization(VLType):
                                 self.rocket_return.scaleX[1], 'm')
             else:
                 # zero altitude at the end of the flight
-                diagnostics.add(landing, 'Final altitude target', self.rocket_return.local_to_alt(x4f_landing_unscaled) == 0.0, unit='m')
+                diagnostics.add(landing, 'Final altitude target', self.rocket_return.local_to_alt(x4f_landing_unscaled)/self.rocket_return.scaleX[1] == 0.0, unit='m')
             # minimal velocity at the end of the flight
             diagnostics.add(landing, 'Final speed upper bound',
-                            ca.norm_2(x4_landing[2:4,self.rocket_return.N]) <= 2.5/self.rocket_return.scaleX[2],
+                            ca.norm_2(x4_landing[2:4,self.rocket_return.N]) <= 5.0/self.rocket_return.scaleX[2],
                             self.rocket_return.scaleX[2], 'm/s')
             diagnostics.add(landing, 'Final mass lower bound',
                             x4_landing[4,self.rocket_return.N] >= self.rocket_return.EmptyFirstStageMass/self.rocket_return.scaleX[4],
@@ -716,7 +713,10 @@ class LV_Optimization(VLType):
         cost += 0.5*gain*(ca.sumsqr(u2[0,1:]-u2[0,:-1])  + ca.sumsqr(u3[1,1:]-u3[1,:-1]))
         if RecoveryStrategy != 'EXP':
             cost += 0.05*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) 
-        cost += -(x3f[6] - propellent_mass_for_final_dv) # maximize the payload mass and propellant spares
+        if payload_mass_predefined < 0:
+            cost += -payload_mass # maximize the payload mass and propellant spares
+        else:
+            cost += -(x3f[6] - self.eci.SecondStage_EmptyMass - payload_mass - propellent_mass_for_final_dv) # maximize the payload mass and propellant spares
 
         opti.minimize(cost)
 
@@ -1010,7 +1010,7 @@ class LV_Optimization(VLType):
 
             # calculate the initial guess for self.booster return
             dt4_ballistic_guess = 300 / self.rocket_return.scaleT
-            reentry_altitude_target = reentry_altitude_min + 1000.
+            reentry_altitude_target = 70000 + 1000.
             iter=0
             while iter < 50:
                 if RecoveryStrategy == 'RTLS':
@@ -1035,7 +1035,7 @@ class LV_Optimization(VLType):
             u4_reentry_guess = reentry_thrust_max
             dt4_reentry_guess = 1.0 / self.rocket_return.scaleT
             iter = 0
-            v_final = 1300.0
+            v_final = 1100.0
             while iter < 50:
                 x4_after_reentry_guess = self.rocket_return.dynamics_kp1_M20(x4_before_reentry_guess, u4_reentry_guess, dt4_reentry_guess)
                 x4_after_reentry_guess_unscaled = self.rocket_return.unscale_x(x4_after_reentry_guess)
@@ -1586,14 +1586,14 @@ class LV_Optimization(VLType):
                 hflux4_reentry_sol[k] = self.rocket_return.Booster_k_empirical*np.sqrt((self.atmosphere.rho_fun(alt4_reentry_sol[k]) * self.ScenarioDispersion.AtmosphereDensity)) * vel4_reentry_sol[k]**3
 
             # before landing phase
-            N4_before_landing = 25
+            N4_before_landing = 20
             x4_before_landing_vec_sol = np.zeros((self.rocket_return.nx, N4_before_landing+1))
             alt4_before_landing_sol, vel4_before_landing_sol = np.zeros((N4_before_landing+1,1)), np.zeros((N4_before_landing+1,1))
             Qdyn4_before_landing_sol, hflux4_before_landing_sol, acc4_before_landing_sol = np.zeros((N4_before_landing+1,1)), np.zeros((N4_before_landing+1,1)), np.zeros((N4_before_landing+1,1))
             x4_before_landing_vec_sol[:,0] = self.rocket_return.unscale_x(x4_after_reentry_scaled_sol).full().flatten()
             t4_before_landing_vec = t4_reentry_vec[-1] + np.linspace(0.0, dt4_before_landing_sol, N4_before_landing+1).reshape(-1,1)
             for k in range(N4_before_landing+1):
-                if k<N4_ballistic:
+                if k<N4_before_landing:
                     x4_before_landing_vec_sol[:,k+1] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4_before_landing_vec_sol[:,k]), 0, dt4_before_landing_sol/N4_before_landing/self.rocket_return.scaleT)).full().flatten()
                 acc4_before_landing_sol[k] = self.rocket_return.specific_acc_fun(self.rocket_return.scale_x(x4_before_landing_vec_sol[:,k]), 0)
                 alt4_before_landing_sol[k] = self.rocket_return.local_to_alt(x4_before_landing_vec_sol[:,k])

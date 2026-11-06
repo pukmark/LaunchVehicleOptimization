@@ -92,10 +92,15 @@ python OptimizationGUI.py
 3. Click **Run Case 1**. Follow progress in **Solver output**; **Cancel** stops
    the active worker.
 4. After convergence, inspect the first-stage, upper-stage, and 3D trajectory
-   tabs. **Integrated results** combines altitude, Earth-fixed speed, mass,
+   tabs. **Summery**, the leftmost tab, combines altitude, Earth-fixed speed, mass,
    throttle, and AoA/thrust angle on a shared timeline, including coasts.
    Ascent uses solid lines and booster return uses dashed lines. Select another
    case to compare a different vehicle, orbit, or recovery strategy.
+   Loaded telemetry overlays any available altitude, speed, mass, throttle, and
+   angle measurements in this tab, using the telemetry color, time shift, and
+   column routing. It can also display telemetry without a computed case.
+   **Booster 2** plots altitude vertically against speed, mass, dynamic pressure,
+   heat flux, and acceleration, with available booster telemetry overlays.
    Use **Import settings** beside a case to copy another case's last-run inputs
    (or its current inputs if it has not been run), then run the destination case.
 5. Use **Load telemetry CSV…** to overlay a file from `falcon9_telemetry/`, then

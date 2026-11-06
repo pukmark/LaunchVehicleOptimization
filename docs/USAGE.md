@@ -78,6 +78,25 @@ a numbered suffix so existing configurations are preserved. These files contain
 only the vehicle definition. Use **Save state…** and **Load state…** to transfer
 complete sessions with case settings and results.
 
+The **Paper figures** tab compares all cases with **Display** enabled against
+the displayed telemetry. It shows altitude [km], Earth-fixed velocity [m/s], and
+its signed speed derivative [m/s²] versus mission time in three plots spanning first stage, second stage (including
+the separation coast), and booster return. Case colors, telemetry column assignment,
+and the telemetry time shift follow the main controls. One shared legend lists
+each case and telemetry once; points distinguish telemetry from simulation lines.
+The acceleration plot uses backward differences of ECEF speed for both sources,
+including gravity, rather than supplied accelerometer values. Each simulation
+segment is differentiated separately; missing telemetry samples remain gaps.
+**Export paper figure…** saves a fixed 7.2 × 6 inch figure as vector PDF or SVG,
+or as a 600 dpi PNG, independently of the GUI window size. A separate readout below the graphs lists
+both robust and squared costs for every displayed case. These costs use the
+plotted altitude/velocity telemetry and current time shift, normalized by 1000 m
+and 25 m/s respectively, with equal phase/channel weights. Only finite overlapping
+samples contribute; the compared/observed sample count exposes missing coverage.
+These are measurement comparison costs, without the fitting search's automatic
+synchronization, acceleration/pressure, timing, or parameter-change penalties.
+The cost readout is excluded from exported figures.
+
 The **3D trajectory** tab shows first- and second-stage ascent in ECI coordinates,
 Earth, the equatorial plane, and parking/final orbits, with XY, YZ, and XZ
 projections as in `Main.py`. Drag the 3D view to rotate it and use the plot
@@ -185,8 +204,12 @@ not override this automatic per-candidate synchronization.
 The search holds payload fixed. A positive payload entry is used directly;
 maximize mode uses the source case's computed payload, or runs a preliminary
 nominal optimization to determine it. It then uses bounded Powell search,
-robust normalized errors balanced across available channels and phases,
-and a configurable penalty for changes from the starting factors. Comparison
+normalized errors balanced across available channels and phases,
+and a configurable penalty for changes from the starting factors. The fitting
+dialog's **Cost function** selects `robust` (default), `2(√(1+r²)−1)`, or
+`squared`, `r²`, where `r = error / scale`. This choice applies to measurement
+and phase timing errors and is saved with the case and fit report. Python callers
+can pass `loss='squared'` to `fit_dispersion_to_telemetry()` or `score_candidate()`. Comparison
 samples are fixed from baseline overlap (with a small boundary margin). First-
 and second-stage comparisons use only times with positive telemetry acceleration
 (`dv/dt > 0`, backward differences of ECEF speed). The same time mask applies to
@@ -216,7 +239,7 @@ them; explicitly labelled phase columns retain their complete observed extent.
 both timing penalties. The fit report shows telemetry and simulation durations,
 their difference, late sample counts, and end overruns for each fitted phase.
 Acceleration and dynamic pressure contribute during **first- and second-stage
-ascent only**, with the same robust loss as altitude and speed. These channels
+ascent only**, with the same selected loss as altitude and speed. These channels
 are ignored for booster return and other phases, whether measured or calculated.
 Finite supplied ascent telemetry takes precedence, with missing
 values calculated where possible. Supplied acceleration follows the CSV's

@@ -81,13 +81,18 @@ PLOTS["Booster"].extend([
 
 
 def make_plot_axes(figure, phase):
-    """Keep the six existing booster plots and add a wide heating plot below."""
+    """Share the time range within each tab, keeping spatial axes independent."""
     if phase == "Booster":
         grid = figure.add_gridspec(2, 4)
-        return ([figure.add_subplot(grid[0, col]) for col in range(4)]
+        axes = ([figure.add_subplot(grid[0, col]) for col in range(4)]
                 + [figure.add_subplot(grid[1, col]) for col in range(2)]
                 + [figure.add_subplot(grid[1, 2:])])
-    return figure.subplots(2, 3).ravel()
+    else:
+        axes = figure.subplots(2, 3).ravel()
+    time_axes = axes[1:] if phase in ("First stage", "Booster") else axes
+    for axis in time_axes[1:]:
+        axis.sharex(time_axes[0])
+    return axes
 
 
 def aerodynamic_loads(altitude_m, speed_mps, density_factor=1.0,

@@ -91,7 +91,7 @@ class VLType(PythonMsg):
     Booster_Cd0: float = field(default = 1.6)
     Booster_Cda2: float = field(default = 2.0)
     Booster_CLa: float = field(default = 0.6) # [1/rad]
-    Booster_MaxDynamicPressure: float = field(default = 75.0 * 10**3) # [Pa]
+    Booster_MaxDynamicPressure: float = field(default = 70.0 * 10**3) # [Pa]
     Booster_MaxHeatFlux: float = field(default = 110.0 * 10**3) # [Pa]
     Booster_k_empirical: float = field(default = 2.0e-4) # [-]
 
