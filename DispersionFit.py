@@ -1,4 +1,4 @@
-"""Bounded dispersion fitting against synchronized telemetry, independent of Tk.
+"""Bounded dispersion or physical-vehicle fitting against synchronized telemetry.
 
 Each successful candidate is synchronized before scoring. The trajectory solver
 is injectable for testing; by default each evaluation runs the full optimizer.
@@ -15,6 +15,8 @@ import numpy as np
 from scipy.optimize import minimize
 
 from LV_Type_scaled import DispesrionFactorsType, VLType
+from VehicleDefinitions import (VEHICLE_PARAMETERS, NONNEGATIVE_PARAMETERS,
+                                validate_vehicle_definition, vehicle_name)
 from LaunchSites import parse_launch_site
 from TelemetryCSV import (TelemetryData, load_telemetry_csv, interpolate_speed_time,
                           numerical_acceleration, aerodynamic_loads, PRIMARY_GROUPS)
@@ -29,8 +31,66 @@ CHANNEL_UNITS = {'altitude': 'm', 'speed': 'm/s',
                  'acceleration': 'm/s²', 'pressure': 'kPa'}
 
 
-def default_fit_bounds(request):
-    """Nominal bounds for the vehicle, independent of the starting factors."""
+DEFAULT_VEHICLE_PARAMETERS = tuple(VEHICLE_PARAMETERS)
+
+
+def prepare_fit_request(request, fit_mode='dispersion'):
+    """Copy request, baking vehicle dispersion into physical fits exactly once.
+
+    Atmosphere density and launch altitude remain fixed scenario inputs.
+    """
+    if fit_mode not in ('dispersion', 'vehicle'):
+        raise ValueError("Unknown fit mode; choose 'dispersion' or 'vehicle'.")
+    request = deepcopy(request)
+    request['dispersion'] = dict(asdict(DispesrionFactorsType()), **request.get('dispersion', {}))
+    dispersion = _validate_request(request)
+    if fit_mode == 'vehicle':
+        model = VLType()
+        model.ApplyVehicleConfiguration(request['configuration'])
+        model.ApplyScenarioDispersionToLV(dispersion)
+        request['configuration'] = validate_vehicle_definition({
+            'name': vehicle_name(request['configuration']),
+            'parameters': {name: float(getattr(model, name)) for name in VEHICLE_PARAMETERS}})
+        request['dispersion'] = asdict(DispesrionFactorsType())
+        for name in ('AtmosphereDensity', 'LaunchAltDelta'):
+            request['dispersion'][name] = getattr(dispersion, name)
+    return request
+
+
+def fit_parameter_values(request, fit_mode='dispersion'):
+    if fit_mode == 'dispersion':
+        return dict(request['dispersion'])
+    return prepare_fit_request(request, fit_mode)['configuration']['parameters']
+
+
+def validate_fit_parameter_bounds(name, low, high, fit_mode='dispersion'):
+    if fit_mode == 'vehicle':
+        if low < 0 or low == 0 and name not in NONNEGATIVE_PARAMETERS:
+            raise ValueError(f'{name}: physical bounds must be ' +
+                             ('nonnegative.' if name in NONNEGATIVE_PARAMETERS else 'positive.'))
+        if name.endswith(('MinThrust_Factor', 'MinThrust_IspFactor')) and high > 1:
+            raise ValueError(f'{name}: throttle-factor bounds cannot exceed 1.')
+        if name == 'FirstStage_MaxAlpha' and high > np.pi / 2:
+            raise ValueError(f'{name}: angle bounds cannot exceed 90 degrees.')
+    elif name in MULTIPLIERS and low <= 0:
+        raise ValueError(f'{name}: multiplier bounds must be positive.')
+
+
+def default_fit_bounds(request, fit_mode='dispersion'):
+    """Nominal dispersion bounds, or physical bounds around the current vehicle."""
+    if fit_mode == 'vehicle':
+        result = {}
+        for name, value in fit_parameter_values(request, fit_mode).items():
+            scale = VEHICLE_PARAMETERS[name][3]
+            low, high = max(0., .8 * value), max(1.2 * value, value + .1 * scale)
+            if name.endswith(('MinThrust_Factor', 'MinThrust_IspFactor')):
+                high = min(high, 1.)
+            if name == 'FirstStage_MaxAlpha':
+                high = min(high, np.pi / 2)
+            result[name] = (low, high)
+        return result
+    if fit_mode != 'dispersion':
+        raise ValueError("Unknown fit mode; choose 'dispersion' or 'vehicle'.")
     model = VLType()
     model.ApplyVehicleConfiguration(request.get('configuration', 1))
     values = asdict(DispesrionFactorsType())
@@ -72,7 +132,12 @@ def _solve_candidate(request, init_guess=None, ipopt_options=None):
     model = LV_Optimization(dispersion, request['configuration'],
                             launch_site=parse_launch_site(request.get('launch_site')))
     if init_guess is not None:
-        compatible = (init_guess.get('configuration', request['configuration']) == request['configuration']
+        previous_configuration = init_guess.get('configuration', request['configuration'])
+        # Physical fits change custom values, but retain the same state/control layout.
+        same_configuration = (previous_configuration == request['configuration']
+                              or isinstance(previous_configuration, dict)
+                              and isinstance(request['configuration'], dict))
+        compatible = (same_configuration
                       and parse_launch_site(init_guess.get('launch_site')) == parse_launch_site(request.get('launch_site')))
         if request['recovery'] != 'EXP' and 'x4' not in init_guess:
             compatible = False
@@ -397,7 +462,7 @@ class _StopSearch(Exception):
     pass
 
 
-def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_PARAMETERS,
+def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=None,
                                 bounds=None, primary_group='Stage 1 / booster', max_evaluations=80,
                                 altitude_scale=ERROR_SCALES['altitude_scale'], speed_scale=ERROR_SCALES['speed_scale'],
                                 acceleration_scale=ERROR_SCALES['acceleration_scale'],
@@ -405,14 +470,17 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
                                 phase_time_scale=ERROR_SCALES['phase_time_scale'], regularization=.01,
                                 initial_solution=None, windows=None, progress_callback=None,
                                 checkpoint_callback=None, cancel_callback=None,
-                                solver=None, ipopt_options=None, loss='robust'):
+                                solver=None, ipopt_options=None, loss='robust', fit_mode='dispersion'):
     """Return the best successful fit, its trajectory, baseline, and diagnostics.
 
     max_evaluations counts all solver calls, including optional payload bootstrap.
     A nonpositive payload is fixed from initial_solution, or from one preliminary
     nominal solve. All subsequent candidates use that SAME fixed payload.
-    Bounds contain absolute factor/offset values. Progress and checkpoint hooks
-    run after evaluations; cancellation is checked between solver calls.
+    fit_mode='vehicle' fits editable physical parameters in SI units, starting
+    from the current dispersed vehicle. The best request is a reusable custom
+    configuration with neutral vehicle factors. Atmospheric/launch inputs stay fixed.
+    Bounds contain absolute physical values or factor/offset values by mode.
+    Progress and checkpoint hooks run after evaluations; cancellation is checked between solver calls.
     Fit altitude, speed, acceleration and dynamic pressure during ascent.
     Non-EXP recovery includes post-separation booster altitude/speed only,
     without the positive-acceleration filter used for ascent. All phases share
@@ -422,13 +490,13 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
     """
     _residual_cost(0., loss)
     telemetry = load_telemetry_csv(telemetry) if isinstance(telemetry, (str, Path)) else telemetry
-    request = deepcopy(base_request)
-    request['dispersion'] = dict(asdict(DispesrionFactorsType()), **request['dispersion'])
-    _validate_request(request)
+    request = prepare_fit_request(base_request, fit_mode)
+    if parameters is None:
+        parameters = DEFAULT_VEHICLE_PARAMETERS if fit_mode == 'vehicle' else DEFAULT_PARAMETERS
     parameters = tuple(parameters)
-    known = {item.name for item in fields(DispesrionFactorsType)}
+    known = set(VEHICLE_PARAMETERS) if fit_mode == 'vehicle' else {item.name for item in fields(DispesrionFactorsType)}
     if not parameters or len(set(parameters)) != len(parameters) or not set(parameters) <= known:
-        raise ValueError('Select one or more unique dispersion factors.')
+        raise ValueError('Select one or more unique fitting parameters.')
     if type(max_evaluations) is not int or max_evaluations < 2:
         raise ValueError('Evaluation budget must be an integer of at least 2.')
     scales = dict(altitude_scale=altitude_scale, speed_scale=speed_scale,
@@ -440,19 +508,19 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
         raise ValueError('Unknown telemetry column assignment.')
     if not any('speed' in telemetry.channels(phase, primary_group) for phase in ('stage1', 'stage2')):
         raise ValueError('Load first- or second-stage speed telemetry before fitting.')
-    ranges = default_fit_bounds(request) if bounds is None else bounds
+    ranges = default_fit_bounds(request, fit_mode) if bounds is None else bounds
     try:
         limits = np.array([ranges[name] for name in parameters], dtype=float)
     except (KeyError, TypeError, ValueError):
-        raise ValueError('Provide numeric lower/upper bounds for every selected factor.') from None
-    start = np.array([request['dispersion'][name] for name in parameters], dtype=float)
+        raise ValueError('Provide numeric lower/upper bounds for every selected parameter.') from None
+    values = fit_parameter_values(request, fit_mode)
+    start = np.array([values[name] for name in parameters], dtype=float)
     if limits.shape != (len(parameters), 2) or not np.isfinite(limits).all() or np.any(limits[:, 0] >= limits[:, 1]):
-        raise ValueError('Every selected factor needs finite lower < upper bounds.')
+        raise ValueError('Every selected parameter needs finite lower < upper bounds.')
     if np.any(start < limits[:, 0]) or np.any(start > limits[:, 1]):
-        raise ValueError('The current factor values must be inside their fitting bounds.')
+        raise ValueError('The current parameter values must be inside their fitting bounds.')
     for index, name in enumerate(parameters):
-        if name in MULTIPLIERS and limits[index, 0] <= 0:
-            raise ValueError(f'{name}: multiplier bounds must be positive.')
+        validate_fit_parameter_bounds(name, *limits[index], fit_mode)
     solver = solver or _solve_candidate
     options = dict(max_iter=300, max_cpu_time=60., print_level=0)
     options.update(ipopt_options or {})
@@ -505,7 +573,9 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
         if key in cache:
             return cache[key]
         candidate_request = deepcopy(request)
-        candidate_request['dispersion'].update(zip(parameters, map(float, values)))
+        destination = (candidate_request['configuration']['parameters'] if fit_mode == 'vehicle'
+                       else candidate_request['dispersion'])
+        destination.update(zip(parameters, map(float, values)))
         calls += 1
         record = {'evaluation': calls, 'kind': 'candidate', 'parameters': dict(zip(parameters, map(float, values)))}
         try:
@@ -534,7 +604,7 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
                                          'evaluations': calls, 'termination': 'Searching',
                                          'parameters': list(parameters), 'bounds': dict(zip(parameters, limits.tolist())),
                                          'settings': dict(scales, loss=loss, regularization=regularization,
-                                                          primary_group=primary_group)})
+                                                          primary_group=primary_group, fit_mode=fit_mode)})
         except (ValueError, RuntimeError, FloatingPointError) as exc:
             score = 1e12
             record.update(score=None, status=str(exc))
@@ -556,7 +626,7 @@ def fit_dispersion_to_telemetry(base_request, telemetry, *, parameters=DEFAULT_P
     return {'best': best, 'baseline': baseline, 'history': history, 'evaluations': calls,
             'termination': termination, 'elapsed': time.monotonic() - started,
             'parameters': list(parameters), 'bounds': dict(zip(parameters, limits.tolist())),
-            'settings': dict(scales, loss=loss, regularization=regularization, primary_group=primary_group),
+            'settings': dict(scales, loss=loss, regularization=regularization, primary_group=primary_group, fit_mode=fit_mode),
             'windows': [{'phase': sample['phase'], 'channel': sample['channel'],
                          'telemetry_start': float(sample['time'][0]), 'telemetry_end': float(sample['time'][-1])}
                         for sample in samples]}

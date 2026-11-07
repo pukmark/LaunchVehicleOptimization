@@ -79,6 +79,69 @@ class DispersionFitTests(unittest.TestCase):
         self.calls.append(deepcopy(request))
         return simulation(request['dispersion']['FirstStageThrust'], request['payload_mass_predefined'])
 
+    def test_physical_preparation_preserves_current_vehicle_and_scenario(self):
+        from VehicleDefinitions import VEHICLE_PARAMETERS
+        request = deepcopy(self.request)
+        request['dispersion'].update(FirstStageThrust=1.08, FirstStageIsp=.97,
+                                     FirstStage_PropMass=1000., StagePartitionDelta=.01,
+                                     AtmosphereDensity=.95, LaunchAltDelta=20.)
+        original = deepcopy(request)
+        model = VLType()
+        model.ApplyVehicleConfiguration(request['configuration'])
+        model.ApplyScenarioDispersionToLV(DispesrionFactorsType(**request['dispersion']))
+        prepared = fitting.prepare_fit_request(request, 'vehicle')
+        self.assertEqual(request, original)
+        for name in VEHICLE_PARAMETERS:
+            self.assertAlmostEqual(prepared['configuration']['parameters'][name], getattr(model, name))
+        self.assertEqual(prepared['dispersion']['FirstStageThrust'], 1.)
+        self.assertEqual(prepared['dispersion']['AtmosphereDensity'], .95)
+        self.assertEqual(prepared['dispersion']['LaunchAltDelta'], 20.)
+        again = fitting.prepare_fit_request(prepared, 'vehicle')
+        for name, value in prepared['configuration']['parameters'].items():
+            self.assertAlmostEqual(again['configuration']['parameters'][name], value)
+        bounds = fitting.default_fit_bounds(request, 'vehicle')
+        self.assertEqual(set(bounds), set(VEHICLE_PARAMETERS))
+        for name, (low, high) in bounds.items():
+            self.assertLess(low, high)
+            self.assertLessEqual(low, prepared['configuration']['parameters'][name])
+            self.assertGreaterEqual(high, prepared['configuration']['parameters'][name])
+            fitting.validate_fit_parameter_bounds(name, low, high, 'vehicle')
+
+    def test_physical_fit_recovers_independent_thrust_isp_and_pressure_values(self):
+        from VehicleDefinitions import validate_vehicle_definition
+        checkpoints = []
+        nominal = fitting.fit_parameter_values(self.request, 'vehicle')
+        for name in ('FirstStage_SL_Thrust', 'FirstStage_Vac_Thrust', 'FirstStage_SL_Isp',
+                     'FirstStage_Vac_Isp', 'FirstStage_MaxDynamicPressure', 'Booster_MaxDynamicPressure'):
+            with self.subTest(parameter=name):
+                requests = []
+                def solve(request, **kwargs):
+                    requests.append(deepcopy(request))
+                    values = validate_vehicle_definition(request['configuration'])['parameters']
+                    return simulation(values[name] / nominal[name])
+                result = fitting.fit_dispersion_to_telemetry(
+                    self.request, telemetry(), solver=solve, fit_mode='vehicle',
+                    parameters=[name], bounds={name: (.9*nominal[name], 1.2*nominal[name])},
+                    max_evaluations=25, regularization=0, checkpoint_callback=checkpoints.append)
+                values = result['best']['request']['configuration']['parameters']
+                self.assertAlmostEqual(values[name]/nominal[name], 1.08, places=3)
+                for other in nominal.keys() - {name}:
+                    self.assertAlmostEqual(values[other], nominal[other])
+                self.assertLess(result['best']['score'], result['baseline']['score'])
+                self.assertTrue(all(r['dispersion'] == self.request['dispersion'] for r in requests))
+                self.assertEqual(fitting.fit_report(result)['settings']['fit_mode'], 'vehicle')
+        self.assertTrue(all(c['settings']['fit_mode'] == 'vehicle' for c in checkpoints))
+
+    def test_physical_mode_rejects_invalid_bounds_before_solving(self):
+        for name, bounds in (('FirstStage_SL_Thrust', (-1., 1e9)),
+                             ('FirstStage_MinThrust_Factor', (.1, 1.1)),
+                             ('FirstStage_MaxAlpha', (.01, 2.))):
+            with self.subTest(parameter=name), self.assertRaises(ValueError):
+                fitting.fit_dispersion_to_telemetry(
+                    self.request, telemetry(), fit_mode='vehicle', parameters=[name],
+                    bounds={name: bounds}, solver=self.solve)
+        self.assertEqual(self.calls, [])
+
     def test_loss_selection_scores_measurements_and_timing(self):
         data, solution = timed_telemetry(), timed_simulation(110)
         samples = fitting._comparison_samples(solution, data, 'Stage 1 / booster', {'shift': 7})
@@ -693,6 +756,14 @@ class DispersionFitTests(unittest.TestCase):
                 del incomplete[key]
                 with self.assertRaisesRegex(ValueError, 'Incomplete booster simulation'):
                     fitting.score_candidate(incomplete, data, samples)
+
+    def test_physical_candidates_reuse_custom_vehicle_warm_start(self):
+        request = fitting.prepare_fit_request(self.request, 'vehicle')
+        previous = dict(simulation(), configuration=deepcopy(request['configuration']))
+        request['configuration']['parameters']['FirstStage_SL_Thrust'] *= 1.02
+        with patch('LV_Optimization_Type.LV_Optimization') as constructor:
+            fitting._solve_candidate(request, init_guess=previous)
+        self.assertIs(constructor.return_value.SolveOptimiztion.call_args.kwargs['init_guess'], previous)
 
     def test_incompatible_recovery_warm_start_is_discarded(self):
         self.request['recovery'] = 'ASDS'

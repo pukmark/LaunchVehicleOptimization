@@ -189,7 +189,8 @@ class DispersionFormTests(unittest.TestCase):
         from DispersionFit import ERROR_SCALES
         interpreter = tk.Tcl()
         string_var, boolean_var = tk.StringVar, tk.BooleanVar
-        for saved in ({}, {'acceleration_scale': '2.5', 'pressure_scale': '8', 'phase_time_scale': '3', 'loss': 'squared'}):
+        for saved in ({}, {'acceleration_scale': '2.5', 'pressure_scale': '8', 'phase_time_scale': '3', 'loss': 'squared'},
+                      {'fit_mode': 'vehicle'}):
             with self.subTest(saved=saved), ExitStack() as stack:
                 stack.enter_context(patch.object(tk, 'Toplevel'))
                 stack.enter_context(patch.object(tk, 'Canvas'))
@@ -235,6 +236,11 @@ class DispersionFormTests(unittest.TestCase):
                              if call.kwargs['text'] == 'Start search')
                 start()
                 options, target = app.start_fit.call_args.args
+                self.assertEqual(options['fit_mode'], saved.get('fit_mode', 'dispersion'))
+                if options['fit_mode'] == 'vehicle':
+                    self.assertIn('FirstStage_SL_Thrust', options['parameters'])
+                    self.assertIn('Booster_MaxDynamicPressure', options['parameters'])
+                    self.assertAlmostEqual(options['bounds']['FirstStage_SL_Thrust'][0], .8 * VLType().FirstStage_SL_Thrust)
                 self.assertEqual(options['loss'], 'squared')
                 self.assertEqual(options['acceleration_scale'], 3.5)
                 self.assertEqual(options['pressure_scale'], 7.5)
@@ -970,6 +976,63 @@ class ResultRenderingTests(unittest.TestCase):
             restored = self.make_app(directory)
             self.assertEqual(restored.cases[1].fit_report['best']['score'], .5)
             self.assertEqual(restored.notebook.tab(restored.notebook.select(), 'text'), 'Fit results')
+
+    def test_fit_dialog_switches_to_physical_parameters_and_converts_units(self):
+        from tkinter import ttk
+        with tempfile.TemporaryDirectory() as directory:
+            app, _ = self.fit_gui_setup(directory)
+            app.start_fit = Mock()
+            app.open_fit_dialog()
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+            widgets = list(descendants(app.root))
+            physical = next(w for w in widgets if isinstance(w, ttk.Radiobutton)
+                            and w.cget('value') == 'vehicle')
+            physical.invoke()
+            self.assertEqual(app.cases[0].fit_settings['fit_mode'], 'vehicle')
+            self.assertIn('Booster_MaxDynamicPressure', app.cases[0].fit_settings['parameters'])
+            widgets = list(descendants(app.root))
+            next(w for w in widgets if isinstance(w, ttk.Button) and w.cget('text') == 'Start search').invoke()
+            options, _ = app.start_fit.call_args.args
+            self.assertEqual(options['fit_mode'], 'vehicle')
+            self.assertAlmostEqual(options['bounds']['FirstStage_SL_Thrust'][0], .8 * VLType().FirstStage_SL_Thrust)
+            self.assertAlmostEqual(options['bounds']['Booster_MaxDynamicPressure'][0], .8 * VLType().Booster_MaxDynamicPressure)
+
+    def test_physical_fit_destination_keeps_vehicle_on_rerun_and_session_restore(self):
+        from DispersionFit import prepare_fit_request
+        with tempfile.TemporaryDirectory() as directory:
+            app, options = self.fit_gui_setup(directory)
+            bundle = self.fit_bundle()
+            bundle['settings'] = {'fit_mode': 'vehicle'}
+            bundle['parameters'] = ['FirstStage_SL_Thrust']
+            bundle['bounds'] = {'FirstStage_SL_Thrust': [6e6, 9e6]}
+            for name in ('baseline', 'best'):
+                request = prepare_fit_request(bundle[name]['request'], 'vehicle')
+                bundle[name]['request'] = request
+                bundle[name]['solution']['configuration'] = request['configuration']
+                bundle[name]['solution']['dispersion'] = request['dispersion']
+            expected = bundle['best']['request']['configuration']['parameters']['FirstStage_SL_Thrust']
+            options.update(fit_mode='vehicle', parameters=['FirstStage_SL_Thrust'],
+                           bounds={'FirstStage_SL_Thrust': [6e6, 9e6]})
+            def start(command, **kwargs):
+                folder = Path(command[-1])
+                settings = json.loads((folder/'fit_inputs.json').read_text())
+                self.assertIsInstance(settings['base_request']['configuration'], dict)
+                with (folder/'fit_result.pickle').open('wb') as stream:
+                    pickle.dump(bundle, stream)
+                return Mock(poll=Mock(return_value=0))
+            with patch('OptimizationGUI.subprocess.Popen', side_effect=start):
+                app.start_fit(options, 1)
+            self.assertEqual(app.selected_case, 1)
+            self.assertIn(' fitted', app.vehicle.get())
+            self.assertEqual(app.form_request()['configuration']['parameters']['FirstStage_SL_Thrust'], expected)
+            self.assertEqual(float(app.variables['FirstStageThrust'].get()), 1.)
+            self.assertIn('Vehicle parameters', app.fit_report_view.get('1.0', 'end'))
+            app.close()
+            restored = self.make_app(directory)
+            self.assertEqual(restored.form_request()['configuration']['parameters']['FirstStage_SL_Thrust'], expected)
 
     def test_cancelled_fit_keeps_checkpoint_and_progress(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -20,11 +20,13 @@ import traceback
 
 import numpy as np
 
-from DispersionFit import DEFAULT_PARAMETERS, ERROR_SCALES, CHANNEL_UNITS, default_fit_bounds, fit_report
+from DispersionFit import (DEFAULT_PARAMETERS, ERROR_SCALES, CHANNEL_UNITS, default_fit_bounds, fit_report,
+                           DEFAULT_VEHICLE_PARAMETERS, prepare_fit_request, fit_parameter_values,
+                           validate_fit_parameter_bounds)
 from LaunchSites import LAUNCH_SITES, DEFAULT_LAUNCH_SITE, launch_site_inputs, parse_launch_site
 from GUIState import read_gui_state, write_gui_state
 from PayloadSensitivity import default_steps, sensitivity_request, validate_steps, draw_sensitivities
-from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
+from VehicleDefinitions import (VEHICLE_PARAMETERS, BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name,
                                 read_vehicle_definition, write_vehicle_definition,
                                 validate_vehicle_definition)
@@ -768,7 +770,7 @@ class OptimizationApp:
         self.cancel_button.grid(row=4, column=0, sticky="w", padx=(0, 8))
         self.run_button = ttk.Button(footer, text="Run Case 1", style="Run.TButton", command=self.run)
         self.run_button.grid(row=4, column=1, sticky="e")
-        self.fit_button = ttk.Button(footer, text="Fit dispersion to telemetry…", command=self.open_fit_dialog, state="disabled")
+        self.fit_button = ttk.Button(footer, text="Fit model to telemetry…", command=self.open_fit_dialog, state="disabled")
         self.fit_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.restore_state()
         self.update_case_labels()
@@ -1587,20 +1589,26 @@ class OptimizationApp:
         report = case.fit_report
         if not report:
             text = (f"{case.name}: no telemetry fit yet.\n\n"
-                    "Load telemetry and click Fit dispersion to telemetry. Choose the factors, bounds, "
+                    "Load telemetry and click Fit model to telemetry. Choose the parameters, bounds, "
                     "evaluation budget, and destination case. Every candidate is synchronized before comparison.")
         else:
             before, best = report["baseline"], report["best"]
+            mode = report.get('settings', {}).get('fit_mode', 'dispersion')
+            parameter_title = 'Vehicle parameters' if mode == 'vehicle' else 'Dispersion factors'
             lines = [f"{case.name} — telemetry fitting", str(report["termination"]),
                      f"Evaluations: {report['evaluations']}",
                      f"Fixed payload: {best['request']['payload_mass_predefined']:,.1f} kg",
                      f"Score: {before['score']:.6g} → {best['score']:.6g} (lower is better)",
                      f"Synchronization: {best['synchronization']['phase']} · telemetry shift "
-                     f"{best['synchronization']['shift']:+.6g} s", "", "Dispersion factors", ""]
+                     f"{best['synchronization']['shift']:+.6g} s", "", parameter_title, ""]
+            before_values = fit_parameter_values(before['request'], mode)
+            best_values = fit_parameter_values(best['request'], mode)
             for name in report['parameters']:
-                a, b = before['request']['dispersion'][name], best['request']['dispersion'][name]
+                scale = VEHICLE_PARAMETERS[name][3] if mode == 'vehicle' else 1.
+                unit = VEHICLE_PARAMETERS[name][2] if mode == 'vehicle' else ''
+                a, b = before_values[name] / scale, best_values[name] / scale
                 low, high = report['bounds'][name]
-                lines.append(f"{name:26s} {a:12.6g} → {b:12.6g}   bounds [{low:g}, {high:g}]")
+                lines.append(f"{name:26s} {a:12.6g} → {b:12.6g} {unit}   bounds [{low/scale:g}, {high/scale:g}]")
             if report.get('settings'):
                 lines.append(f"Cost function: {report['settings'].get('loss', 'robust')}")
                 lines += ["", "Error scales (smaller means a stronger penalty)"]
@@ -2036,8 +2044,7 @@ class OptimizationApp:
             return
         source = self.cases[self.selected_case]
         saved = source.fit_settings or {}
-        bounds = default_fit_bounds(request)
-        nominal_values = nominal_dispersion_values(request['configuration'], request['launch_site']['altitude'])
+        fit_mode = tk.StringVar(value=saved.get('fit_mode', 'dispersion'))
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Fit {source.name} to telemetry")
         dialog.transient(self.root)
@@ -2060,20 +2067,43 @@ class OptimizationApp:
         dialog.bind('<MouseWheel>', lambda event: canvas.yview_scroll(-int(event.delta / 120), 'units'))
         dialog.bind('<Button-4>', lambda event: canvas.yview_scroll(-1, 'units'))
         dialog.bind('<Button-5>', lambda event: canvas.yview_scroll(1, 'units'))
-        ttk.Label(panel, text="Choose factors and absolute bounds. Each candidate is synchronized before scoring.",
+        ttk.Label(panel, text="Choose parameters and bounds. Each candidate is synchronized before scoring.",
                   wraplength=630).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
-        for column, title in enumerate(("Fit factor", "Initial guess", "Lower bound", "Upper bound")):
-            ttk.Label(panel, text=title).grid(row=1, column=column, sticky="w", padx=4)
+        ttk.Radiobutton(panel, text="Dispersion factors", variable=fit_mode, value='dispersion').grid(
+            row=1, column=0, columnspan=2, sticky='w')
+        ttk.Radiobutton(panel, text="Physical vehicle parameters", variable=fit_mode, value='vehicle').grid(
+            row=1, column=2, columnspan=2, sticky='w')
+        table = ttk.Frame(panel)
+        table.grid(row=2, column=0, columnspan=4, sticky='ew')
         selected, lows, highs = {}, {}, {}
-        for row, (name, pair) in enumerate(bounds.items(), start=2):
-            selected[name] = tk.BooleanVar(value=name in saved.get('parameters', DEFAULT_PARAMETERS))
-            lows[name], highs[name] = tk.StringVar(value=str(pair[0])), tk.StringVar(value=str(pair[1]))
-            ttk.Checkbutton(panel, text=f"{name}\nNominal: {nominal_values[name]}",
-                            variable=selected[name]).grid(row=row, column=0, sticky="w", padx=4, pady=2)
-            ttk.Label(panel, text=f"{request['dispersion'][name]:g}").grid(row=row, column=1, sticky="e", padx=8)
-            ttk.Entry(panel, textvariable=lows[name], width=12).grid(row=row, column=2, padx=4)
-            ttk.Entry(panel, textvariable=highs[name], width=12).grid(row=row, column=3, padx=4)
-        row = 2 + len(bounds)
+        def build_parameters():
+            for widget in table.winfo_children():
+                widget.destroy()
+            selected.clear()
+            lows.clear()
+            highs.clear()
+            mode = fit_mode.get()
+            bounds = default_fit_bounds(request, mode)
+            values = fit_parameter_values(request, mode)
+            nominal_values = nominal_dispersion_values(request['configuration'], request['launch_site']['altitude'])
+            defaults = DEFAULT_VEHICLE_PARAMETERS if mode == 'vehicle' else DEFAULT_PARAMETERS
+            chosen = saved.get('parameters', defaults) if saved.get('fit_mode', 'dispersion') == mode else defaults
+            for column, title in enumerate(("Fit parameter", "Initial guess", "Lower bound", "Upper bound")):
+                ttk.Label(table, text=title).grid(row=0, column=column, sticky='w', padx=4)
+            for row, (name, pair) in enumerate(bounds.items(), start=1):
+                scale = VEHICLE_PARAMETERS[name][3] if mode == 'vehicle' else 1.
+                label = (f"{VEHICLE_PARAMETERS[name][1]} [{VEHICLE_PARAMETERS[name][2]}]" if mode == 'vehicle'
+                         else f"{name}\nNominal: {nominal_values[name]}")
+                selected[name] = tk.BooleanVar(value=name in chosen)
+                lows[name] = tk.StringVar(value=str(pair[0] / scale))
+                highs[name] = tk.StringVar(value=str(pair[1] / scale))
+                ttk.Checkbutton(table, text=label, variable=selected[name]).grid(
+                    row=row, column=0, sticky='w', padx=4, pady=2)
+                ttk.Label(table, text=f"{values[name]/scale:g}").grid(row=row, column=1, sticky='e', padx=8)
+                ttk.Entry(table, textvariable=lows[name], width=12).grid(row=row, column=2, padx=4)
+                ttk.Entry(table, textvariable=highs[name], width=12).grid(row=row, column=3, padx=4)
+        build_parameters()
+        row = 3
         settings = {}
         for key, label, default in (("max_evaluations", "Maximum solver evaluations", 100),
                                     ("altitude_scale", "Altitude error scale [m]", ERROR_SCALES['altitude_scale']),
@@ -2100,7 +2130,8 @@ class OptimizationApp:
         row += 1
         ttk.Label(panel, wraplength=630, text=("The destination case receives the best fit when the search ends. "
                   "Bounds open at their nominal defaults; the initial guess uses the selected case's current values. "
-                  "Nominal units: s = seconds, t = metric tons, tf = metric ton-force; SL = sea level, vac = vacuum. "
+                  "Physical mode starts from the dispersed vehicle and saves a custom vehicle. "
+                  "Atmospheric density and launch altitude remain fixed. Units: s = seconds, t = metric tons, tf = metric ton-force; SL = sea level, vac = vacuum. "
                   "Payload is held fixed; maximize mode uses the current result's payload or a preliminary nominal solve. "
                   "Cost: robust = 2(√(1+r²)−1); squared = r², with r = error / scale. "
                   "The selected cost applies to measurements and phase timing. "
@@ -2112,7 +2143,7 @@ class OptimizationApp:
                   "simulation samples after the last phase reading receive an extra penalty. "
                   "Cancel retains the best completed comparison.")).grid(row=row, column=0, columnspan=4, sticky="w", pady=8)
         def remember(*args):
-            source.fit_settings = dict(parameters=[name for name in selected if selected[name].get()],
+            source.fit_settings = dict(fit_mode=fit_mode.get(), parameters=[name for name in selected if selected[name].get()],
                                        bounds={name: [lows[name].get(), highs[name].get()] for name in selected},
                                        **{key: variable.get() for key, variable in settings.items()})
             self.schedule_save()
@@ -2123,14 +2154,24 @@ class OptimizationApp:
                 options['max_evaluations'] = int(options['max_evaluations'])
                 for key in (*ERROR_SCALES, 'regularization'):
                     options[key] = float(options[key])
-                options['bounds'] = {name: tuple(map(float, options['bounds'][name])) for name in options['parameters']}
+                options['bounds'] = {name: tuple(float(value) * (VEHICLE_PARAMETERS[name][3] if fit_mode.get() == 'vehicle' else 1.)
+                                                       for value in options['bounds'][name]) for name in options['parameters']}
                 target = [case.name for case in self.cases].index(destination.get())
                 self.start_fit(options, target)
             except (ValueError, OSError) as exc:
                 messagebox.showerror("Could not start fitting", str(exc), parent=dialog)
                 return
             dialog.destroy()
-        for variable in (*selected.values(), *lows.values(), *highs.values(), *settings.values()):
+        def trace_parameters():
+            for variable in (*selected.values(), *lows.values(), *highs.values()):
+                variable.trace_add('write', remember)
+        def change_mode(*args):
+            build_parameters()
+            trace_parameters()
+            remember()
+        trace_parameters()
+        fit_mode.trace_add('write', change_mode)
+        for variable in settings.values():
             variable.trace_add('write', remember)
         ttk.Button(footer, text="Close", command=dialog.destroy).pack(side='left')
         ttk.Button(footer, text="Start search", command=start).pack(side='right')
@@ -2140,22 +2181,22 @@ class OptimizationApp:
             return
         if self.telemetry is None:
             raise ValueError('Load telemetry before fitting.')
-        request = self.form_request()
+        request = prepare_fit_request(self.form_request(), options.get('fit_mode', 'dispersion'))
+        values = fit_parameter_values(request, options.get('fit_mode', 'dispersion'))
         # Older sessions and callers may only contain altitude/speed scales.
         options = {**ERROR_SCALES, 'loss': 'robust', **options}
         if options['loss'] not in ('robust', 'squared'):
             raise ValueError("Unknown fitting loss; choose 'robust' or 'squared'.")
         if not options['parameters'] or options['max_evaluations'] < 2:
-            raise ValueError('Select factors and allow at least two evaluations.')
+            raise ValueError('Select parameters and allow at least two evaluations.')
         scales = [options[key] for key in ERROR_SCALES]
         if not np.isfinite([*scales, options['regularization']]).all() or min(scales) <= 0 or options['regularization'] < 0:
             raise ValueError('Error scales must be positive and the parameter penalty nonnegative.')
         for name in options['parameters']:
             low, high = options['bounds'][name]
-            if not np.isfinite([low, high]).all() or not low < high or not low <= request['dispersion'][name] <= high:
+            if not np.isfinite([low, high]).all() or not low < high or not low <= values[name] <= high:
                 raise ValueError(f'{name}: bounds must be finite, increasing, and contain the current value.')
-            if name in MULTIPLIERS and low <= 0:
-                raise ValueError(f'{name}: multiplier bounds must be positive.')
+            validate_fit_parameter_bounds(name, low, high, options.get('fit_mode', 'dispersion'))
         if not any('speed' in self.telemetry.channels(phase, self.telemetry_primary.get()) for phase in ('stage1', 'stage2')):
             raise ValueError('Fitting requires first- or second-stage speed telemetry for synchronization.')
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -2245,6 +2286,11 @@ class OptimizationApp:
             fitted = deepcopy(self.submitted_inputs)
             fitted['dispersion'] = {key: str(value) for key, value in best['request']['dispersion'].items()}
             fitted['payload_mass'] = str(best['request']['payload_mass_predefined'])
+            if result.get('settings', {}).get('fit_mode') == 'vehicle':
+                definition = deepcopy(best['request']['configuration'])
+                definition['name'] = (definition['name'][:68] + ' fitted')
+                fitted['vehicle'] = self.import_vehicle(definition)
+                fitted['vehicle_definition'] = deepcopy(self.vehicles[fitted['vehicle']])
             case.computed_inputs = deepcopy(fitted)
             case.draft = fitted
             case.run_dir = self.run_dir

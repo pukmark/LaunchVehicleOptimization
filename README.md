@@ -255,3 +255,18 @@ git push origin main
 
 Generated files remain local when removed from Git tracking. Ignore rules do
 not rewrite earlier commits, so files committed previously remain in Git history.
+
+Telemetry fitting supports **Dispersion factors** and **Physical vehicle parameters**
+under **Fit model to telemetry…**. Physical mode exposes all custom-vehicle fields,
+including independent first-stage sea-level/vacuum thrust and Isp, stage masses,
+aerodynamics, and ascent/recovery dynamic-pressure limits. Select fields and edit
+bounds in the displayed units. The current vehicle dispersion is baked into the
+starting values; atmospheric density and launch-altitude offsets remain fixed.
+The destination receives a reusable custom vehicle with neutral vehicle dispersion.
+As with dispersion fits, payload stays fixed and each candidate is synchronized.
+Only parameters that affect the chosen trajectory can be identified from its telemetry.
+
+Python callers can use `fit_dispersion_to_telemetry(..., fit_mode='vehicle')`.
+`parameters` selects attribute names from `VehicleDefinitions.VEHICLE_PARAMETERS`;
+omitting it selects all fields. API bounds use SI units, and
+`default_fit_bounds(request, fit_mode='vehicle')` supplies initial ranges.
