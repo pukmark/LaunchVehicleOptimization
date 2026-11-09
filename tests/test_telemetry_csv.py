@@ -250,10 +250,12 @@ class TelemetryTests(unittest.TestCase):
                 self.assertTrue(overlay_telemetry(figure, phase, data, primary, 'purple', 5, [(6, 8)]))
                 lines = {line.get_label(): line for line in figure.axes[index].lines}
                 derived = lines['Telemetry · dv/dt (ECEF)']
-                self.assertIn('Telemetry · CSV', lines)
+                if phase == 'Booster':
+                    self.assertNotIn('Telemetry · CSV', lines)
+                else:
+                    self.assertIn('Telemetry · CSV', lines)
                 self.assertEqual(derived.get_color(), 'purple')
                 np.testing.assert_allclose(derived.get_xdata(), [5, 6, 7, 8])
                 np.testing.assert_allclose(derived.get_ydata(), [np.nan, np.nan, 20, 30], equal_nan=True)
-                expected_title = ('Speed acceleration (ECEF, includes gravity)' if phase == 'S2 propulsion'
-                                  else 'Acceleration: specific / dv/dt')
+                expected_title = 'Speed acceleration (ECEF, includes gravity)'
                 self.assertEqual(figure.axes[index].get_title(), expected_title)

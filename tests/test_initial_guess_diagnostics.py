@@ -143,44 +143,64 @@ class PhaseDiagnosticTests(unittest.TestCase):
                                              output_dir=None, **kwargs)
         return solution, reports, captured, output.getvalue()
 
-    def test_pre_reentry_load_limits_use_ballistic_state_and_flag_excess_loads(self):
-        phase = 'Ballistic coast to reentry'
-        names = {'Dynamic pressure Reentry start', 'Heat flux Reentry start'}
+    def test_rtls_separation_coast_is_in_output_and_delays_every_return_phase(self):
+        from IntegratedResults import return_controls
+        for duration in (0., 12.):
+            with self.subTest(duration=duration):
+                model = LV_Optimization(DispesrionFactorsType())
+                model.boostback.SecondStage_CoastTimeAfterSep = duration
+                solution, reports, _, _ = self.solve('RTLS', model=model)
+                time = np.ravel(solution['t4_vec'])
+                state = np.asarray(solution['x4'])
+                separation = float(solution['t1_vec'][-1])
+                ignition = separation + duration
+                self.assertEqual(solution['dt4_coast_after_sep'], duration)
+                self.assertAlmostEqual(time[0], separation)
+                self.assertTrue(np.all(np.diff(time) >= 0.))
+                for key in ('alt4_sol', 'Qdyn4_sol', 'acc4_sol'):
+                    self.assertEqual(len(solution[key]), len(time))
+                self.assertEqual(len(state), len(time))
+                coast_end = model.boostback.unscale_x(optimization._boostback_coast(
+                    model.boostback, model.boostback.scale_x(solution['x4_0']))).full().ravel()
+                np.testing.assert_allclose(solution['x4_after_coast'], coast_end)
+                ignition_index = np.flatnonzero(np.isclose(time, ignition, rtol=0, atol=1e-8))[0]
+                np.testing.assert_allclose(state[ignition_index], coast_end)
+                if duration:
+                    self.assertGreater(ignition_index, 1)
+                    self.assertTrue(np.all(solution['acc4_sol'][:ignition_index] < 1e-4))
+                    self.assertLess(coast_end[3], solution['x4_0'][3])
+                total = (duration + float(solution['dt4_boostback']) + float(solution['dt4_ballistic'])
+                         + float(solution['dt4_reentry']) + float(solution['dt4_before_landing'])
+                         + model.rocket_return.N * float(solution['dt4_landing']))
+                self.assertAlmostEqual(time[-1], separation + total)
+                control_time, throttle, angle = return_controls(solution, model.boostback)
+                self.assertAlmostEqual(control_time[-1], time[-1])
+                self.assertAlmostEqual(control_time[np.flatnonzero(throttle > 0)[0]], ignition)
+                self.assertTrue(np.isnan(angle[control_time < ignition]).all())
+                boostback = next(report for report in reports if report['phase'] == 'Boostback burn')
+                self.assertFalse(any(v['constraint'].startswith('Dynamics') for v in boostback['violations']))
+
+    def test_reentry_and_load_checks_follow_the_current_active_constraints(self):
         for strategy in ('ASDS', 'RTLS'):
             with self.subTest(strategy=strategy):
                 model = LV_Optimization(DispesrionFactorsType())
                 solution, _, captured, _ = self.solve(strategy, model=model)
                 diagnostics, opti = captured['diagnostics'], captured['opti']
-                entries = {entry[1]: entry for entry in diagnostics.constraints[phase] if entry[1] in names}
-                self.assertEqual(set(entries), names)
-                self.assertFalse(any(entry[1] in names for entry in
-                                     diagnostics.constraints['Coast before landing']))
-                checks = {
-                    'Dynamic pressure Reentry start': (model.rocket_return.dynamic_pressure_fun,
-                        model.rocket_return.Booster_MaxDynamicPressure, 'kPa'),
-                    'Heat flux Reentry start': (model.rocket_return.heat_flux_fun,
-                        model.rocket_return.Booster_MaxHeatFlux, 'kW/m²'),
-                }
-                state = model.rocket_return.scale_x(solution['x4_before_reentry'])
-                for name, (function, limit, unit) in checks.items():
-                    row, _, scale, actual_unit, _ = entries[name]
-                    self.assertEqual(actual_unit, unit)
-                    self.assertAlmostEqual(scale, limit / 1000.)
-                    self.assertAlmostEqual(float(opti.debug.value(opti.g[row], opti.initial())),
-                                           float(function(state)) / limit)
-                    self.assertAlmostEqual(float(opti.debug.value(opti.ubg[row], opti.initial())), 1.)
-
-                # Both load limits depend only on the pre-ignition state.
-                variables = [ca.symvar(opti.g[entry[0]]) for entry in entries.values()]
-                self.assertTrue(all(len(items) == 1 for items in variables))
-                self.assertEqual(variables[0][0].name(), variables[1][0].name())
-                for physical, should_violate in (([0., 120000., 100., -100., 40000.], False),
-                                                 ([0., 10000., 2500., -1000., 40000.], True)):
-                    opti.set_initial(variables[0][0], model.rocket_return.scale_x(physical))
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        report = diagnostics.report(phase)
-                    violated = {item['constraint'] for item in report['violations']}
-                    self.assertEqual(names.intersection(violated), names if should_violate else set())
+                phase = diagnostics.constraints['Ballistic coast to reentry']
+                entry = next(e for e in phase if e[1] == 'Reentry start altitude lower bound')
+                row, _, floor, unit, _ = entry
+                self.assertEqual(floor, 50000.)
+                self.assertEqual(unit, 'm')
+                self.assertAlmostEqual(float(opti.debug.value(opti.lbg[row], opti.initial())), 1.)
+                self.assertGreaterEqual(float(model.rocket_return.local_to_alt(solution['x4_before_reentry'])), floor)
+                # The model currently applies load limits during coast/landing,
+                # rather than enabling the commented pre-reentry load checks.
+                names = {e[1] for e in phase}
+                self.assertNotIn('Dynamic pressure Reentry start', names)
+                self.assertNotIn('Heat flux Reentry start', names)
+                coast = diagnostics.constraints['Coast before landing']
+                self.assertTrue(any('Dynamic pressure' in e[1] for e in coast))
+                self.assertTrue(any('Heat flux' in e[1] for e in coast))
 
     def test_every_active_constraint_is_checked_once_after_its_phase_guess(self):
         ascent = ['First-stage ascent', 'Second stage before fairing separation',
@@ -227,6 +247,18 @@ class PhaseDiagnosticTests(unittest.TestCase):
         self.assertAlmostEqual(violations['Initial state [z]']['violation'], 1000.)
         self.assertIn('supplied warm start', output)
 
+    def test_recovery_warm_start_skips_the_generated_recovery_search(self):
+        for strategy in ('ASDS', 'RTLS'):
+            with self.subTest(strategy=strategy):
+                initial, _, _, _ = self.solve(strategy)
+                with patch.object(optimization, '_fit_recovery_guess',
+                                  side_effect=AssertionError('Recovery seed should not be rebuilt')):
+                    result, reports, _, _ = self.solve(strategy, init_guess=initial)
+                np.testing.assert_allclose(result['x4_landing'], initial['x4_landing'])
+                recovery = [r for r in reports if r['phase'] == 'Landing burn']
+                self.assertEqual(len(recovery), 1)
+                self.assertEqual(recovery[0]['source'], 'supplied warm start')
+
     def test_reports_do_not_change_guesses_and_can_be_disabled(self):
         enabled, reports, _, _ = self.solve('ASDS', payload_mass_predefined=10000.)
         disabled, disabled_reports, _, output = self.solve('ASDS', payload_mass_predefined=10000.,
@@ -270,7 +302,7 @@ class PhaseDiagnosticTests(unittest.TestCase):
                     lower = .75/3. * model.rocket_return.EmptyFirstStageMass * model.rocket_return.g0 / model.rocket_return.scaleU[0]
                     self.assertTrue((thrust >= lower - 1e-12).all())
                     self.assertTrue((thrust <= 1./3. + 1e-12).all())
-                    self.assertGreaterEqual(float(model.rocket_return.local_to_alt(solution['x4_before_reentry'])), 70000.)
+                    self.assertGreaterEqual(float(model.rocket_return.local_to_alt(solution['x4_before_reentry'])), 50000.)
                     self.assertTrue(np.isfinite(solution['x4_landing']).all())
 
     def test_nonfinite_partial_stage3_candidate_is_discarded_and_regenerated(self):
@@ -307,6 +339,12 @@ class PhaseDiagnosticTests(unittest.TestCase):
             comparisons = []
             def fit(*args, **kwargs):
                 seed, residuals = args[3], args[6]
+                if args[4] == 'RTLS':
+                    boostback = args[1]
+                    coast_end = optimization._boostback_coast(boostback, boostback.scale_x(args[2]))
+                    expected = boostback.dynamics_kp1_M20(
+                        coast_end, seed['boostback_control'], seed['boostback_time'] / boostback.scaleT)
+                    np.testing.assert_allclose(seed['boostback_state'], expected)
                 result = original_fit(*args, **kwargs)
                 comparisons.append((optimization._guess_score(residuals(seed)),
                                     optimization._guess_score(residuals(result))))

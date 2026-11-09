@@ -1,4 +1,5 @@
 """Portable custom vehicle definitions and the units used by their editor."""
+from copy import deepcopy
 import math
 import json
 import os
@@ -6,7 +7,7 @@ from pathlib import Path
 import tempfile
 
 
-BUILTIN_VEHICLES = {"Falcon 9": 1, "Starship": 2, "Starship V3": 3, "New Glenn": 4}
+BUILTIN_VEHICLES = {"Falcon 9": 1, "Starship": 2, "Starship V3": 3, "New Glenn": 4, "Falcon 9 True": 5}
 TONNE_FORCE = 1000. * 9.80665
 # Attribute, display label, display unit, conversion from display units to SI.
 VEHICLE_PARAMETER_GROUPS = {
@@ -43,8 +44,6 @@ VEHICLE_PARAMETER_GROUPS = {
     ),
     "Booster recovery": (
         ("Booster_Cd0", "Booster base drag coefficient", "dimensionless", 1.),
-        ("Booster_Cda2", "Booster drag angle coefficient", "1/rad²", 1.),
-        ("Booster_CLa", "Booster lift slope", "1/rad", 1.),
         ("Booster_MaxDynamicPressure", "Maximum return dynamic pressure", "kPa", 1000.),
         ("Booster_MaxHeatFlux", "Maximum return heat flux", "kW/m²", 1000.),
         ("Booster_k_empirical", "Empirical heat-flux coefficient", "model units", 1.),
@@ -58,7 +57,7 @@ VEHICLE_PARAMETER_GROUPS = {
 VEHICLE_PARAMETERS = {item[0]: item for group in VEHICLE_PARAMETER_GROUPS.values() for item in group}
 NONNEGATIVE_PARAMETERS = {
     "FairingMass", "FirstStage_Ae", "FirstStage_CLa", "FirstStage_Cd0", "FirstStage_Cda2",
-    "FairingSeparationAltitude", "Booster_Cd0", "Booster_Cda2", "Booster_CLa",
+    "FairingSeparationAltitude", "Booster_Cd0",
     "Booster_k_empirical", "SecondStage_CoastTimeAfterSep",
 }
 
@@ -74,6 +73,10 @@ def validate_vehicle_definition(definition):
     if any(ord(character) < 32 for character in name):
         raise ValueError("Vehicle name cannot contain control characters.")
     supplied = definition['parameters']
+    # Older files included two unused booster coefficients removed from the model.
+    if isinstance(supplied, dict):
+        supplied = {key: value for key, value in supplied.items()
+                    if key not in ('Booster_Cda2', 'Booster_CLa')}
     if not isinstance(supplied, dict) or set(supplied) != set(VEHICLE_PARAMETERS):
         raise ValueError("Custom vehicle parameters must contain exactly all fields shown in the editor.")
     parameters = {}
@@ -130,6 +133,67 @@ def vehicle_catalog(definitions=()):
         names.add(name.casefold())
         catalog[name] = definition
     return catalog
+
+
+def migrate_builtin_vehicles(state):
+    """Promote identical saved definitions; preserve older variants under new names.
+
+    Historical solver requests and results keep their original parameter snapshots.
+    Only the editable library and case inputs are migrated.
+    """
+    state = deepcopy(state)
+    definitions = state.get('custom_vehicles', [])
+    if not isinstance(definitions, (list, tuple)):
+        raise ValueError("Custom vehicles must be a list.")
+    definitions = [validate_vehicle_definition(value) for value in definitions]
+    original_parameters = {value['name']: value['parameters'] for value in definitions}
+    reserved = {name.casefold() for name in BUILTIN_VEHICLES}
+    reserved.update(value['name'].casefold() for value in definitions)
+    canonical = {name.casefold(): name for name in BUILTIN_VEHICLES}
+    migrated, replacements = [], {}
+    for definition in definitions:
+        old_name = definition['name']
+        builtin = canonical.get(old_name.casefold())
+        if builtin is None:
+            migrated.append(definition)
+            continue
+        from LV_Type_scaled import VLType
+        model = VLType()
+        model.ApplyVehicleConfiguration(BUILTIN_VEHICLES[builtin])
+        matches = all(math.isclose(value, getattr(model, name), rel_tol=1e-12, abs_tol=1e-12)
+                      for name, value in definition['parameters'].items())
+        if matches:
+            replacements[old_name] = (builtin, None)
+        else:
+            number = 1
+            while True:
+                suffix = ' (custom)' if number == 1 else f' (custom {number})'
+                name = old_name[:80 - len(suffix)] + suffix
+                if name.casefold() not in reserved:
+                    break
+                number += 1
+            reserved.add(name.casefold())
+            definition['name'] = name
+            migrated.append(definition)
+            replacements[old_name] = (name, definition)
+    state['custom_vehicles'] = migrated
+    for case in state.get('cases', []):
+        for key in ('draft', 'computed_inputs'):
+            inputs = case.get(key)
+            if not inputs or inputs.get('vehicle') not in replacements:
+                continue
+            name, definition = replacements[inputs['vehicle']]
+            if key == 'computed_inputs':
+                # Retain a historical definition if it differs from the library.
+                original = inputs.get('vehicle_definition')
+                if original and original['parameters'] != original_parameters[inputs['vehicle']]:
+                    continue
+            inputs['vehicle'] = name
+            if definition is None:
+                inputs.pop('vehicle_definition', None)
+            else:
+                inputs['vehicle_definition'] = deepcopy(definition)
+    return state
 
 
 def vehicle_name(configuration):

@@ -20,25 +20,27 @@ import pytesseract
 # VIDEO_URL = "https://x.com/i/broadcasts/1zqKVdlVyaYJB"  # X (Twitter) stream
 # VIDEO_URL = "https://x.com/i/broadcasts/1vAxRDjaXwyGl"  # X (Twitter) stream SPHEREx
 # VIDEO_URL = "https://x.com/i/broadcasts/1RKjpbVdykQJw"  # X (Twitter) O3b mPOWER
-VIDEO_URL = "https://x.com/i/broadcasts/1AxRnawMpzVxl"  # X (Twitter) CRS-34
+# VIDEO_URL = "https://x.com/i/broadcasts/1AxRnawMpzVxl"  # X (Twitter) CRS-34
+# VIDEO_URL = "https://twitter.com/i/broadcasts/1zqKVdlVyaYJB"  # X (Twitter) COSMO-SkyMed FM3
+VIDEO_URL = "https://www.youtube.com/watch?v=6tyr0ld2ZB4&t=3231s"  # YouTube Sentinel-6B
 
 # VIDEO_URL = "https://x.com/i/broadcasts/1yKAPwdemygxb"  # X (Twitter) Starlink 424
 OUTPUT_DIR = Path("falcon9_telemetry")
-VIDEO_FILENAME = OUTPUT_DIR / "falcon9_CRS-34.mp4"
+VIDEO_FILENAME = OUTPUT_DIR / "falcon9_Sentinel-6B.mp4"
 
 # How many frames per second to sample (effective)
 SAMPLE_FPS = 1.0  # samples per second
 
 # Optional: download and process from this broadcast timestamp (seconds).
 # Set to None to process from the beginning.
-START_TIME_SEC = 20*60+43  # skip the prelaunch portion of this broadcast
+START_TIME_SEC = 53*60+49  # skip the prelaunch portion of this broadcast
 # Optional: download and process through this broadcast timestamp (seconds).
 # Set to None to process through the end.
-END_TIME_SEC = START_TIME_SEC + 8*60+37
-START_SEP_SEC = START_TIME_SEC + 2*60+19  # video time ending stage 1; stage 2/booster start here
+END_TIME_SEC = START_TIME_SEC + 9*60+14
+START_SEP_SEC = START_TIME_SEC + 2*60+18  # video time ending stage 1; stage 2/booster start here
 # Original video time when the broadcast switches to stage two after landing.
 # Set this per broadcast, or pass --landing / --phase3-start. None disables it.
-START_PHASE3_SEC = START_TIME_SEC + 7*60+45 #
+START_PHASE3_SEC = START_TIME_SEC + 18*60+42 #
 
 # EXP: expendable; ASDS: drone ship; RTLS: return to launch site.
 # EXP broadcasts have no booster telemetry after separation.

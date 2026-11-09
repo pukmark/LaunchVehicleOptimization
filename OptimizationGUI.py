@@ -7,7 +7,6 @@ The private --worker entry point runs IPOPT outside the Tk event loop.
 import argparse
 from dataclasses import asdict, dataclass, field, fields
 from copy import deepcopy
-from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -29,7 +28,7 @@ from PayloadSensitivity import default_steps, sensitivity_request, validate_step
 from VehicleDefinitions import (VEHICLE_PARAMETERS, BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name,
                                 read_vehicle_definition, write_vehicle_definition,
-                                validate_vehicle_definition)
+                                validate_vehicle_definition, migrate_builtin_vehicles)
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from TelemetryFrames import local_to_ecef_velocity, eci_to_ecef_velocity
 from Trajectory3D import draw_trajectory_3d, maneuver_summary_text
@@ -197,7 +196,29 @@ def nominal_request(values, configuration=1, recovery="EXP", orbit_values=None, 
     }
 
 
-def run_optimization(request, output_dir, ipopt_options=None):
+def warm_start_compatible(request, previous_request, solution):
+    """Reuse successful trajectories for nearby dispersion changes in the same case."""
+    if not isinstance(solution, dict) or not solution.get('success') or not previous_request:
+        return False
+    if any(request.get(key) != previous_request.get(key)
+           for key in ('configuration', 'recovery', 'payload_mass_predefined')):
+        return False
+    if parse_launch_site(request.get('launch_site')) != parse_launch_site(previous_request.get('launch_site')):
+        return False
+    if any(request['target_orbit'].get(key) != previous_request['target_orbit'].get(key)
+           for key in ('apogee', 'perigee', 'i')):
+        return False
+    # A large change deserves a regenerated seed; small dispersion sweeps benefit
+    # from retaining the preceding trajectory, even after an unsuccessful rerun.
+    for name in MULTIPLIERS:
+        a = previous_request['dispersion'].get(name, 1.)
+        b = request['dispersion'].get(name, 1.)
+        if abs(b / a - 1.) > .2:
+            return False
+    return True
+
+
+def run_optimization(request, output_dir, ipopt_options=None, initial_solution=None):
     """Small solver boundary, also usable without a desktop display."""
     from LV_Optimization_Type import LV_Optimization
 
@@ -208,7 +229,7 @@ def run_optimization(request, output_dir, ipopt_options=None):
         RecoveryStrategy=request["recovery"],
         payload_mass_predefined=parse_payload_mass(request.get("payload_mass_predefined", -1)),
         Target_Orbit=request["target_orbit"], Plot_interm=False,
-        print_ipopt=True, output_dir=output_dir, ipopt_options=ipopt_options,
+        print_ipopt=True, output_dir=output_dir, ipopt_options=ipopt_options, init_guess=initial_solution,
     )
     return result
 
@@ -217,7 +238,15 @@ def worker(directory):
     """Persist the result even when IPOPT reports a failed solve."""
     directory = Path(directory)
     request = json.loads((directory / "inputs.json").read_text())
-    result = run_optimization(request, output_dir=None)
+    initial_solution = None
+    if (directory / 'initial_solution.pickle').exists():
+        previous_request = json.loads((directory / 'initial_request.json').read_text())
+        with (directory / 'initial_solution.pickle').open('rb') as stream:
+            candidate = pickle.load(stream)
+        if warm_start_compatible(request, previous_request, candidate):
+            initial_solution = candidate
+            print('Reusing the previous successful trajectory as the initial guess.', flush=True)
+    result = run_optimization(request, output_dir=None, initial_solution=initial_solution)
     name = "solution.pickle" if result.get("success") else "solution_Failed.pickle"
     with (directory / name).open("wb") as stream:
         pickle.dump(result, stream)
@@ -401,7 +430,9 @@ def draw_phase(figure, phase, solution, target, *, color="tab:blue", case_label=
             velocity = local_velocity_in_ecef(s, np.vstack((x[:, 2], np.zeros(len(x)), x[:, 3])))
         line(2, t, np.linalg.norm(velocity, axis=0), "ECEF speed" if speed_frame == "ECEF" else "Local velocity", "Speed [m/s]")
         line(3, t, x[:, 4] / 1000, "Booster mass", "Mass [t]")
-        line(4, t, s["acc4_sol"], "Specific acceleration", "Acceleration [m/s²]", label="Specific acceleration")
+        acceleration = numerical_acceleration(t, np.linalg.norm(x[:, 2:4], axis=1))
+        line(4, t, acceleration, "Speed acceleration (ECEF, includes gravity)",
+             "Acceleration [m/s²]", label="dv/dt (ECEF, incl. gravity)")
         line(5, t, s["Qdyn4_sol"] / 1000, "Dynamic pressure", "Pressure [kPa]")
         model = VLType()
         model.ApplyVehicleConfiguration(s.get("configuration", 1))
@@ -440,6 +471,7 @@ class OptimizationApp:
         self.fit_options = None
         self.process = None
         self.run_dir = None
+        self._worker_workspace = None
         self.log_stream = None
         self.cancelled = False
         self.closing = False
@@ -902,7 +934,7 @@ class OptimizationApp:
         restoring = self.restoring_state
         self.restoring_state = True
         try:
-            state = read_gui_state(source_path)
+            state = migrate_builtin_vehicles(read_gui_state(source_path))
             self.vehicles = vehicle_catalog(state.get('custom_vehicles', []))
             self.vehicle_combo.configure(values=list(self.vehicles))
             for index, saved in enumerate(state["cases"]):
@@ -1437,7 +1469,7 @@ class OptimizationApp:
     def append_log(self, text):
         self.log.configure(state="normal")
         self.log.insert("end", text)
-        # Keep rendering cheap during very long solves; the full log stays on disk.
+        # Keep rendering cheap during long solves; the full log remains in temporary storage.
         count = int(self.log.index("end-1c").split(".")[0])
         if count > 1500:
             self.log.delete("1.0", f"{count - 1500}.0")
@@ -1462,6 +1494,18 @@ class OptimizationApp:
             self.progress.stop()
         self.update_case_labels()
 
+    def _new_job_directory(self, prefix):
+        """Keep only the current worker's IPC files, outside saved sessions."""
+        self._cleanup_worker_workspace()
+        workspace = self._worker_workspace = tempfile.TemporaryDirectory(prefix='launch_vehicle_gui_' + prefix)
+        return Path(workspace.name)
+
+    def _cleanup_worker_workspace(self):
+        workspace = getattr(self, '_worker_workspace', None)
+        if workspace is not None:
+            workspace.cleanup()
+            self._worker_workspace = None
+
     def run(self):
         from tkinter import messagebox
         if self.process is not None:
@@ -1477,11 +1521,13 @@ class OptimizationApp:
             messagebox.showerror("Invalid run settings", str(exc), parent=self.root)
             return
         try:
-            self.output_root.mkdir(parents=True, exist_ok=True)
             case = self.cases[self.selected_case]
-            prefix = f"case{self.selected_case + 1}_" + datetime.now().strftime("%Y%m%d_%H%M%S_")
-            self.run_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=self.output_root))
+            self.run_dir = self._new_job_directory(f'case{self.selected_case + 1}_')
             (self.run_dir / "inputs.json").write_text(json.dumps(request, indent=2))
+            if warm_start_compatible(request, case.request, case.result):
+                with (self.run_dir / 'initial_solution.pickle').open('wb') as stream:
+                    pickle.dump(case.result, stream)
+                (self.run_dir / 'initial_request.json').write_text(json.dumps(case.request, indent=2))
             (self.run_dir / "case.json").write_text(json.dumps({"name": case.name, "color": case.color}, indent=2))
             env = os.environ.copy()
             env["MPLBACKEND"] = "Agg"
@@ -1511,7 +1557,7 @@ class OptimizationApp:
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
-        self.append_log(f"{case.name} · Run files: {self.run_dir}\n")
+        self.append_log(f"{case.name} · Optimization started.\n")
         self.refresh_comparison()
         self.set_running(True)
         self.poll()
@@ -1572,17 +1618,17 @@ class OptimizationApp:
             case.result = result
             case.request = deepcopy(self.request)
             case.computed_inputs = deepcopy(self.submitted_inputs)
-            case.run_dir = self.run_dir
+            case.run_dir = None
             case.state = "Complete"
             case.fit_report = None
             self.refresh_comparison()
-            self.status.set(f"{case.name} complete · {result.get('iter_count', '—')} iterations. Results and inputs saved.")
-            self.append_log(f"\nSolution saved: {path}\n")
+            self.status.set(f"{case.name} complete · {result.get('iter_count', '—')} iterations. Results updated.")
+            self.append_log(f"\n{case.name}: optimization complete.\n")
         except Exception as exc:
             case.state = "Failed; previous result retained" if case.result is not None else "Failed"
             self.status.set(f"{case.name}: {exc}")
             self.refresh_comparison()
-            self.append_log(f"\n{exc}\nRun files: {self.run_dir}\n")
+            self.append_log(f"\n{exc}\n")
 
     def render_fit_report(self):
         case = self.cases[self.selected_case]
@@ -1777,8 +1823,7 @@ class OptimizationApp:
             case = self.cases[self.selected_case]
             steps = validate_steps(request, case.sensitivity_settings if case.sensitivity_settings is not None
                                    else default_steps(request))
-            self.output_root.mkdir(parents=True, exist_ok=True)
-            directory = Path(tempfile.mkdtemp(prefix=f'sensitivity_case{self.selected_case + 1}_', dir=self.output_root))
+            directory = self._new_job_directory(f'sensitivity_case{self.selected_case + 1}_')
             (directory / 'sensitivity_inputs.json').write_text(json.dumps(dict(base_request=request, steps=steps), indent=2))
             # Only use compatible successful computed cases as the baseline's initial guess.
             if case.result is not None and case.result.get('success') and case.request == request:
@@ -1808,7 +1853,7 @@ class OptimizationApp:
         self.log.configure(state='normal')
         self.log.delete('1.0', 'end')
         self.log.configure(state='disabled')
-        self.append_log(f'{case.name} · Payload sensitivity files: {directory}\n')
+        self.append_log(f'{case.name} · Payload sensitivity started.\n')
         self.notebook.select(self.tabs['Sensitivity'])
         self.set_running(True)
         self.poll()
@@ -1841,8 +1886,8 @@ class OptimizationApp:
                 path.write_text(json.dumps(report, indent=2))
             case.sensitivity_report = report
             self.render_sensitivity_report()
-            self.status.set(f"{case.name} sensitivities: {report['termination']}. Report saved.")
-            self.append_log(f'\nSensitivity report: {path}\n')
+            self.status.set(f"{case.name} sensitivities: {report['termination']}. Report updated.")
+            self.append_log(f'\n{case.name}: sensitivity report updated.\n')
         except (OSError, ValueError, RuntimeError) as exc:
             self.render_sensitivity_report()
             self.status.set(f"{case.name}: {'Sensitivities cancelled' if self.cancelled else exc}; previous report retained.")
@@ -2199,8 +2244,7 @@ class OptimizationApp:
             validate_fit_parameter_bounds(name, low, high, options.get('fit_mode', 'dispersion'))
         if not any('speed' in self.telemetry.channels(phase, self.telemetry_primary.get()) for phase in ('stage1', 'stage2')):
             raise ValueError('Fitting requires first- or second-stage speed telemetry for synchronization.')
-        self.output_root.mkdir(parents=True, exist_ok=True)
-        directory = Path(tempfile.mkdtemp(prefix=f'fit_case{target + 1}_', dir=self.output_root))
+        directory = self._new_job_directory(f'fit_case{target + 1}_')
         self.fit_source_case = self.selected_case
         self.fit_telemetry = self.telemetry
         self.fit_options = dict(options, primary_group=self.telemetry_primary.get())
@@ -2239,7 +2283,7 @@ class OptimizationApp:
         self.log.configure(state='normal')
         self.log.delete('1.0', 'end')
         self.log.configure(state='disabled')
-        self.append_log(f"Fitting {source.name} → {self.cases[target].name}. Files: {directory}\n")
+        self.append_log(f"Fitting {source.name} → {self.cases[target].name}.\n")
         self.refresh_comparison()
         self.set_running(True)
         self.poll()
@@ -2293,7 +2337,7 @@ class OptimizationApp:
                 fitted['vehicle_definition'] = deepcopy(self.vehicles[fitted['vehicle']])
             case.computed_inputs = deepcopy(fitted)
             case.draft = fitted
-            case.run_dir = self.run_dir
+            case.run_dir = None
             case.fit_report = report
             case.state = f"Fit {'stopped' if self.cancelled or code != 0 else 'complete'} · score {best['score']:.4g}"
             source = self.cases[self.fit_source_case]
@@ -2315,7 +2359,7 @@ class OptimizationApp:
             self.refresh_comparison()
             self.notebook.select(self.tabs['Fit results'])
             self.status.set(f"{case.name}: {result['termination']} · score {result['baseline']['score']:.4g} → {best['score']:.4g}")
-            self.append_log(f"\n{self.status.get()}\nReport: {self.run_dir / 'fit_report.json'}\n")
+            self.append_log(f"\n{self.status.get()}\n")
         except Exception as exc:
             case.state = ('Cancelled' if self.cancelled else 'Fit failed') + ('; previous result retained' if case.result is not None else '')
             self.status.set(f"{case.name}: {exc}")
@@ -2349,6 +2393,10 @@ class OptimizationApp:
             if canvas._idle_draw_id is not None:
                 canvas.get_tk_widget().after_cancel(canvas._idle_draw_id)
                 canvas._idle_draw_id = None
+        if self.log_stream is not None:
+            self.log_stream.close()
+            self.log_stream = None
+        self._cleanup_worker_workspace()
         self.root.destroy()
 
 

@@ -2,12 +2,25 @@
 import numpy as np
 
 from LV_Type_scaled import VLType
-from TelemetryCSV import aerodynamic_loads
+from TelemetryCSV import aerodynamic_loads, numerical_acceleration
+
+
+def _after_apogee(time, altitude, window=None):
+    """Keep the sampled apogee and subsequent data, preserving missing samples."""
+    time, altitude = np.asarray(time).ravel(), np.asarray(altitude).ravel()
+    valid = np.isfinite(time) & np.isfinite(altitude)
+    if window is not None:
+        valid &= (time >= window[0] - 1e-8) & (time <= window[1] + 1e-8)
+    if not valid.any():
+        return np.zeros(time.size, dtype=bool)
+    indices = np.flatnonzero(valid)
+    apogee = indices[np.argmax(altitude[indices])]
+    return np.isfinite(time) & (time >= time[apogee])
 
 
 def draw_booster_altitude_results(figure, cases, *, telemetry=None, primary_group='Phase columns',
                                   telemetry_color='#CC79A7', telemetry_shift=0.):
-    """Each case is (SI solution, color, label); altitude is always vertical."""
+    """Plot descent from each ballistic apogee; altitude is always vertical."""
     figure.clear()
     grid = figure.add_gridspec(2, 6)
     axes = [figure.add_subplot(grid[0, :2])]
@@ -15,21 +28,35 @@ def draw_booster_altitude_results(figure, cases, *, telemetry=None, primary_grou
              figure.add_subplot(grid[0, 4:], sharey=axes[0]),
              figure.add_subplot(grid[1, :3], sharey=axes[0]),
              figure.add_subplot(grid[1, 3:], sharey=axes[0])]
+    ballistic_starts = []
     for solution, color, label in cases:
         if 'x4' not in solution:
             continue
         state = np.asarray(solution['x4'])
         altitude = np.asarray(solution['alt4_sol']).ravel() / 1000.
+        time = np.asarray(solution['t4_vec']).ravel()
+        window = None
+        if 'dt4_ballistic' in solution:
+            start = (float(np.min(time)) + float(solution.get('dt4_coast_after_sep', 0.))
+                     + float(solution.get('dt4_boostback', 0.)))
+            window = (start, start + float(solution['dt4_ballistic']))
+            ballistic_starts.append(start)
+        keep = _after_apogee(time, altitude, window)
+        if not keep.any():
+            continue
+        # Differentiate the retained samples so the first displayed acceleration
+        # never uses an interval from before apogee.
+        time, state, altitude = time[keep], state[keep], altitude[keep]
         speed = np.linalg.norm(state[:, 2:4], axis=1)
         model = VLType()
         model.ApplyVehicleConfiguration(solution.get('configuration', 1))
         loads = aerodynamic_loads(altitude * 1000., speed,
                                   density_factor=solution.get('dispersion', {}).get('AtmosphereDensity', 1.),
                                   heat_coefficient=model.Booster_k_empirical)
-        values = (speed, state[:, 4] / 1000., np.asarray(solution['Qdyn4_sol']).ravel() / 1000.,
-                  loads['heat_flux'], np.asarray(solution['acc4_sol']).ravel())
+        values = (speed, state[:, 4] / 1000., np.asarray(solution['Qdyn4_sol']).ravel()[keep] / 1000.,
+                  loads['heat_flux'], numerical_acceleration(time, speed))
         for index, (axis, value) in enumerate(zip(axes, values)):
-            curve_label = f'{label} · specific' if index == 4 else label
+            curve_label = f'{label} · dv/dt (ECEF)' if index == 4 else label
             axis.plot(value, altitude, '--', color=color, linewidth=1.6, label=curve_label)
 
     overlaid = False
@@ -47,13 +74,23 @@ def draw_booster_altitude_results(figure, cases, *, telemetry=None, primary_grou
             channels = {key: np.where(mask, value, explicit.get(key, np.full(len(time), np.nan)))
                         for key, value in channels.items()}
         if 'altitude' in channels:
-            altitude = np.asarray(channels['altitude'])
+            # Telemetry has its own measured apogee after the shared feed has
+            # been routed to booster return; no rising branch is overlaid.
+            time = np.asarray(telemetry.time) + telemetry_shift
+            search_altitude = np.asarray(channels['altitude'])
+            if ballistic_starts:
+                search_altitude = np.where(time >= min(ballistic_starts), search_altitude, np.nan)
+            keep = _after_apogee(time, search_altitude)
+            altitude = np.where(keep, channels['altitude'], np.nan)
             for index, key in ((0, 'speed'), (1, 'mass'), (2, 'pressure'), (2, 'pressure_derived'),
                                (3, 'heat_flux'), (3, 'heat_flux_derived'),
-                               (4, 'acceleration'), (4, 'acceleration_derived')):
+                               (4, 'acceleration_derived')):
                 if key not in channels:
                     continue
-                values = np.asarray(channels[key])
+                channel_keep = keep
+                if key == 'acceleration_derived':
+                    channel_keep = keep & np.r_[False, keep[:-1]]
+                values = np.where(channel_keep, channels[key], np.nan)
                 if not (np.isfinite(values) & np.isfinite(altitude)).any():
                     continue
                 label = 'Telemetry'
@@ -66,7 +103,7 @@ def draw_booster_altitude_results(figure, cases, *, telemetry=None, primary_grou
                 overlaid = True
 
     for axis, title, xlabel in zip(axes,
-            ('Velocity (Earth-fixed)', 'Mass', 'Dynamic pressure', 'Heat flux', 'Acceleration: specific / dv/dt'),
+            ('Velocity (Earth-fixed)', 'Mass', 'Dynamic pressure', 'Heat flux', 'Speed acceleration (ECEF, includes gravity)'),
             ('Speed [m/s]', 'Mass [t]', 'Dynamic pressure [kPa]', 'Heat flux [kW/m²]', 'Acceleration [m/s²]')):
         axis.set(title=title, xlabel=xlabel, ylabel='Altitude [km]')
         axis.grid(True, alpha=.25)
@@ -75,5 +112,5 @@ def draw_booster_altitude_results(figure, cases, *, telemetry=None, primary_grou
             axis.legend(fontsize=7, loc='best')
         else:
             axis.text(.5, .5, 'No matching data', transform=axis.transAxes, ha='center', color='#666666')
-    figure.suptitle('Booster return versus altitude', fontsize=12)
+    figure.suptitle('Booster descent from ballistic apogee versus altitude', fontsize=12)
     return overlaid

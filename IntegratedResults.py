@@ -52,6 +52,9 @@ def return_controls(solution, model):
         start = finish
 
     if 'dt4_boostback' in solution:
+        coast = float(solution.get('dt4_coast_after_sep', 0.))
+        if coast > 0:
+            interval(coast, 0., np.nan)
         thrust = np.asarray(solution['u4_boostback']).ravel()
         end = start + float(solution['dt4_boostback'])
         t = np.asarray(solution['t4_vec']).ravel()
@@ -80,8 +83,11 @@ def integrated_telemetry_curves(telemetry, primary_group, solutions, shift=0.):
         'stage1': [(min(0., float(np.min(s['t1_vec']))), float(np.max(s['t1_vec']))) for s in solutions],
         'booster': [(float(np.min(s['t4_vec'])), float(np.max(s['t4_vec']))) for s in solutions if 't4_vec' in s],
     }
-    boostback = [(float(np.min(s['t4_vec'])), float(np.min(s['t4_vec'])) + float(s['dt4_boostback']))
-                 for s in solutions if 't4_vec' in s and 'dt4_boostback' in s]
+    boostback = []
+    for s in solutions:
+        if 't4_vec' in s and 'dt4_boostback' in s:
+            start = float(np.min(s['t4_vec'])) + float(s.get('dt4_coast_after_sep', 0.))
+            boostback.append((start, start + float(s['dt4_boostback'])))
 
     def within(intervals):
         mask = np.zeros(time.size, dtype=bool)

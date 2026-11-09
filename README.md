@@ -8,7 +8,7 @@ flight telemetry, fit model parameters, and explore payload sensitivity.
 
 The desktop GUI supports three comparison cases, custom vehicle definitions,
 launch-site selection, flight-phase plots, and a 3D trajectory view. Built-in
-vehicle models include Falcon 9, Starship, Starship V3, and New Glenn. Their
+vehicle models include Falcon 9, Falcon 9 True, Starship, Starship V3, and New Glenn. Their
 parameters include engineering estimates; solver convergence and model fidelity
 depend on the selected case.
 
@@ -90,10 +90,17 @@ python OptimizationGUI.py
 2. Leave **Payload mass [kg]** at `-1` to maximize payload, or enter a positive
    value to fix the payload mass.
 3. Click **Run Case 1**. Follow progress in **Solver output**; **Cancel** stops
-   the active worker.
+   the active worker. Repeated runs reuse the selected case’s last successful
+   trajectory for nearby dispersion changes with the same vehicle, recovery,
+   launch site, orbit, and payload setting. Incompatible or incomplete saved
+   trajectories fall back to a generated initial guess.
 4. After convergence, inspect the first-stage, upper-stage, and 3D trajectory
    tabs. **Summery**, the leftmost tab, combines altitude, Earth-fixed speed, mass,
    throttle, and AoA/thrust angle on a shared timeline, including coasts.
+   RTLS booster histories include the post-separation coast before boostback,
+   using `SecondStage_CoastTimeAfterSep`. Throttle is zero during this coast,
+   and boostback angle curves begin at ignition. Rerun older cases to regenerate
+   their histories with the added phase.
    Ascent uses solid lines and booster return uses dashed lines. Select another
    case to compare a different vehicle, orbit, or recovery strategy.
    Loaded telemetry overlays any available altitude, speed, mass, throttle, and
@@ -110,7 +117,8 @@ Recovery choices are `EXP` (expendable), `ASDS` (drone-ship landing), and `RTLS`
 (return to launch site). Orbit fields in the GUI use altitude in kilometres
 and inclination in degrees. Recovery cases add booster-return plots.
 
-Runs save inputs, logs, and results under `Results/gui/`. The GUI automatically
+GUI runs, fits, and sensitivities use temporary worker files, removed before the
+next job or when the GUI closes; they do not create per-run folders in `Results/gui/`. The GUI automatically
 restores its session from `Results/gui/gui_state.json`; **Save state…** and
 **Load state…** transfer a complete session. **Reset GUI** restores defaults.
 These local outputs are excluded from Git.
@@ -132,7 +140,7 @@ from OptimizationGUI import nominal_request, run_optimization
 
 request = nominal_request(
     asdict(DispesrionFactorsType()),
-    configuration=1,       # 1: Falcon 9, 2: Starship, 3: Starship V3, 4: New Glenn
+    configuration=1,       # 1: Falcon 9, 2: Starship, 3: Starship V3, 4: New Glenn, 5: Falcon 9 True
     recovery="EXP",        # EXP, ASDS, or RTLS
     payload_mass=-1,        # kg; non-positive values maximize payload
     orbit_values={"apogee": "200", "perigee": "200", "inclination": "28.6"},
@@ -232,8 +240,7 @@ panel state. See [known verification limits](docs/USAGE.md#known-verification-li
   with `PYTHONPATH= python OptimizationGUI.py` to exclude external Python paths.
 - **OCR executable missing:** check `ffmpeg -version` and `tesseract --version`
   and make sure both executables are on `PATH`.
-- **Optimization fails:** inspect `solver.log` and the saved inputs in the run
-  folder. A successful installation does not guarantee convergence for every
+- **Optimization fails:** inspect the **Solver output** tab and the current case inputs. A successful installation does not guarantee convergence for every
   vehicle, orbit, or recovery configuration.
 
 ## Preparing a Git upload
@@ -270,3 +277,15 @@ Python callers can use `fit_dispersion_to_telemetry(..., fit_mode='vehicle')`.
 `parameters` selects attribute names from `VehicleDefinitions.VEHICLE_PARAMETERS`;
 omitting it selects all fields. API bounds use SI units, and
 `default_fit_bounds(request, fit_mode='vehicle')` supplies initial ranges.
+
+**Falcon 9 True** is built-in vehicle configuration `5`, defined by
+`VLType.Falcon9TrueDatabase()` in `LV_Type_scaled.py`. It uses the parameters
+promoted from the GUI's custom library. Older sessions with identical definitions
+use the built-in option; differing historical definitions remain custom variants.
+
+`Main.py` prints the vehicle actually selected by each sweep and uses deterministic
+initial estimates. Fixed-payload failures are not retried with ineffective random
+payload estimates. Successful starts are cached in `Results/initial_guesses/` for
+repeat runs; changes to the model, scenario, dispersion, or solver source invalidate
+the corresponding cache. Failed sweep points retain the preceding successful
+trajectory for subsequent points. Set `InitialGuessCache = None` to disable caching.

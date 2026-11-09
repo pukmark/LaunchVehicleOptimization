@@ -19,7 +19,7 @@ from OptimizationGUI import (ComparisonCase, OptimizationApp, nominal_dispersion
 from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETERS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name,
                                 validate_vehicle_definition, read_vehicle_definition,
-                                write_vehicle_definition)
+                                write_vehicle_definition, migrate_builtin_vehicles)
 
 
 class VehicleDefinitionTests(unittest.TestCase):
@@ -68,6 +68,60 @@ class VehicleDefinitionTests(unittest.TestCase):
         self.assertEqual(constructor.call_args.args[1], configuration)
         self.assertEqual(constructor.return_value.SolveOptimiztion.call_args.kwargs['RecoveryStrategy'], 'ASDS')
 
+    def test_falcon9_true_builtin_reaches_all_phases_with_promoted_values(self):
+        configuration = vehicle_catalog()['Falcon 9 True']
+        self.assertEqual(configuration, 5)
+        self.assertEqual(vehicle_name(configuration), 'Falcon 9 True')
+        model = LV_Optimization(DispesrionFactorsType(), configuration)
+        expected = {'EmptyFirstStageMass': 27100., 'FirstStagePropellentMass': 392700.,
+                    'FirstStage_SL_Thrust': 7158560.3005, 'FirstStage_Vac_Thrust': 7345916.348749999,
+                    'FirstStage_SL_Isp': 260.68, 'FirstStage_Vac_Isp': 274.89,
+                    'SecondStage_Thrust': 892405.15, 'SecondStage_Vac_Isp': 350.,
+                    'Booster_Cd0': 2.1, 'Booster_MaxDynamicPressure': 75000.}
+        for phase in (model.booster, model.eci, model.boostback, model.rocket_return):
+            for name, value in expected.items():
+                self.assertAlmostEqual(getattr(phase, name), value)
+            self.assertAlmostEqual(phase.LV_total_mass, 518370.)
+        # The definition resets every editable field even on a reused model.
+        reused = VLType()
+        reused.ApplyVehicleConfiguration(2)
+        reused.ApplyVehicleConfiguration(5)
+        for name in VEHICLE_PARAMETERS:
+            self.assertAlmostEqual(getattr(reused, name), getattr(model.booster, name))
+
+    def test_saved_matching_vehicle_is_promoted_without_changing_history(self):
+        definition = vehicle_from_editor('Falcon 9 True', vehicle_editor_values(5))
+        inputs = {'vehicle': definition['name'], 'vehicle_definition': deepcopy(definition)}
+        state = {'custom_vehicles': [definition], 'cases': [
+            {'draft': deepcopy(inputs), 'computed_inputs': deepcopy(inputs),
+             'request': {'configuration': deepcopy(definition)}}]}
+        before = deepcopy(state)
+        migrated = migrate_builtin_vehicles(state)
+        self.assertEqual(state, before)
+        self.assertEqual(migrated['custom_vehicles'], [])
+        for key in ('draft', 'computed_inputs'):
+            self.assertEqual(migrated['cases'][0][key], {'vehicle': 'Falcon 9 True'})
+        self.assertEqual(migrated['cases'][0]['request'], before['cases'][0]['request'])
+        self.assertEqual(vehicle_catalog(migrated['custom_vehicles'])['Falcon 9 True'], 5)
+        self.assertEqual(migrate_builtin_vehicles(migrated), migrated)
+
+    def test_older_variant_keeps_its_parameters_and_avoids_name_collisions(self):
+        definition = vehicle_from_editor('Falcon 9 True', self.values)
+        other = dict(deepcopy(definition), name='Falcon 9 True (custom)')
+        inputs = {'vehicle': definition['name'], 'vehicle_definition': deepcopy(definition)}
+        state = {'custom_vehicles': [definition, other], 'cases': [
+            {'draft': deepcopy(inputs), 'computed_inputs': deepcopy(inputs),
+             'request': {'configuration': deepcopy(definition)}}]}
+        migrated = migrate_builtin_vehicles(state)
+        renamed = 'Falcon 9 True (custom 2)'
+        catalog = vehicle_catalog(migrated['custom_vehicles'])
+        self.assertEqual(catalog['Falcon 9 True'], 5)
+        self.assertEqual(catalog[renamed]['parameters'], definition['parameters'])
+        for key in ('draft', 'computed_inputs'):
+            self.assertEqual(migrated['cases'][0][key]['vehicle'], renamed)
+        self.assertEqual(migrated['cases'][0]['request'], state['cases'][0]['request'])
+        self.assertEqual(migrate_builtin_vehicles(migrated), migrated)
+
     def test_display_units_convert_to_si_and_nominal_annotations(self):
         values = dict(self.values, EmptyFirstStageMass='30', FirstStage_SL_Thrust='1000',
                       FirstStage_SL_Isp='290', FirstStage_MaxAlpha='12')
@@ -101,6 +155,14 @@ class VehicleDefinitionTests(unittest.TestCase):
         for name in ('Falcon 9', 'falcon 9', 'Research vehicle', 'research vehicle'):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 vehicle_catalog([self.definition, vehicle_from_editor(name, self.values)])
+
+    def test_legacy_unused_booster_fields_do_not_break_vehicle_loading(self):
+        legacy = deepcopy(self.definition)
+        legacy['parameters'].update(Booster_CLa=.6, Booster_Cda2=2.)
+        self.assertEqual(validate_vehicle_definition(legacy), self.definition)
+        model = VLType()
+        model.ApplyVehicleConfiguration(legacy)
+        self.assertEqual(model.Booster_Cd0, legacy['parameters']['Booster_Cd0'])
 
     def test_definition_reaches_every_phase_and_dispersion_is_applied_once(self):
         definition = vehicle_from_editor('Edited', dict(self.values, Diameter='4',

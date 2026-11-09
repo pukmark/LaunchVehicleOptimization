@@ -76,11 +76,11 @@ class DynamicsTests(unittest.TestCase):
 
 
 class SweepTests(unittest.TestCase):
-    def run_sweep(self, parameter, values, solver):
+    def run_sweep(self, parameter, values, solver, payload=-1):
         settings = dict(
             DispesrionList=[np.asarray(values)], DispesrionParamList=[parameter], ConfigList=[1],
             Target_Orbits=[{'Name': 'test'}], RecoveryStrategyVec=['EXP'],
-            payload_mass_predefined=-1, Plot_interm=False, Plot_Results=0, Solution=None,
+            payload_mass_predefined=payload, Plot_interm=False, Plot_Results=0, Solution=None,
         )
         output = io.StringIO()
         with patch.dict(Main.__dict__, settings), patch.object(Main.LVopt_Type, 'LV_Optimization', solver), contextlib.redirect_stdout(output):
@@ -104,6 +104,55 @@ class SweepTests(unittest.TestCase):
         results, output = self.run_sweep('FirstStage_EmptyMass', [100], Solver)
         self.assertEqual(results, ['Falcon9_test_EXP_FirstStage_EmptyMass=0.001*np.array([0.00])'])
         self.assertNotIn('np.array(', output)
+
+    def test_fixed_payload_does_not_repeat_identical_randomized_retries(self):
+        attempts = []
+        class Solver:
+            def __init__(self, *args):
+                pass
+            def SolveOptimiztion(self, **kwargs):
+                attempts.append(kwargs['init_guess'])
+                return {'success': False, 'return_status': 'test'}
+        self.run_sweep('FirstStage_EmptyMass', [[0]], Solver, payload=10000.)
+        self.assertEqual(attempts, [.5])
+        self.assertEqual(list(Main._sweep_seeds(None, -1)), [.35, .5, .65, .2, .8])
+        self.assertEqual(len(list(Main._sweep_seeds({'success': True}, -1))), 5)
+
+    def test_failed_point_preserves_the_last_successful_trajectory(self):
+        previous = {'success': True, 'payload_mass': 12345.}
+        attempts = []
+        class Solver:
+            def __init__(self, dispersion, config):
+                self.value = dispersion.FirstStage_EmptyMass
+            def SolveOptimiztion(self, **kwargs):
+                attempts.append((self.value, kwargs['init_guess']))
+                if self.value == 100:
+                    return {'success': False, 'return_status': 'test'}
+                return previous
+        self.run_sweep('FirstStage_EmptyMass', [0, 100, 200], Solver)
+        self.assertIs(next(guess for value, guess in attempts if value == 200), previous)
+
+    def test_cache_invalidates_when_model_scenario_or_payload_changes(self):
+        model = LV_Optimization(DispesrionFactorsType())
+        target = {'Name': 'test', 'apogee': 6578137., 'perigee': 6578137., 'i': .5}
+        with tempfile.TemporaryDirectory() as directory:
+            def path(payload=-1, **orbit):
+                return Main._sweep_cache_path(directory, model, 1, 'ASDS',
+                                               dict(target, **orbit), DispesrionFactorsType(), payload)
+            baseline = path()
+            self.assertEqual(path(-1.), baseline)
+            self.assertNotEqual(path(10000.), baseline)
+            self.assertNotEqual(path(i=.6), baseline)
+            model.booster.FirstStage_SL_Isp *= .99
+            self.assertNotEqual(path(), baseline)
+            original = {'success': True, 'payload_mass': 10000.}
+            Main._write_sweep_guess(baseline, original)
+            self.assertEqual(Main._read_sweep_guess(baseline), original)
+            Main._write_sweep_guess(baseline, {'success': False})
+            self.assertEqual(Main._read_sweep_guess(baseline), original)
+            baseline.write_bytes(b'broken cache')
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertIsNone(Main._read_sweep_guess(baseline))
 
     def test_all_dispersion_fields_and_partition_alias_are_forwarded(self):
         seen = []

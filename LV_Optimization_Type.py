@@ -127,6 +127,49 @@ def _landing_guess_control(model, minimum_thrust, maximum_thrust, gain):
     return control
 
 
+def _complete_initial_solution(model, solution, recovery):
+    """Reject incomplete, nonfinite or differently meshed saved trajectories."""
+    shapes = {'x1': (model.booster.nx, model.booster.N + 1),
+              'u1': (model.booster.nu, model.booster.N),
+              'x2': (model.eci.nx, model.eci.N[0] + 1),
+              'u2': (model.eci.nu, model.eci.N[0]),
+              'x3': (model.eci.nx, model.eci.N[1] + 1),
+              'u3': (model.eci.nu, model.eci.N[1])}
+    positive = ['payload_mass', 'dt1', 'dt2', 'dt3']
+    vectors = {}
+    if recovery != 'EXP':
+        shapes['x4_landing'] = (model.rocket_return.nx, model.rocket_return.N + 1)
+        vectors.update({name: model.rocket_return.nx for name in
+                        ('x4_0', 'x4_before_reentry', 'x4_after_reentryburn', 'x4_before_landing')})
+        vectors['u4_landing'] = model.rocket_return.N
+        positive += ['dt4_ballistic', 'dt4_reentry', 'u4_reentry', 'dt4_before_landing', 'dt4_landing']
+    if recovery == 'RTLS':
+        vectors.update(x4_boostback=model.boostback.nx, u4_boostback=model.boostback.nu)
+        positive.append('dt4_boostback')
+    try:
+        for name, shape in shapes.items():
+            values = np.asarray(solution[name], dtype=float)
+            if values.shape != shape or not np.isfinite(values).all():
+                return False
+        for name, size in vectors.items():
+            values = np.asarray(solution[name], dtype=float)
+            if values.size != size or not np.isfinite(values).all():
+                return False
+        for name in (*positive, 'LaunchAz'):
+            value = np.asarray(solution[name], dtype=float)
+            if value.size != 1 or not np.isfinite(value).all() or name in positive and value.item() <= 0:
+                return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _boostback_coast(model, scaled_state):
+    """Apply the same separation coast used by the RTLS constraint and output."""
+    return model.dynamics_kp1(scaled_state, np.full(model.nu, 1e-8),
+                              model.SecondStage_CoastTimeAfterSep / model.scaleT)
+
+
 def _fit_recovery_guess(model, boostback_model, initial_state, seed, strategy,
                         thrust_limits, residuals, reentry_altitude_min=70000.):
     """Fit recovery durations, thrust and boostback direction as one propagated guess."""
@@ -155,7 +198,8 @@ def _fit_recovery_guess(model, boostback_model, initial_state, seed, strategy,
             angle = candidate['boostback_angle']
             candidate['boostback_control'] = np.array([-np.cos(angle), -np.sin(angle)])
             candidate['boostback_state'] = boostback_model.dynamics_kp1_M20(
-                boostback_model.scale_x(initial_state), candidate['boostback_control'],
+                _boostback_coast(boostback_model, boostback_model.scale_x(initial_state)),
+                candidate['boostback_control'],
                 candidate['boostback_time'] / boostback_model.scaleT)
             state = model.scale_x(boostback_model.unscale_x(candidate['boostback_state']))
         candidate['before_reentry'] = model.dynamics_kp1_M50(
@@ -407,7 +451,10 @@ class LV_Optimization(VLType):
             init_guess = 0.5
         elif isinstance(init_guess, dict):
             init_guess = init_guess.copy()
-            if RecoveryStrategy != 'EXP' and init_guess.get('solution_units') != 'SI':
+            if not _complete_initial_solution(self, init_guess, RecoveryStrategy):
+                print('Saved initial guess is incomplete or uses a different mesh; generating a new trajectory.', flush=True)
+                init_guess = .5
+            elif RecoveryStrategy != 'EXP' and init_guess.get('solution_units') != 'SI':
                 # Legacy result files stored these two fields in solver units.
                 init_guess['dt4_landing'] = init_guess['dt4_landing'] * self.rocket_return.scaleT
                 init_guess['u4_reentry'] = float(np.asarray(init_guess['u4_reentry']).item()) * self.rocket_return.scaleU[0]
@@ -618,8 +665,10 @@ class LV_Optimization(VLType):
             if RecoveryStrategy == 'RTLS':
                 diagnostics.add(separation, 'Initial state', x4_0 == self.boostback.scale_x(x4_init_unscaled),
                                 self.boostback.scaleX, local_units, local_components)
+                x4_afterCoast = _boostback_coast(self.boostback, x4_0)
+
                 diagnostics.add(boostback, 'Dynamics',
-                                x4_boostback == self.boostback.dynamics_kp1_M20(x4_0, u4_boostback, dt4_boostback),
+                                x4_boostback == self.boostback.dynamics_kp1_M20(x4_afterCoast, u4_boostback, dt4_boostback),
                                 self.boostback.scaleX, local_units, local_components)
                 diagnostics.add(boostback, 'Thrust norm upper bound', ca.norm_2(u4_boostback) <= 1.0)
 
@@ -717,7 +766,6 @@ class LV_Optimization(VLType):
             cost += -payload_mass # maximize the payload mass and propellant spares
         else:
             cost += -(x3f[6] - self.eci.SecondStage_EmptyMass - payload_mass - propellent_mass_for_final_dv) # maximize the payload mass and propellant spares
-
         opti.minimize(cost)
 
 
@@ -800,7 +848,7 @@ class LV_Optimization(VLType):
         if RecoveryStrategy == 'RTLS':
             dm = self.booster.FirstStagePropellentMass * 0.12
         elif RecoveryStrategy == 'ASDS':
-            dm = self.booster.FirstStagePropellentMass * 0.035
+            dm = self.booster.FirstStagePropellentMass * 0.05
         else:    
             dm = 0.0
         separation_mass_target = float(self.booster.EmptyFirstStageMass +
@@ -982,8 +1030,9 @@ class LV_Optimization(VLType):
         opti.set_initial(u3, u3_guess)
         diagnostics.report(phase3)
 
-        # calculate the initial guess for self.booster return
-        if RecoveryStrategy != 'EXP':
+        # A supplied trajectory already contains the recovery states and controls.
+        # Avoid running the expensive recovery search before overwriting its result.
+        if RecoveryStrategy != 'EXP' and not isinstance(init_guess, dict):
             # calculate the initial guess for self.booster return
             x4_0_guess = np.zeros((self.rocket_return.nx, 1))
             x1f_guess_unscaled = self.booster.unscale_x(x1_guess[:,self.booster.N]).full().flatten()
@@ -1001,7 +1050,8 @@ class LV_Optimization(VLType):
                 boostback_angle = np.deg2rad(-10.)
                 u4_boostback_guess[:,0] = [-np.cos(boostback_angle), -np.sin(boostback_angle)]
                 x4_boostback_guess = self.boostback.dynamics_kp1_M20(
-                    self.boostback.scale_x(x4_0_guess), u4_boostback_guess, dt4_boostback_guess)
+                    _boostback_coast(self.boostback, self.boostback.scale_x(x4_0_guess)),
+                    u4_boostback_guess, dt4_boostback_guess)
                 x4_boostback_guess_unscaled = self.boostback.unscale_x(x4_boostback_guess)
 
                 opti.set_initial(dt4_boostback, dt4_boostback_guess)
@@ -1010,7 +1060,7 @@ class LV_Optimization(VLType):
 
             # calculate the initial guess for self.booster return
             dt4_ballistic_guess = 300 / self.rocket_return.scaleT
-            reentry_altitude_target = 70000 + 1000.
+            reentry_altitude_target = 70000
             iter=0
             while iter < 50:
                 if RecoveryStrategy == 'RTLS':
@@ -1528,11 +1578,33 @@ class LV_Optimization(VLType):
 
         if RecoveryStrategy != 'EXP':
             if RecoveryStrategy == 'RTLS':
-                t4_boostback_vec = t1_vec[-1]+np.linspace(0, dt4_boostback_sol, self.rocket_return.N+1).reshape(-1,1)
+                dt4_coast_after_sep = float(self.boostback.SecondStage_CoastTimeAfterSep)
+                coast_elapsed = np.linspace(0., dt4_coast_after_sep, 26 if dt4_coast_after_sep > 0 else 1)
+                t4_coast_vec = (t1_vec[-1] + coast_elapsed).reshape(-1, 1)
+                # Evaluate from separation at each elapsed time so the terminal
+                # coast state exactly matches the single RK4 step in the constraint.
+                x4_coast_sol = np.column_stack([
+                    self.boostback.unscale_x(self.boostback.dynamics_kp1(
+                        self.boostback.scale_x(x4_0_sol), np.full(self.boostback.nu, 1e-8),
+                        elapsed / self.boostback.scaleT)).full().ravel()
+                    for elapsed in coast_elapsed])
+                alt4_coast_sol = np.array([
+                    float(self.boostback.local_to_alt(state)) for state in x4_coast_sol.T]).reshape(-1, 1)
+                coast_speed = np.linalg.norm(x4_coast_sol[2:4], axis=0)
+                Qdyn4_coast_sol = np.array([
+                    .5 * float(self.atmosphere.rho_fun(altitude)) * self.ScenarioDispersion.AtmosphereDensity * speed**2
+                    for altitude, speed in zip(alt4_coast_sol.ravel(), coast_speed)]).reshape(-1, 1)
+                acc4_coast_sol = np.array([
+                    float(self.boostback.specific_acc_fun(self.boostback.scale_x(state),
+                                                         np.full(self.boostback.nu, 1e-8)))
+                    for state in x4_coast_sol.T]).reshape(-1, 1)
+                self.Solution['dt4_coast_after_sep'] = dt4_coast_after_sep
+                self.Solution['x4_after_coast'] = x4_coast_sol[:, -1].copy()
+                t4_boostback_vec = t4_coast_vec[-1]+np.linspace(0, dt4_boostback_sol, self.rocket_return.N+1).reshape(-1,1)
                 alt4_boostback_sol = np.zeros((self.rocket_return.N+1,1))
                 vel4_boostback_sol = np.zeros((self.rocket_return.N+1,1))
                 x4_boostback_vec_sol = np.zeros((self.boostback.nx, self.rocket_return.N+1))
-                x4_boostback_vec_sol[:,0] = x4_0_sol
+                x4_boostback_vec_sol[:,0] = x4_coast_sol[:, -1]
                 Qdyn4_boostback_sol = np.zeros((self.rocket_return.N+1,1))
                 acc4_boostback_sol = np.zeros((self.rocket_return.N+1,1))
                 for k in range(self.rocket_return.N+1):
@@ -1553,7 +1625,7 @@ class LV_Optimization(VLType):
                 x4_ballistic_sol[:,0] = self.boostback.unscale_x(x4_boostback_scaled_sol).full().flatten()
             else:
                 x4_ballistic_sol[:,0] = x4_0_sol
-            t4_ballistic_vec[0]  = t1_vec[-1] if RecoveryStrategy != 'RTLS' else dt4_boostback_sol+t1_vec[-1]
+            t4_ballistic_vec[0]  = t1_vec[-1] if RecoveryStrategy != 'RTLS' else t4_boostback_vec[-1]
             for k in range(N4_ballistic+1):
                 if k<N4_ballistic:
                     t4_ballistic_vec[k+1] = t4_ballistic_vec[k] + dt4_ballistic_sol/N4_ballistic
@@ -1637,11 +1709,11 @@ class LV_Optimization(VLType):
 
         if RecoveryStrategy != 'EXP':
             if RecoveryStrategy == 'RTLS':
-                t4_vec = np.vstack((t4_boostback_vec, t4_ballistic_vec, t4_reentry_vec, t4_before_landing_vec, t4_landing_vec))
-                x4 = np.hstack((x4_boostback_vec_sol, x4_ballistic_sol, x4_reentry_sol, x4_before_landing_vec_sol, x4_landing_sol)).T
-                alt4_sol = np.vstack((alt4_boostback_sol, alt4_ballistic_sol, alt4_reentry_sol, alt4_before_landing_sol, alt4_landing_sol))
-                Qdyn4_sol = np.vstack((Qdyn4_boostback_sol, Qdyn4_ballistic_sol, Qdyn4_reentry_sol, Qdyn4_before_landing_sol, Qdyn4_landing_sol))
-                acc4_sol = np.vstack((acc4_boostback_sol, acc4_ballistic_sol, acc4_reentry_sol, acc4_before_landing_sol, acc4_landing_sol))
+                t4_vec = np.vstack((t4_coast_vec[:-1], t4_boostback_vec, t4_ballistic_vec, t4_reentry_vec, t4_before_landing_vec, t4_landing_vec))
+                x4 = np.hstack((x4_coast_sol[:, :-1], x4_boostback_vec_sol, x4_ballistic_sol, x4_reentry_sol, x4_before_landing_vec_sol, x4_landing_sol)).T
+                alt4_sol = np.vstack((alt4_coast_sol[:-1], alt4_boostback_sol, alt4_ballistic_sol, alt4_reentry_sol, alt4_before_landing_sol, alt4_landing_sol))
+                Qdyn4_sol = np.vstack((Qdyn4_coast_sol[:-1], Qdyn4_boostback_sol, Qdyn4_ballistic_sol, Qdyn4_reentry_sol, Qdyn4_before_landing_sol, Qdyn4_landing_sol))
+                acc4_sol = np.vstack((acc4_coast_sol[:-1], acc4_boostback_sol, acc4_ballistic_sol, acc4_reentry_sol, acc4_before_landing_sol, acc4_landing_sol))
             else:
                 t4_vec = np.vstack((t4_ballistic_vec, t4_reentry_vec, t4_before_landing_vec, t4_landing_vec))
                 x4 = np.vstack((x4_ballistic_sol.T, x4_reentry_sol.T, x4_before_landing_vec_sol.T, x4_landing_sol.T))

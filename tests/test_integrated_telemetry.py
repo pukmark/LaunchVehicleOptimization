@@ -76,6 +76,15 @@ class IntegratedTelemetryTests(unittest.TestCase):
         throttle = next(values for index, _, values, _, _ in curves if index == 3)
         np.testing.assert_allclose(throttle, [50, 40, 30, 20])
 
+    def test_coast_delays_boostback_telemetry_angle_window(self):
+        data = self.load('time_s,booster_alpha_deg,booster_throttle\n'
+                         '0,170,0\n1,175,0\n2,180,.5\n3,180,.5\n4,180,0\n')
+        solution = {'t1_vec': [0., 1.], 't4_vec': [10., 15.],
+                    'dt4_boostback': 1., 'dt4_coast_after_sep': 2.}
+        curves = list(integrated_telemetry_curves(data, 'Phase columns', [solution], shift=10.))
+        angle = next(values for index, _, values, _, _ in curves if index == 4)
+        np.testing.assert_allclose(angle, [np.nan, np.nan, 180, 180, np.nan], equal_nan=True)
+
     def test_vector_speed_and_primary_assignment(self):
         data = self.load('time_s,ecef_vx_mps,ecef_vy_mps,ecef_vz_mps,speed_mps\n'
                          '0,3,4,0,99\n1,,,0,7\n')

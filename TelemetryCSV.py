@@ -64,7 +64,7 @@ PLOTS = {
     "Second stage": [(0, "altitude", "Altitude", "Altitude [km]"), (1, "speed", "ECEF speed", "Speed [m/s]"), (2, "mass", "Vehicle mass", "Mass [t]"), (3, "thrust", "Engine thrust", "Thrust [kN]"), (4, "inclination", "Orbital inclination", "Inclination [deg]"), (5, "apogee", "Osculating orbit", "Altitude [km]"), (5, "perigee", "Osculating orbit", "Altitude [km]")],
     "S2 propulsion": [(0, "isp", "Specific impulse", "Isp [s]"), (1, "acceleration", "Specific acceleration", "Acceleration [m/s²]"), (2, "thrust_angle", "Thrust / ECI velocity angle", "Angle [deg]"), (3, "thrust_x", "ECI thrust X", "Thrust [kN]"), (4, "thrust_y", "ECI thrust Y", "Thrust [kN]"), (5, "thrust_z", "ECI thrust Z", "Thrust [kN]")],
     "S2 orbit": [(0, "radius", "Geocentric radius", "Radius [km]"), (1, "radial", "Radial velocity", "Velocity [m/s]"), (2, "transverse", "Transverse speed", "Speed [m/s]"), (3, "flight_path", "Flight angle to local horizon", "Angle [deg]"), (4, "eccentricity", "Orbital eccentricity", "Eccentricity [−]"), (5, "energy", "Specific orbital energy", "Energy [MJ/kg]")],
-    "Booster": [(0, "local_z", "Return trajectory", "Local Z [km]"), (1, "altitude", "Altitude", "Altitude [km]"), (2, "speed", "ECEF speed", "Speed [m/s]"), (3, "mass", "Booster mass", "Mass [t]"), (4, "acceleration", "Specific acceleration", "Acceleration [m/s²]"), (5, "pressure", "Dynamic pressure", "Pressure [kPa]")],
+    "Booster": [(0, "local_z", "Return trajectory", "Local Z [km]"), (1, "altitude", "Altitude", "Altitude [km]"), (2, "speed", "ECEF speed", "Speed [m/s]"), (3, "mass", "Booster mass", "Mass [t]"), (5, "pressure", "Dynamic pressure", "Pressure [kPa]")],
 }
 
 
@@ -72,7 +72,7 @@ PLOTS = {
 for _phase in ("First stage", "Booster"):
     PLOTS[_phase].append((5, "pressure_derived", "Dynamic pressure", "Pressure [kPa]"))
 for _phase, _axis in (("S2 propulsion", 1), ("Booster", 4)):
-    _title = "Speed acceleration (ECEF, includes gravity)" if _phase == "S2 propulsion" else "Acceleration: specific / dv/dt"
+    _title = "Speed acceleration (ECEF, includes gravity)"
     PLOTS[_phase].append((_axis, "acceleration_derived", _title, "Acceleration [m/s²]"))
 PLOTS["Booster"].extend([
     (6, "heat_flux", "Empirical heat flux", "Heat flux [kW/m²]"),

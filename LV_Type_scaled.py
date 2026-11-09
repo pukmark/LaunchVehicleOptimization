@@ -89,9 +89,7 @@ class VLType(PythonMsg):
     FirstStage_MaxQdynAlpha: float = field(default = 5.0 * 10**3) # [Pa]
 
     Booster_Cd0: float = field(default = 1.6)
-    Booster_Cda2: float = field(default = 2.0)
-    Booster_CLa: float = field(default = 0.6) # [1/rad]
-    Booster_MaxDynamicPressure: float = field(default = 70.0 * 10**3) # [Pa]
+    Booster_MaxDynamicPressure: float = field(default = 80.0 * 10**3) # [Pa]
     Booster_MaxHeatFlux: float = field(default = 110.0 * 10**3) # [Pa]
     Booster_k_empirical: float = field(default = 2.0e-4) # [-]
 
@@ -210,8 +208,6 @@ class VLType(PythonMsg):
         self.FirstStage_StageSeparationMaxDynamicPressure = 2.0e3  # [Pa]
 
         self.Booster_Cd0 = 1.6  # with grid fins
-        self.Booster_Cda2 = 1.8
-        self.Booster_CLa = 0.5
         self.Booster_MaxDynamicPressure = 100.0 * 10**3  # [Pa]
         self.Booster_MaxHeatFlux = 150.0 * 10**3  # [W/m^2]
         self.Booster_k_empirical = 2.0e-4
@@ -288,8 +284,6 @@ class VLType(PythonMsg):
 
         # Booster recovery - estimates
         self.Booster_Cd0 = 1.6
-        self.Booster_Cda2 = 2.0
-        self.Booster_CLa = 0.8
         self.Booster_MaxDynamicPressure = 80.0e3
         self.Booster_MaxHeatFlux = 120.0e3
         self.Booster_k_empirical = 2.0e-4
@@ -319,6 +313,45 @@ class VLType(PythonMsg):
         # Derived mass and aerodynamic properties
         self.__post_init__()
 
+    def Falcon9TrueDatabase(self):
+        """Apply the Falcon 9 True parameters promoted from the saved GUI vehicle.
+
+        Values are model assumptions from the custom vehicle library, in SI.
+        """
+        self.Diameter = 3.66
+        self.EmptyFirstStageMass = 27100.0 # [kg]
+        self.EmptySecondStageMass = 4000.0 # [kg]
+        self.FirstStagePropellentMass = 392700.0 # [kg]
+        self.SecondStagePropellentMass = 92670.0 # [kg]
+        self.FairingMass = 1900.0 # [kg]
+        self.FirstStage_SL_Isp = 266.0 # [s]
+        self.FirstStage_Vac_Isp = 280.5 # [s]
+        self.FirstStage_SL_Thrust = 7015389.0 # [N]
+        self.FirstStage_Vac_Thrust = 7577892.0 # [N]
+        self.FirstStage_MinThrust_Factor = 0.57
+        self.FirstStage_MinThrust_IspFactor = 0.98
+        self.FirstStage_Ae = 43.79
+        self.SecondStage_Thrust = 892405.15
+        self.SecondStage_Vac_Isp = 350.0
+        self.SecondStage_MinThrust_Factor = 0.638
+        self.SecondStage_MinThrust_IspFactor = 0.975
+        self.FirstStage_CLa = 0.5
+        self.FirstStage_Cd0 = 0.5
+        self.FirstStage_Cda2 = 3.0
+        self.FirstStage_MaxAlpha = 0.1745
+        self.FairingSeparationAltitude = 85000.0
+        self.FirstStage_MaxDynamicPressure = 30000.0
+        self.FirstStage_StageSeparationMaxDynamicPressure = 500.0
+        self.FirstStage_MaxQdynAlpha = 5000.0
+        self.Booster_Cd0 = 2.0
+        self.Booster_MaxDynamicPressure = 70000.0
+        self.Booster_MaxHeatFlux = 110000.0
+        self.Booster_k_empirical = 0.0002
+        self.SecondStage_CoastTimeAfterSep = 10.0
+        self.Payload_Max_acc = 36.7875
+        self.ParkingOrbit_PerigeeAlt = 150000.0
+        self.__post_init__()
+
     def ApplyVehicleConfiguration(self, LV_Configuration: int):
         if isinstance(LV_Configuration, dict):
             definition = validate_vehicle_definition(LV_Configuration)
@@ -336,6 +369,9 @@ class VLType(PythonMsg):
             return
         if LV_Configuration == 4:
             self.NewGlennDatabase()
+            return
+        if LV_Configuration == 5:
+            self.Falcon9TrueDatabase()
             return
         raise ValueError(f"Unknown launch vehicle configuration: {LV_Configuration}")
 

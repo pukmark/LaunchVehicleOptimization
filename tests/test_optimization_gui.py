@@ -312,7 +312,7 @@ class DispersionFormTests(unittest.TestCase):
         self.assertAlmostEqual(model.FirstStage_SL_Thrust, 8240e3 * 9.80665)
         self.assertAlmostEqual(model.SecondStage_Thrust, 1614e3 * 9.80665)
         with self.assertRaisesRegex(ValueError, "Unknown launch vehicle configuration"):
-            model.ApplyVehicleConfiguration(5)
+            model.ApplyVehicleConfiguration(99)
 
     def test_solver_receives_snapshot_and_nominal_target(self):
         request = nominal_request(asdict(DispesrionFactorsType(FirstStageThrust=1.02)), 2, "RTLS")
@@ -512,12 +512,15 @@ class ResultRenderingTests(unittest.TestCase):
                     self.assertTrue(np.isnan(angle).any())
                     angle_lines = [line for line in figure.axes[4].lines if 'Booster return' in line.get_label()]
                     if recovery == 'RTLS':
-                        self.assertTrue(np.isfinite(angle[:2]).all())
-                        self.assertTrue(np.isnan(angle[2:]).all())
+                        self.assertTrue(np.isnan(angle[:2]).all())
+                        self.assertTrue(np.isfinite(angle[2:4]).all())
+                        self.assertTrue(np.isnan(angle[4:]).all())
+                        np.testing.assert_allclose(throttle[:2], 0.)
                         self.assertEqual(len(angle_lines), 1)
                         finite = np.isfinite(angle_lines[0].get_ydata())
                         self.assertLessEqual(max(angle_lines[0].get_xdata()[finite]),
-                                             time[0] + float(solution['dt4_boostback']))
+                                             time[0] + float(solution['dt4_coast_after_sep'])
+                                             + float(solution['dt4_boostback']))
                     else:
                         self.assertTrue(np.isnan(angle).all())
                         self.assertEqual(angle_lines, [])
@@ -665,6 +668,26 @@ class ResultRenderingTests(unittest.TestCase):
             self.assertEqual(str(app.sensitivity_button['state']), 'normal')
             restored = self.make_app(directory)
             self.assertEqual(restored.cases[0].sensitivity_report, case.sensitivity_report)
+
+    def test_promoted_builtin_restores_a_legacy_custom_library(self):
+        from GUIState import write_gui_state
+        from VehicleDefinitions import vehicle_from_editor, vehicle_editor_values
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(directory)
+            state = app.state_snapshot()
+            definition = vehicle_from_editor('Falcon 9 True', vehicle_editor_values(5))
+            state['custom_vehicles'] = [definition]
+            state['cases'][0]['draft']['vehicle'] = 'Falcon 9 True'
+            state['cases'][0]['draft']['vehicle_definition'] = definition
+            state['selected_case'] = 0
+            path = app.state_path
+            app.close()
+            write_gui_state(path, state)
+            restored = self.make_app(directory)
+            self.assertEqual(restored.vehicle.get(), 'Falcon 9 True')
+            self.assertEqual(restored.vehicles['Falcon 9 True'], 5)
+            self.assertEqual(restored.form_request()['configuration'], 5)
+            self.assertEqual(restored.state_snapshot()['custom_vehicles'], [])
 
     def test_custom_vehicle_selection_and_library_survive_restart(self):
         from VehicleDefinitions import vehicle_editor_values, vehicle_from_editor

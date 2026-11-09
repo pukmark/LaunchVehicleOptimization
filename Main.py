@@ -1,8 +1,14 @@
-#!/usr/bin/env pythorocket_eci.N[1]
+#!/usr/bin/env python3
 
 import os
-os.system('clear')
+if __name__ == '__main__' and os.isatty(1):
+    os.system('clear')
 from dataclasses import fields
+import hashlib
+import json
+from pathlib import Path
+import pickle
+import tempfile
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,6 +18,7 @@ import matplotlib.gridspec as gridspec
 
 import LV_Optimization_Type as LVopt_Type
 from LV_Type_scaled import DispesrionFactorsType
+from VehicleDefinitions import VEHICLE_PARAMETERS, vehicle_name
 
 # Global figures/axes used by the plotting helpers
 fig_first_stage = None
@@ -240,10 +247,61 @@ R0: float = 6378137.0 # [m]
 color_vec = ['r','b','g','k','y','c','m']
 
 
+def _sweep_cache_path(directory, model, configuration, recovery, target, dispersion, payload):
+    """Bind cached trajectories to the exact model, scenario, and solver source."""
+    source = hashlib.sha256()
+    for name in ('LV_Optimization_Type.py', 'LV_Type_scaled.py', 'Atmosphere_Type.py', 'LaunchSites.py'):
+        source.update(Path(__file__).with_name(name).read_bytes())
+    fingerprint = dict(configuration=configuration, recovery=recovery, target=target,
+                       dispersion=vars(dispersion), payload=float(payload), source=source.hexdigest(),
+                       launch_site=model.launch_site,
+                       parameters={name: float(getattr(model.booster, name)) for name in VEHICLE_PARAMETERS})
+    key = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()[:24]
+    return Path(directory) / f'{key}.pickle'
+
+
+def _read_sweep_guess(path):
+    if path is None or not path.exists():
+        return None
+    try:
+        with path.open('rb') as stream:
+            solution = pickle.load(stream)
+        return solution if isinstance(solution, dict) and solution.get('success') else None
+    except (OSError, EOFError, pickle.UnpicklingError):
+        print(f'Could not read cached initial guess {path}; generating a new one.')
+        return None
+
+
+def _write_sweep_guess(path, solution):
+    if path is None or not solution.get('success'):
+        return
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            pickle.dump(solution, stream)
+        temporary.replace(path)
+    except (OSError, pickle.PickleError, TypeError) as exc:
+        print(f'Could not cache initial guess: {exc}')
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _sweep_seeds(previous, payload):
+    """Scalar seeds only change the estimated payload in maximize mode."""
+    seeds = (.35, .5, .65, .2, .8) if payload <= 0 else (.5,)
+    if previous is not None:
+        yield previous
+        seeds = seeds[:4]  # Keep the overall attempt budget at five.
+    yield from seeds
+
+
 def run_dispersion_case(i):
     """Run one sweep and return summary lines for printing after all sweeps finish."""
     global LVopt, Solution, col, icol, RecoveryStrategy, Target_Orbit
-    DispesrionVec = DispesrionList[i]
+    DispesrionVec = np.asarray(DispesrionList[i], dtype=float).ravel()
     DispesrionParam = DispesrionParamList[i]
     LV_Configuration = ConfigList[i]
     # Keep the historical sweep name as an alias for the dataclass field.
@@ -256,31 +314,38 @@ def run_dispersion_case(i):
         print('#'+'='*40+f" Orbit Name: {Target_Orbit['Name']} "+"="*40)
         for iRecover, RecoveryStrategy in enumerate(RecoveryStrategyVec):
             Results = []
-            init_guess = 0.5
+            last_successful = None
             for iVal, DispesrionValue in enumerate(DispesrionVec):
                 DispesrionFactors = DispesrionFactorsType()
                 setattr(DispesrionFactors, dispersion_field, float(DispesrionValue))
                 LVopt = LVopt_Type.LV_Optimization(DispesrionFactors, LV_Configuration)
+                tag = vehicle_name(LV_Configuration).replace(' ', '')
+                print(f'{tag} / {RecoveryStrategy}: {DispesrionParam}={DispesrionValue:g}', flush=True)
+                cache_directory = globals().get('InitialGuessCache')
+                cache_path = (_sweep_cache_path(cache_directory, LVopt, LV_Configuration, RecoveryStrategy,
+                                               Target_Orbit, DispesrionFactors, payload_mass_predefined)
+                              if cache_directory is not None else None)
+                initial = _read_sweep_guess(cache_path)
+                if initial is None:
+                    initial = last_successful
                 Solution = {'success': False, 'return_status': 'Not attempted'}
-
-                for _ in range(5):
+                for attempt, init_guess in enumerate(_sweep_seeds(initial, payload_mass_predefined), start=1):
+                    print(f'Attempt {attempt}: ' + ('previous successful trajectory' if isinstance(init_guess, dict)
+                                                   else f'generated seed {init_guess:g}'), flush=True)
                     try:
                         Solution = LVopt.SolveOptimiztion(RecoveryStrategy=RecoveryStrategy,
                                                             payload_mass_predefined=payload_mass_predefined,
                                                             Target_Orbit=Target_Orbit,
                                                             Plot_interm=Plot_interm,
-                                                            print_ipopt = True,
+                                                            print_ipopt=True,
                                                             init_guess=init_guess)
                         if Solution['success']:
-                            init_guess = Solution
+                            last_successful = Solution
+                            _write_sweep_guess(cache_path, Solution)
                             break
-                        else:
-                            init_guess = np.random.uniform(0.2, 0.8)
                     except Exception as exc:
                         Solution = {'success': False, 'return_status': str(exc)}
                         print(f'{RecoveryStrategy} attempt failed: {exc}')
-                        init_guess = np.random.uniform(0.2, 0.8)
-
                 else:
                     print(f"{RecoveryStrategy} failed: {Solution.get('return_status', 'Unknown solver failure')}")
 
@@ -289,7 +354,7 @@ def run_dispersion_case(i):
                 else:
                     Results.append(0.0)
                 if iVal == DispesrionVec.shape[0]-1:
-                    ConfigName = {1: 'Falcon9', 2: 'Starship', 3: 'StarshipV3', 4: 'NewGlenn'}[LV_Configuration]
+                    ConfigName = vehicle_name(LV_Configuration).replace(' ', '')
                     result_lines.append(ConfigName+'_'+Target_Orbit['Name']+'_'+RecoveryStrategy+'_'+DispesrionParam+'=0.001*np.array(['+', '.join(f'{x:.2f}' for x in Results) + '])')
                 # print(f'dV for final orbit: {v3_desired-v3_apogee:.2f} m/s, Propellent mass for final dV: {propellent_mass_for_final_dv3:.2f} kg')
                 # print(f'Final Orbit (Apogee, Perigee, Inclination): {(actual_apogee3 - self.eci.R0)/1000:.2f} Km, {(apogee3_sol[-1] - self.eci.R0)/1000:.2f} Km, {np.rad2deg(i3_sol[-1]):.2f} deg')
@@ -619,10 +684,10 @@ if __name__ == '__main__':
     RecoveryStrategyVec = ['ASDS'] # 'EXP', 'ASDS', 'RTLS'
     payload_mass_predefined = -1 # payload mass defined in kg, maximmize the payload mass if set to non-positive value
     Plot_interm = 0
-    LV_Configuration = 4 # 1 - Falcon 9, 2 - Starship, 3 - Starship V3, 4-New Glenn
+    LV_Configuration = 1 # 1: Falcon 9, 2: Starship, 3: Starship V3, 4: New Glenn, 5: Falcon 9 True
     Plot_Results = 2 # 1 - Plot telemetry, 2- Plot 3d trajectory
 
-    ConfigName = {1: 'Falcon9', 2: 'Starship', 3: 'StarshipV3', 4: 'NewGlenn'}[LV_Configuration]
+    ConfigName = vehicle_name(LV_Configuration).replace(' ', '')
 
     Target_Orbits = []
     ### Target orbit parameters for LEO 
@@ -692,7 +757,7 @@ if __name__ == '__main__':
     # DispesrionList.append(np.linspace(-10000,10000, 9))
     DispesrionList.append(np.array([[0]]))
     DispesrionParamList.append('FirstStage_EmptyMass')
-    ConfigList.append(4)
+    ConfigList.append(LV_Configuration)
 
     # DispesrionList.append(np.linspace(-3000,10000, 9))
     # DispesrionParamList.append('SecondStage_EmptyMass')
@@ -795,6 +860,8 @@ if __name__ == '__main__':
     # DispesrionParamList.append('FirstStage_EmptyMass')
     # ConfigList.append(1)
 
+    # Reuse successful starts on repeat runs; source/physics changes invalidate the cache.
+    InitialGuessCache = Path('Results') / 'initial_guesses'
     EnableParallelDispersion = True
     use_parallel = EnableParallelDispersion and Plot_Results == 0 and len(DispesrionList) > 1
     all_result_lines = []
