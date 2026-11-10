@@ -66,7 +66,7 @@ class LV_plot():
         return
 
 
-    def plot_iteration(self, i, x, Target_Orbit, payload_mass_predefined, optimize_stage_partition:bool = False):
+    def plot_iteration(self, i, x, Target_Orbit, payload_mass_predefined, optimize_stage_partition:bool = False, landing_angles=None):
 
         if i % 3 > 0:
             return
@@ -160,7 +160,13 @@ class LV_plot():
                 i += 1
             for k in range(self.rocket_return.N):
                 t4_vec[i+1] = t4_vec[i] + dt4_landing
-                x4p[i+1,:] = self.rocket_return.unscale_x(self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), u4_landing[k,0], self.rocket_return.scale_t(dt4_landing))).full().flatten()
+                if landing_angles is None:
+                    following = self.rocket_return.dynamics_kp1(self.rocket_return.scale_x(x4p[i,:]), u4_landing[k,0], self.rocket_return.scale_t(dt4_landing))
+                else:
+                    following = self.rocket_return.landing_dynamics_kp1(
+                        self.rocket_return.scale_x(x4p[i,:]), [u4_landing[k,0], landing_angles[k]],
+                        self.rocket_return.scale_t(dt4_landing))
+                x4p[i+1,:] = self.rocket_return.unscale_x(following).full().flatten()
                 i += 1
             alt4, Qdyn4 = np.zeros((x4p.shape[0])), np.zeros((x4p.shape[0]))
             for k in range(x4p.shape[0]):

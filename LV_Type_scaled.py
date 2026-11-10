@@ -89,7 +89,7 @@ class VLType(PythonMsg):
     FirstStage_MaxQdynAlpha: float = field(default = 5.0 * 10**3) # [Pa]
 
     Booster_Cd0: float = field(default = 1.6)
-    Booster_MaxDynamicPressure: float = field(default = 80.0 * 10**3) # [Pa]
+    Booster_MaxDynamicPressure: float = field(default = 70.0 * 10**3) # [Pa]
     Booster_MaxHeatFlux: float = field(default = 110.0 * 10**3) # [Pa]
     Booster_k_empirical: float = field(default = 2.0e-4) # [-]
 
@@ -127,6 +127,10 @@ class VLType(PythonMsg):
     dynamics_kp1_M50: ca.Function = field(default=None)
     dynamics_kp1_M20: ca.Function = field(default=None)
     dynamics_kp1_M10: ca.Function = field(default=None)
+    landing_dynamics: ca.Function = field(default=None)
+    landing_dynamics_kp1: ca.Function = field(default=None)
+    landing_specific_acc_fun: ca.Function = field(default=None)
+    landing_thrust_direction: ca.Function = field(default=None)
     local_to_eci_func: ca.Function = field(default=None)
     specific_acc_fun: ca.Function = field(default=None)
     dynamic_pressure_fun: ca.Function = field(default=None)
@@ -655,10 +659,12 @@ class BoosterReturn_2D(VLType):
         rho = atmosphere.rho_fun(Alt) * ScenarioDispersion.AtmosphereDensity
         g = self.g0 * self.R0**2 / (x**2 + (self.R0 + z)**2)
         g_angle = ca.asin(x / (self.R0 + z))
-        Drag = 0.5 * rho * (vx**2 + vz**2) * self.Sref * self.Booster_Cd0
-        gama_v = ca.atan2(vz, vx)
-        Fx = -(Drag + Thrust) * ca.cos(gama_v)
-        Fz = -(Drag + Thrust) * ca.sin(gama_v)
+        # A 1 mm/s speed floor keeps coast/reentry derivatives finite at rest.
+        # Landing thrust has its own independent direction below.
+        speed = ca.sqrt(vx**2 + vz**2 + 1e-6)
+        drag_coefficient = 0.5 * rho * self.Sref * self.Booster_Cd0
+        Fx = -drag_coefficient * speed * vx - Thrust * vx / speed
+        Fz = -drag_coefficient * speed * vz - Thrust * vz / speed
         Isp = self.FirstStage_SL_Isp
 
         dx = vx
@@ -684,7 +690,27 @@ class BoosterReturn_2D(VLType):
         self.ISP_calc = ca.Function('Isp_return_scaled', [sym_sx, sym_su], [Isp])
         self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [ca.sqrt(Fx**2+Fz**2)/m])
         self.dynamic_pressure_fun = ca.Function('dynamic_pressure_scaled', [sym_sx], [0.5 * rho * (vx**2 + vz**2)])
-        self.heat_flux_fun = ca.Function('heat_flux_scaled', [sym_sx], [self.Booster_k_empirical * ca.sqrt(rho) * (vx**2 + vz**2)**1.5 ])
+        self.heat_flux_fun = ca.Function('heat_flux_scaled', [sym_sx],
+                                         [self.Booster_k_empirical * ca.sqrt(rho) * (speed**3 - 1e-9)])
+
+        # Angle is radians from the current radial vertical, positive downrange.
+        # Throttle retains exactly the reentry model's force and mass-flow scale.
+        landing_angle = ca.MX.sym('landing_angle')
+        landing_control = ca.vertcat(sTfac, landing_angle)
+        radial_vertical = ca.atan2(x, self.R0 + z)
+        direction = ca.vertcat(ca.sin(radial_vertical + landing_angle), ca.cos(radial_vertical + landing_angle))
+        landing_force = -drag_coefficient * speed * ca.vertcat(vx, vz) + Thrust * direction
+        landing_rate = ca.vertcat(
+            dx / self.scaleX[0], dz / self.scaleX[1],
+            (landing_force[0] / m - g * ca.sin(g_angle)) / self.scaleX[2],
+            (landing_force[1] / m - g * ca.cos(g_angle)) / self.scaleX[3],
+            dm / self.scaleX[4]) * self.scaleT
+        self.landing_dynamics = ca.Function('landing_dynamics', [sym_sx, landing_control], [landing_rate])
+        self.landing_dynamics_kp1 = ca.Function('landing_step', [sym_sx, landing_control, sdt],
+                                              [self.RK4(self.landing_dynamics, sym_sx, landing_control, sdt)])
+        self.landing_thrust_direction = ca.Function('landing_direction', [sym_sx, landing_angle], [direction])
+        self.landing_specific_acc_fun = ca.Function('landing_acceleration', [sym_sx, landing_control],
+                                                   [ca.norm_2(landing_force) / m])
 
 @dataclass
 class BoostBackBurn_2D(VLType):

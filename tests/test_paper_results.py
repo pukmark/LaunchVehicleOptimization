@@ -36,7 +36,7 @@ class PaperResultsTests(unittest.TestCase):
         np.testing.assert_allclose(figure.axes[0].lines[0].get_ydata(), [0, 1, 2])
         np.testing.assert_allclose(figure.axes[1].lines[1].get_ydata(), 300.)
         self.assertEqual(len(figure.axes[0].lines), 8)
-        self.assertEqual([t.get_text() for t in figure.legends[0].texts], ['Case 1', 'Case 2'])
+        self.assertEqual([t.get_text() for t in figure.legends[0].texts], ['Main vehicle', 'Booster'])
         self.assertTrue(all(axis.get_legend() is None for axis in figure.axes))
         with tempfile.TemporaryDirectory() as folder:
             for extension in ('pdf', 'svg', 'png'):
@@ -57,10 +57,19 @@ class PaperResultsTests(unittest.TestCase):
             np.testing.assert_allclose(line.get_xdata(), time+7)
             self.assertTrue(np.isnan(line.get_ydata()[2]))
             self.assertEqual(line.get_color(), 'black')
-        self.assertEqual([t.get_text() for t in figure.legends[0].texts], ['Telemetry'])
+        self.assertEqual([t.get_text() for t in figure.legends[0].texts], ['Main vehicle', 'Booster'])
         draw_paper_results(figure, [])
         self.assertEqual(len(figure.axes), 3)
         self.assertFalse(figure.legends)
+
+    def test_main_vehicle_only_omits_legend_even_with_multiple_burns_and_cases(self):
+        solution = self.solution()
+        for key in ('x4', 't4_vec', 'alt4_sol'):
+            del solution[key]
+        figure = Figure()
+        draw_paper_results(figure, [(solution, 'blue', 'Case 1'), (solution, 'red', 'Case 2')])
+        self.assertFalse(figure.legends)
+        self.assertTrue(all(axis.get_legend() is None for axis in figure.axes))
 
     def test_second_stage_coast_is_included(self):
         figure = Figure()

@@ -24,7 +24,9 @@ from DispersionFit import (DEFAULT_PARAMETERS, ERROR_SCALES, CHANNEL_UNITS, defa
                            validate_fit_parameter_bounds)
 from LaunchSites import LAUNCH_SITES, DEFAULT_LAUNCH_SITE, launch_site_inputs, parse_launch_site
 from GUIState import read_gui_state, write_gui_state
-from PayloadSensitivity import default_steps, sensitivity_request, validate_steps, draw_sensitivities
+from PayloadSensitivity import (default_steps, sensitivity_request, validate_steps, draw_sensitivities,
+                                parameter_values, validate_recoveries, LAUNCH_PARAMETERS, LAUNCH_UNITS)
+from SensitivityCSV import export_sensitivity_csv
 from VehicleDefinitions import (VEHICLE_PARAMETERS, BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name,
                                 read_vehicle_definition, write_vehicle_definition,
@@ -35,6 +37,7 @@ from Trajectory3D import draw_trajectory_3d, maneuver_summary_text
 from IntegratedResults import draw_integrated_results
 from PaperResults import draw_paper_results, paper_comparison_costs
 from BoosterResults import draw_booster_altitude_results
+from PlotLegends import set_vehicle_legend
 from TelemetryCSV import (load_telemetry_csv, overlay_telemetry, phase_group,
                           aerodynamic_loads, make_plot_axes, interpolate_speed_time,
                           numerical_acceleration, PRIMARY_GROUPS)
@@ -69,6 +72,7 @@ class ComparisonCase:
     fit_settings: dict = None
     sensitivity_report: dict = None
     sensitivity_settings: dict = None
+    sensitivity_recoveries: list = None
 
     @property
     def edited(self):
@@ -76,6 +80,8 @@ class ComparisonCase:
 
 
 def field_unit(name):
+    if name in LAUNCH_UNITS:
+        return LAUNCH_UNITS[name]
     if name in MULTIPLIERS:
         return "×"
     if name.endswith("Mass"):
@@ -415,12 +421,10 @@ def draw_phase(figure, phase, solution, target, *, color="tab:blue", case_label=
                 line(5, t, (s[f"{key}{number}_sol"] - 6378137.0) / 1000,
                      "Osculating orbit", "Altitude [km]", key.title(), linestyle=style)
         axes[4].axhline(np.rad2deg(target["i"]), color=color, linestyle=":", alpha=0.65)
-        axes[4].legend(fontsize=8)
         for key, style in (("apogee", ":"), ("perigee", "-.")):
             axes[5].axhline((target[key] - 6378137.0) / 1000, color=color,
                            linestyle=style, alpha=0.65)
         axes[5].set_yscale("symlog", linthresh=100)
-        axes[5].legend(fontsize=8)
     elif phase == "Booster":
         t, x = np.asarray(s["t4_vec"]).ravel(), np.asarray(s["x4"])
         line(0, x[:, 0] / 1000, x[:, 1] / 1000, "Return trajectory", "Local Z [km]", xlabel="Downrange [km]")
@@ -444,9 +448,8 @@ def draw_phase(figure, phase, solution, target, *, color="tab:blue", case_label=
         raise ValueError(f"Unknown phase: {phase}")
     for ax in axes:
         ax.tick_params(labelsize=8)
-        handles, labels = ax.get_legend_handles_labels()
-        unique = dict(zip(labels, handles))
-        ax.legend(unique.values(), unique.keys(), fontsize=7, loc="best")
+    for ax in figure.axes:
+        set_vehicle_legend(ax, {'Booster' if phase == 'Booster' else 'Main vehicle'})
 
 
 class OptimizationApp:
@@ -638,7 +641,10 @@ class OptimizationApp:
         self.sensitivity_button.pack(side='left')
         step_button = ttk.Button(sensitivity_header, text='Parameters / steps…', command=self.open_sensitivity_dialog)
         step_button.pack(side='left', padx=8)
-        self.controls.extend(((self.sensitivity_button, 'normal'), (step_button, 'normal')))
+        export_button = ttk.Button(sensitivity_header, text='Export results CSV…', command=self.export_sensitivity_results)
+        export_button.pack(side='left')
+        self.controls.extend(((self.sensitivity_button, 'normal'), (step_button, 'normal'),
+                              (export_button, 'normal')))
         self.sensitivity_summary = tk.StringVar(value='')
         ttk.Label(sensitivity_tab, textvariable=self.sensitivity_summary, wraplength=950,
                   justify='left').pack(fill='x', pady=6)
@@ -854,7 +860,8 @@ class OptimizationApp:
                           "computed_inputs": case.computed_inputs, "request": case.request,
                           "result": case.result, "run_dir": str(case.run_dir) if case.run_dir else None,
                           "state": state, "fit_report": case.fit_report, "fit_settings": case.fit_settings,
-                          "sensitivity_report": case.sensitivity_report, "sensitivity_settings": case.sensitivity_settings})
+                          "sensitivity_report": case.sensitivity_report, "sensitivity_settings": case.sensitivity_settings,
+                          "sensitivity_recoveries": case.sensitivity_recoveries})
         return {"cases": cases, "selected_case": self.selected_case,
                 "custom_vehicles": [value for value in self.vehicles.values() if isinstance(value, dict)],
                 "telemetry": {"path": str(self.telemetry.path.resolve()) if self.telemetry else None,
@@ -975,6 +982,7 @@ class OptimizationApp:
                 case.fit_settings = saved.get("fit_settings")
                 case.sensitivity_report = saved.get('sensitivity_report')
                 case.sensitivity_settings = saved.get('sensitivity_settings')
+                case.sensitivity_recoveries = saved.get('sensitivity_recoveries')
             # Populate the editor before selecting another case, preserving drafts.
             self.load_case_form(0)
             index = state.get("selected_case", 0)
@@ -1435,6 +1443,22 @@ class OptimizationApp:
             lines.append("Load/display telemetry and enable Display for cases to compare costs.")
         self.paper_cost_text.set('\n'.join(lines))
 
+    def export_sensitivity_results(self):
+        from tkinter import filedialog, messagebox
+        report = self.cases[self.selected_case].sensitivity_report
+        if not report:
+            messagebox.showinfo('No sensitivity results', 'Run a sensitivity analysis before exporting results.', parent=self.root)
+            return
+        filename = filedialog.asksaveasfilename(
+            parent=self.root, title='Export sensitivity results', defaultextension='.csv',
+            initialfile='payload_sensitivities.csv', filetypes=[('CSV files', '*.csv')])
+        if not filename:
+            return
+        try:
+            export_sensitivity_csv(filename, report)
+        except (OSError, ValueError, TypeError) as exc:
+            messagebox.showerror('Could not export sensitivity results', str(exc), parent=self.root)
+
     def export_paper_figure(self):
         from tkinter import filedialog, messagebox
         from matplotlib import rc_context
@@ -1486,7 +1510,7 @@ class OptimizationApp:
             self.progress.configure(mode="determinate", maximum=self.fit_options["max_evaluations"], value=0)
         elif running and self.job_kind == 'sensitivity':
             self.progress.stop()
-            self.progress.configure(mode='determinate', maximum=1 + 2 * len(self.sensitivity_steps), value=0)
+            self.progress.configure(mode='determinate', maximum=len(self.sensitivity_recoveries) * (1 + 2 * len(self.sensitivity_steps)), value=0)
         elif running:
             self.progress.configure(mode="indeterminate")
             self.progress.start(12)
@@ -1718,20 +1742,37 @@ class OptimizationApp:
         dialog.title(f'{case.name} · sensitivity parameters')
         dialog.transient(self.root)
         dialog.grab_set()
-        panel = ttk.Frame(dialog, padding=12)
-        panel.pack(fill='both', expand=True)
-        ttk.Label(panel, text='Change one parameter at a time around the current dispersion values.\n'
-                  'Defaults: ±1% of multipliers / physical masses, ±100 m altitude, ±0.001 stage fraction.\n'
+        dialog.geometry('850x760')
+        canvas = tk.Canvas(dialog, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(dialog, orient='vertical', command=canvas.yview)
+        scrollbar.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        panel = ttk.Frame(canvas, padding=12)
+        window = canvas.create_window((0, 0), window=panel, anchor='nw')
+        panel.bind('<Configure>', lambda event: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>', lambda event: canvas.itemconfigure(window, width=event.width))
+        ttk.Label(panel, text='Change one dispersion factor or physical launch limit at a time.\n'
+                  'Defaults: ±1% of multipliers / physical values, ±100 m altitude, ±0.001 stage fraction.\n'
                   'Stage partition also changes dry masses according to the existing vehicle model.').grid(
                       row=0, column=0, columnspan=4, sticky='w', pady=(0, 10))
+        recovery_panel = ttk.Frame(panel)
+        recovery_panel.grid(row=1, column=0, columnspan=4, sticky='w', pady=(0, 10))
+        ttk.Label(recovery_panel, text='Recovery strategies:').pack(side='left')
+        recovery_variables = {}
+        for strategy in ('EXP', 'ASDS', 'RTLS'):
+            variable = tk.BooleanVar(value=strategy in (case.sensitivity_recoveries or [request['recovery']]))
+            recovery_variables[strategy] = variable
+            ttk.Checkbutton(recovery_panel, text=strategy, variable=variable).pack(side='left', padx=8)
+        current_values = parameter_values(request)
         for col, title in enumerate(('Parameter', 'Current value', '± step', 'Units')):
-            ttk.Label(panel, text=title).grid(row=1, column=col, sticky='w', padx=5)
+            ttk.Label(panel, text=title).grid(row=2, column=col, sticky='w', padx=5)
         variables = {}
-        for row, (name, step) in enumerate(defaults.items(), start=2):
+        for row, (name, step) in enumerate(defaults.items(), start=3):
             selected = tk.BooleanVar(value=saved is None or name in saved)
             value = tk.StringVar(value=f'{(saved or {}).get(name, step):g}')
             ttk.Checkbutton(panel, text=name, variable=selected).grid(row=row, column=0, sticky='w', pady=3)
-            ttk.Label(panel, text=f"{request['dispersion'][name]:g}").grid(row=row, column=1, padx=8)
+            ttk.Label(panel, text=f"{current_values[name]:g}").grid(row=row, column=1, padx=8)
             ttk.Entry(panel, textvariable=value, width=14).grid(row=row, column=2, padx=8)
             ttk.Label(panel, text=field_unit(name)).grid(row=row, column=3, sticky='w')
             variables[name] = selected, value
@@ -1743,17 +1784,20 @@ class OptimizationApp:
 
         def apply():
             try:
-                case.sensitivity_settings = validate_steps(request, {name: value.get() for name, (selected, value)
-                                                                     in variables.items() if selected.get()})
+                steps = validate_steps(request, {name: value.get() for name, (selected, value)
+                                                 in variables.items() if selected.get()})
+                recoveries = validate_recoveries(request, [name for name, selected in recovery_variables.items() if selected.get()])
             except ValueError as exc:
                 messagebox.showerror('Invalid parameter steps', str(exc), parent=dialog)
                 return
+            case.sensitivity_settings = steps
+            case.sensitivity_recoveries = recoveries
             self.render_sensitivity_report()
             self.schedule_save()
             dialog.destroy()
 
         buttons = ttk.Frame(panel)
-        buttons.grid(row=len(defaults) + 2, column=0, columnspan=4, sticky='ew', pady=(12, 0))
+        buttons.grid(row=len(defaults) + 3, column=0, columnspan=4, sticky='ew', pady=(12, 0))
         ttk.Button(buttons, text='Reset steps', command=reset).pack(side='left')
         ttk.Button(buttons, text='Apply steps', command=apply).pack(side='right')
 
@@ -1762,8 +1806,9 @@ class OptimizationApp:
         report = report if report is not None else case.sensitivity_report
         self.sensitivity_table.delete(*self.sensitivity_table.get_children())
         if report is None:
-            count = len(case.sensitivity_settings) if case.sensitivity_settings else len(asdict(DispesrionFactorsType()))
+            count = len(case.sensitivity_settings) if case.sensitivity_settings else len(asdict(DispesrionFactorsType())) + len(LAUNCH_PARAMETERS)
             text = (f'{case.name}: choose vehicle, recovery, orbit and launch site in the right panel, then run. '
+                    f"Recovery strategies: {', '.join(case.sensitivity_recoveries) if case.sensitivity_recoveries else 'current selection'}. "
                     f'{count} parameters selected. Maximum payload is re-optimized at the baseline and at ±each step. '
                     'dP/dp is kg per parameter unit; chart compares the configured steps. '
                     'Very small steps can be dominated by solver noise; compare results at a second step size.')
@@ -1772,11 +1817,18 @@ class OptimizationApp:
             orbit, site = request['target_orbit'], request['launch_site']
             baseline = report.get('baseline') or {}
             payload = baseline.get('payload')
-            text = (f"{case.name} · {vehicle_name(request['configuration'])} · {request['recovery']} · "
+            strategies = report.get('recoveries', [request['recovery']])
+            if 'runs' in report:
+                baseline_text = '; '.join(f"{run['request']['recovery']}: " +
+                    (f"{run['baseline']['payload']:,.2f} kg" if (run.get('baseline') or {}).get('payload') is not None else 'failed')
+                    for run in report['runs']) or 'pending'
+            else:
+                baseline_text = f'{payload:,.2f} kg' if payload is not None else 'failed'
+            text = (f"{case.name} · {vehicle_name(request['configuration'])} · {', '.join(strategies)} · "
                     f"{(orbit['apogee'] - 6378137) / 1000:g} × {(orbit['perigee'] - 6378137) / 1000:g} km, "
                     f"{np.rad2deg(orbit['i']):g}° · {site['name']} "
                     f"({site['latitude']:g}°, {site['longitude']:g}°, {site['altitude']:g} m). "
-                    f"Baseline maximum payload: {f'{payload:,.2f} kg' if payload is not None else 'failed'}. "
+                    f"Baseline maximum payload: {baseline_text}. "
                     f"{report['termination']} · {report['evaluations']}/{report['total']} solves. "
                     'dP/dp: kg per parameter unit. ΔP: central estimate for +one step. '
                     'Chart ranking depends on step sizes; compare a second step size to check solver noise.')
@@ -1785,10 +1837,15 @@ class OptimizationApp:
                     text += ' Inputs changed; displayed results use the saved baseline.'
                 if case.sensitivity_settings is not None and case.sensitivity_settings != report['steps']:
                     text += ' Parameter steps changed; rerun to apply.'
+                if validate_recoveries(self.sensitivity_form_request(), case.sensitivity_recoveries) != strategies:
+                    text += ' Recovery strategies changed; rerun to apply.'
             except ValueError:
                 text += ' Current inputs are invalid; displayed results use the saved baseline.'
             if baseline.get('error'):
                 text += ' ' + baseline['error']
+            for run in report.get('runs', []):
+                if (run.get('baseline') or {}).get('error'):
+                    text += f" {run['request']['recovery']}: {run['baseline']['error']}"
 
             def number(value):
                 return '—' if value is None else f'{value:,.5g}'
@@ -1800,7 +1857,8 @@ class OptimizationApp:
                 values = [number(row.get(key)) for key in ('base', 'step', 'minus_payload', 'plus_payload',
                                                           'derivative', 'delta_payload', 'percent')]
                 values[1] += ' ' + field_unit(row['parameter']).replace('Δ ', '')
-                self.sensitivity_table.insert('', 'end', text=row['parameter'], values=(*values, status))
+                label = f"{row['recovery']} · {row['parameter']}" if 'recovery' in row else row['parameter']
+                self.sensitivity_table.insert('', 'end', text=label, values=(*values, status))
         self.sensitivity_summary.set(text)
         draw_sensitivities(self.sensitivity_figure, report)
         self.sensitivity_canvas.draw_idle()
@@ -1811,7 +1869,7 @@ class OptimizationApp:
             self.sensitivity_detail.set('Select a parameter row to see its units and solver status.')
             return
         row = self.sensitivity_table.item(selected[0])
-        unit = field_unit(row['text']).replace('Δ ', '')
+        unit = field_unit(row['text'].split(' · ', 1)[-1]).replace('Δ ', '')
         self.sensitivity_detail.set(f"{row['text']}: dP/dp in kg per {unit}. {row['values'][-1]}")
 
     def run_sensitivities(self):
@@ -1823,8 +1881,9 @@ class OptimizationApp:
             case = self.cases[self.selected_case]
             steps = validate_steps(request, case.sensitivity_settings if case.sensitivity_settings is not None
                                    else default_steps(request))
+            recoveries = validate_recoveries(request, case.sensitivity_recoveries)
             directory = self._new_job_directory(f'sensitivity_case{self.selected_case + 1}_')
-            (directory / 'sensitivity_inputs.json').write_text(json.dumps(dict(base_request=request, steps=steps), indent=2))
+            (directory / 'sensitivity_inputs.json').write_text(json.dumps(dict(base_request=request, steps=steps, recoveries=recoveries), indent=2))
             # Only use compatible successful computed cases as the baseline's initial guess.
             if case.result is not None and case.result.get('success') and case.request == request:
                 with (directory / 'initial_solution.pickle').open('wb') as stream:
@@ -1844,6 +1903,7 @@ class OptimizationApp:
             return
         self.run_dir = directory
         self.sensitivity_steps = steps
+        self.sensitivity_recoveries = recoveries
         self.sensitivity_progress_evaluations = -1
         self.job_kind = 'sensitivity'
         self.running_case = self.selected_case
@@ -1880,9 +1940,12 @@ class OptimizationApp:
             report = json.loads(path.read_text())
             if self.cancelled:
                 report['termination'] = 'Cancelled; partial results'
-                for row in report['rows']:
-                    if row['status'] == 'Running':
-                        row['status'] = 'Cancelled'
+                for partial in [report, *report.get('runs', [])]:
+                    if partial['termination'] == 'Running':
+                        partial['termination'] = 'Cancelled; partial results'
+                    for row in partial['rows']:
+                        if row['status'] == 'Running':
+                            row['status'] = 'Cancelled'
                 path.write_text(json.dumps(report, indent=2))
             case.sensitivity_report = report
             self.render_sensitivity_report()

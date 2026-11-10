@@ -480,7 +480,11 @@ class ResultRenderingTests(unittest.TestCase):
                 self.assertTrue(figure.axes[1].lines)
                 self.assertEqual(len(figure.axes[2].lines), len(figure.axes[1].lines))
                 self.assertEqual(len(figure.axes[0].lines), 4 if recovery == 'EXP' else 5)
-                self.assertEqual([text.get_text() for text in figure.legends[0].texts], ['Case 1'])
+                if recovery == 'EXP':
+                    self.assertFalse(figure.legends)
+                else:
+                    self.assertEqual([text.get_text() for text in figure.legends[0].texts],
+                                     ['Main vehicle', 'Booster'])
 
     def test_integrated_results_show_all_phases_with_return_dashed(self):
         from TelemetryFrames import eci_to_ecef_velocity
@@ -495,6 +499,12 @@ class ResultRenderingTests(unittest.TestCase):
                         self.assertEqual(line.get_linestyle(), '--' if 'Booster return' in line.get_label() else '-')
                         self.assertEqual(line.get_color(), 'blue')
                         self.assertEqual(len(line.get_xdata()), len(line.get_ydata()))
+                for axis in figure.axes[:4]:
+                    if recovery == 'EXP':
+                        self.assertIsNone(axis.get_legend())
+                    else:
+                        self.assertEqual([text.get_text() for text in axis.get_legend().texts],
+                                         ['Main vehicle', 'Booster'])
                 altitude = figure.axes[0].lines
                 self.assertEqual(sum('Booster return' in line.get_label() for line in altitude), recovery != 'EXP')
                 coast = next(line for line in altitude if line.get_label().endswith('Stage 2 coast'))
@@ -511,19 +521,20 @@ class ResultRenderingTests(unittest.TestCase):
                     self.assertTrue(np.any(throttle > 0.))
                     self.assertTrue(np.isnan(angle).any())
                     angle_lines = [line for line in figure.axes[4].lines if 'Booster return' in line.get_label()]
+                    landing_start = time[-(len(solution['landing_thrust_angle']) + 1)]
+                    landing_samples = (time >= landing_start) & (time < time[-1]) & (throttle > 0.)
+                    self.assertTrue(np.isfinite(angle[landing_samples]).all())
                     if recovery == 'RTLS':
                         self.assertTrue(np.isnan(angle[:2]).all())
                         self.assertTrue(np.isfinite(angle[2:4]).all())
-                        self.assertTrue(np.isnan(angle[4:]).all())
+                        self.assertTrue(np.isnan(angle[4:][time[4:] < landing_start]).all())
                         np.testing.assert_allclose(throttle[:2], 0.)
                         self.assertEqual(len(angle_lines), 1)
                         finite = np.isfinite(angle_lines[0].get_ydata())
-                        self.assertLessEqual(max(angle_lines[0].get_xdata()[finite]),
-                                             time[0] + float(solution['dt4_coast_after_sep'])
-                                             + float(solution['dt4_boostback']))
+                        self.assertGreaterEqual(max(angle_lines[0].get_xdata()[finite]), landing_start)
                     else:
-                        self.assertTrue(np.isnan(angle).all())
-                        self.assertEqual(angle_lines, [])
+                        self.assertTrue(np.isnan(angle[time < landing_start]).all())
+                        self.assertEqual(len(angle_lines), 1)
                 figure.axes[3].set_xlim(100., 150.)
                 for axis in figure.axes:
                     np.testing.assert_allclose(axis.get_xlim(), (100., 150.))

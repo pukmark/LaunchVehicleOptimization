@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
+from PlotLegends import set_vehicle_legend
+
 import numpy as np
 import pandas as pd
 
@@ -303,9 +305,7 @@ def overlay_telemetry(figure, phase, telemetry, primary_group, color, shift=0, w
         if standalone:
             ax.set(title=title, xlabel="Downrange [km]" if trajectory else "Time [s]", ylabel=ylabel)
             ax.grid(True, alpha=.25)
-        handles, labels = ax.get_legend_handles_labels()
-        unique = dict(zip(labels, handles))
-        ax.legend(unique.values(), unique.keys(), fontsize=7)
+        set_vehicle_legend(ax, {'Booster' if phase == 'Booster' else 'Main vehicle'})
         used.add(index)
     if standalone:
         for index, ax in enumerate(axes):

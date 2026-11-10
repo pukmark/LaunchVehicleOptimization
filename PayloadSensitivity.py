@@ -10,6 +10,51 @@ import numpy as np
 
 from DispersionFit import MULTIPLIERS, _validate_request, _solve_candidate, _atomic_json
 from LV_Type_scaled import DispesrionFactorsType, VLType
+from VehicleDefinitions import VEHICLE_PARAMETERS, validate_vehicle_definition, vehicle_name
+from SensitivityCSV import run_snapshot, warm_start_snapshot
+
+
+LAUNCH_PARAMETERS = ('FirstStage_MaxDynamicPressure', 'Booster_MaxDynamicPressure',
+                     'FirstStage_StageSeparationMaxDynamicPressure',
+                     'FairingSeparationAltitude', 'Payload_Max_acc')
+LAUNCH_UNITS = dict(zip(LAUNCH_PARAMETERS, ('Pa', 'Pa', 'Pa', 'm', 'm/s²')))
+
+
+def parameter_values(request):
+    model = VLType()
+    model.ApplyVehicleConfiguration(request['configuration'])
+    return dict(asdict(DispesrionFactorsType(**request['dispersion'])),
+                **{name: float(getattr(model, name)) for name in LAUNCH_PARAMETERS})
+
+
+def validate_recoveries(request, recoveries=None):
+    values = [request['recovery']] if recoveries is None else ([recoveries] if isinstance(recoveries, str) else list(recoveries))
+    if not values or any(value not in ('EXP', 'ASDS', 'RTLS') for value in values):
+        raise ValueError('Select at least one recovery strategy: EXP, ASDS, RTLS.')
+    return list(dict.fromkeys(values))
+
+
+def _parameter_request(request, steps):
+    """Copy nominal vehicle limits without baking or reapplying dispersion."""
+    request = deepcopy(request)
+    if any(name in LAUNCH_PARAMETERS for name in steps):
+        model = VLType()
+        model.ApplyVehicleConfiguration(request['configuration'])
+        request['configuration'] = validate_vehicle_definition(dict(
+            name=vehicle_name(request['configuration']),
+            parameters={name: float(getattr(model, name)) for name in VEHICLE_PARAMETERS}))
+    return request
+
+
+def _perturb(request, name, delta):
+    candidate = deepcopy(request)
+    if name in LAUNCH_PARAMETERS:
+        candidate['configuration']['parameters'][name] += delta
+        candidate['configuration'] = validate_vehicle_definition(candidate['configuration'])
+    else:
+        candidate['dispersion'][name] += delta
+    _validate_request(candidate)
+    return candidate
 
 
 def default_steps(request):
@@ -21,10 +66,13 @@ def default_steps(request):
               'SecondStage_EmptyMass': model.EmptySecondStageMass,
               'FirstStage_PropMass': model.FirstStagePropellentMass,
               'SecondStage_PropMass': model.SecondStagePropellentMass}
-    return {name: (.01 * request['dispersion'][name] if name in MULTIPLIERS else
+    steps = {name: (.01 * request['dispersion'][name] if name in MULTIPLIERS else
                    .01 * masses[name] if name in masses else
                    100. if name == 'LaunchAltDelta' else .001)
             for name in asdict(DispesrionFactorsType())}
+    steps.update({name: .01 * value if value > 0 else 100.
+                  for name, value in parameter_values(request).items() if name in LAUNCH_PARAMETERS})
+    return steps
 
 
 def sensitivity_request(request):
@@ -40,9 +88,11 @@ def validate_steps(request, steps):
     if not steps:
         raise ValueError('Select at least one parameter.')
     parsed = {}
+    values = parameter_values(request)
+    parameter_request = _parameter_request(request, steps)
     for name, value in steps.items():
-        if name not in request['dispersion']:
-            raise ValueError(f'Unknown dispersion parameter: {name}')
+        if name not in values:
+            raise ValueError(f'Unknown sensitivity parameter: {name}')
         try:
             step = float(value)
         except (TypeError, ValueError):
@@ -50,12 +100,10 @@ def validate_steps(request, steps):
         if not np.isfinite(step) or step <= 0:
             raise ValueError(f'{name}: step must be positive and finite.')
         for sign in (-1, 1):
-            candidate = deepcopy(request)
-            candidate['dispersion'][name] += sign * step
-            if candidate['dispersion'][name] == request['dispersion'][name]:
+            if values[name] + sign * step == values[name]:
                 raise ValueError(f'{name}: step is too small to change the parameter.')
             try:
-                _validate_request(candidate)
+                _perturb(parameter_request, name, sign * step)
             except ValueError as exc:
                 raise ValueError(f'{name}: invalid {"minus" if sign < 0 else "plus"} step: {exc}') from None
         parsed[name] = step
@@ -63,7 +111,7 @@ def validate_steps(request, steps):
 
 
 def compute_sensitivities(base_request, steps, *, solve=None, initial_solution=None,
-                          checkpoint=None, cancel_callback=None):
+                          checkpoint=None, cancel_callback=None, recoveries=None):
     """Hold all other settings fixed and estimate d(max payload)/d(parameter).
 
     Failed optimizations never contribute to a derivative. Each perturbed solve
@@ -71,6 +119,14 @@ def compute_sensitivities(base_request, steps, *, solve=None, initial_solution=N
     """
     request = sensitivity_request(base_request)
     steps = validate_steps(request, steps)
+    strategies = validate_recoveries(request, recoveries)
+    if len(strategies) > 1:
+        return _compute_recoveries(request, steps, strategies, solve=solve,
+                                   initial_solution=initial_solution, checkpoint=checkpoint,
+                                   cancel_callback=cancel_callback)
+    request['recovery'] = strategies[0]
+    solver_request = _parameter_request(request, steps)
+    custom_solver = solve is not None
     solve = solve or _solve_candidate
     report = dict(request=request, steps=steps, baseline=None, rows=[],
                   evaluations=0, total=1 + 2 * len(steps), termination='Running')
@@ -100,8 +156,17 @@ def compute_sensitivities(base_request, steps, *, solve=None, initial_solution=N
         report['termination'] = 'Cancelled'
         publish()
         return report
-    baseline, payload, error = evaluate(request, initial_solution)
+    guess = initial_solution if request['recovery'] == base_request['recovery'] else None
+    if (guess is not None and isinstance(solver_request['configuration'], dict)
+            and guess.get('configuration', request['configuration']) == request['configuration']):
+        guess = deepcopy(guess)
+        guess['configuration'] = deepcopy(solver_request['configuration'])
+    report['reproducibility'] = run_snapshot(solver_request, guess, custom_solver=custom_solver)
+    report['solver_request'] = deepcopy(solver_request)
+    baseline, payload, error = evaluate(solver_request, guess)
     report['baseline'] = dict(payload=payload, error=error)
+    if baseline is not None:
+        report['reproducibility']['baseline_solution'] = warm_start_snapshot(baseline)
     if error:
         report['termination'] = 'Baseline failed; no sensitivities computed'
         publish()
@@ -110,15 +175,14 @@ def compute_sensitivities(base_request, steps, *, solve=None, initial_solution=N
     for name, step in steps.items():
         if stopped():
             break
-        row = dict(parameter=name, base=request['dispersion'][name], step=step,
+        row = dict(parameter=name, base=parameter_values(request)[name], step=step,
                    minus_payload=None, plus_payload=None, derivative=None,
                    delta_payload=None, percent=None, status='Running', errors={})
         report['rows'].append(row)
         for side, sign in (('minus', -1), ('plus', 1)):
             if stopped():
                 break
-            candidate = deepcopy(request)
-            candidate['dispersion'][name] += sign * step
+            candidate = _perturb(solver_request, name, sign * step)
             _, mass, error = evaluate(candidate, baseline)
             row[side + '_payload'] = mass
             if error:
@@ -144,6 +208,36 @@ def compute_sensitivities(base_request, steps, *, solve=None, initial_solution=N
     return report
 
 
+def _compute_recoveries(request, steps, strategies, **options):
+    checkpoint = options.pop('checkpoint')
+    cancel = options.get('cancel_callback')
+    initial = options.pop('initial_solution')
+    report = dict(request=request, steps=steps, recoveries=strategies, runs=[], rows=[],
+                  baseline=None, evaluations=0, total=len(strategies) * (1 + 2 * len(steps)),
+                  termination='Running')
+    for strategy in strategies:
+        if cancel and cancel():
+            break
+        completed = list(report['runs'])
+
+        def publish(current):
+            report['runs'] = completed + [current]
+            report['rows'] = [dict(row, recovery=run['request']['recovery'])
+                              for run in report['runs'] for row in run['rows']]
+            report['evaluations'] = sum(run['evaluations'] for run in report['runs'])
+            if checkpoint:
+                checkpoint(deepcopy(report))
+
+        compute_sensitivities(request, steps, recoveries=[strategy], checkpoint=publish,
+                              initial_solution=initial if strategy == request['recovery'] else None, **options)
+    report['termination'] = ('Cancelled; partial results' if cancel and cancel() else
+                             'Complete with failed strategies or parameters'
+                             if any(run['termination'] != 'Complete' for run in report['runs']) else 'Complete')
+    if checkpoint:
+        checkpoint(deepcopy(report))
+    return report
+
+
 def draw_sensitivities(figure, report):
     figure.clear()
     rows = [row for row in (report or {}).get('rows', []) if row.get('delta_payload') is not None]
@@ -153,7 +247,7 @@ def draw_sensitivities(figure, report):
     rows.sort(key=lambda row: abs(row['delta_payload']))
     axis = figure.add_subplot(111)
     values = [row['delta_payload'] for row in rows]
-    axis.barh([row['parameter'] for row in rows], values,
+    axis.barh([f"{row['parameter']} · {row['recovery']}" if 'recovery' in row else row['parameter'] for row in rows], values,
               color=['#009E73' if value >= 0 else '#D55E00' for value in values])
     axis.axvline(0, color='#777777', linewidth=.8)
     axis.set_xlabel('Estimated maximum-payload change for +one configured step [kg]')

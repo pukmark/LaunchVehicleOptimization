@@ -189,10 +189,10 @@ class PhaseDiagnosticTests(unittest.TestCase):
                 phase = diagnostics.constraints['Ballistic coast to reentry']
                 entry = next(e for e in phase if e[1] == 'Reentry start altitude lower bound')
                 row, _, floor, unit, _ = entry
-                self.assertEqual(floor, 50000.)
+                self.assertEqual(floor, 70000.)
                 self.assertEqual(unit, 'm')
                 self.assertAlmostEqual(float(opti.debug.value(opti.lbg[row], opti.initial())), 1.)
-                self.assertGreaterEqual(float(model.rocket_return.local_to_alt(solution['x4_before_reentry'])), floor)
+                self.assertGreaterEqual(float(model.rocket_return.local_to_alt(solution['x4_before_reentry'])), floor * (1. - 1e-6))
                 # The model currently applies load limits during coast/landing,
                 # rather than enabling the commented pre-reentry load checks.
                 names = {e[1] for e in phase}

@@ -1,6 +1,6 @@
 """Publication figures comparing displayed trajectories with flight telemetry."""
 import numpy as np
-from matplotlib.lines import Line2D
+from PlotLegends import set_vehicle_legend
 
 from IntegratedResults import integrated_telemetry_curves, second_stage_coast
 from TelemetryFrames import eci_to_ecef_velocity
@@ -51,20 +51,20 @@ def draw_paper_results(figure, cases, *, telemetry=None, primary_group='Phase co
     axes.append(figure.add_subplot(grid[3, 0], sharex=axes[0]))
     curves = list(integrated_telemetry_curves(
         telemetry, primary_group, [s for s, _, _ in cases], telemetry_shift)) if telemetry is not None else []
-    used_cases = []
+    legend_phases = set()
     for solution, color, label in cases:
         histories = paper_histories(solution)
-        for _, time, altitude, speed in histories:
+        for phase, time, altitude, speed in histories:
+            legend_phases.add('Booster' if phase == 2 else 'Main vehicle')
             acceleration = numerical_acceleration(time, speed)
             for axis, values in zip(axes, (altitude, speed, acceleration)):
-                axis.plot(time, values, color=color, linewidth=1.3)
-        if histories:
-            used_cases.append((color, label))
+                axis.plot(time, values, color=color, linewidth=1.3, linestyle='--' if phase == 2 else '-')
 
     has_telemetry = False
     for index, time, values, label, _ in curves:
         if index > 1:
             continue
+        legend_phases.add('Booster' if 'Booster return' in label else 'Main vehicle')
         axes[index].plot(time, values, color=telemetry_color, linestyle='none',
                               marker='.', markersize=2.5, alpha=.8, zorder=3)
         if index == 1:
@@ -84,13 +84,7 @@ def draw_paper_results(figure, cases, *, telemetry=None, primary_group='Phase co
         if not axis.lines:
             axis.text(.5, .5, 'No data', transform=axis.transAxes,
                       ha='center', va='center', fontsize=9, color='.5')
-    handles = [Line2D([], [], color=color, linewidth=1.3, label=label) for color, label in used_cases]
-    if has_telemetry:
-        handles.append(Line2D([], [], color=telemetry_color, linestyle='none', marker='.',
-                              markersize=4, label='Telemetry'))
-    if handles:
-        figure.legend(handles=handles, loc='upper center', ncol=min(4, len(handles)),
-                      frameon=False, fontsize=9)
+    set_vehicle_legend(figure, legend_phases, loc='upper center', ncol=2, frameon=False, fontsize=9)
     return has_telemetry
 
 

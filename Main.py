@@ -250,7 +250,7 @@ color_vec = ['r','b','g','k','y','c','m']
 def _sweep_cache_path(directory, model, configuration, recovery, target, dispersion, payload):
     """Bind cached trajectories to the exact model, scenario, and solver source."""
     source = hashlib.sha256()
-    for name in ('LV_Optimization_Type.py', 'LV_Type_scaled.py', 'Atmosphere_Type.py', 'LaunchSites.py'):
+    for name in ('LV_Optimization_Type.py', 'LV_Type_scaled.py', 'FinalManeuver.py', 'Atmosphere_Type.py', 'LaunchSites.py'):
         source.update(Path(__file__).with_name(name).read_bytes())
     fingerprint = dict(configuration=configuration, recovery=recovery, target=target,
                        dispersion=vars(dispersion), payload=float(payload), source=source.hexdigest(),
@@ -538,8 +538,12 @@ def run_dispersion_case(i):
 
                 r_parking = np.linalg.norm(x_parking[:,0:3], axis=1)
                 i_apogee = np.argmax(r_parking)
-                x_final = x_parking[i_apogee,:].reshape(1,-1)
-                x_final[-1,3:6] = Solution['v3_desired'] * x_final[-1,3:6] / np.linalg.norm(x_final[-1,3:6])
+                if 'final_burn_velocity_after' in Solution:
+                    x_final = np.r_[Solution['final_burn_position'], Solution['final_burn_velocity_after'],
+                                    Solution['x3'][6, -1] - Solution['propellant_mass_for_final_dv']].reshape(1, -1)
+                else:
+                    x_final = x_parking[i_apogee,:].reshape(1,-1).copy()
+                    x_final[-1,3:6] = Solution['v3_desired'] * x_final[-1,3:6] / np.linalg.norm(x_final[-1,3:6])
 
                 Parking_apogee = np.linalg.norm(x_parking[np.argmax(r_parking),0:3])
                 Parking_perigee = np.linalg.norm(x_parking[np.argmin(r_parking),0:3])

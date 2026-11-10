@@ -101,6 +101,8 @@ python OptimizationGUI.py
    using `SecondStage_CoastTimeAfterSep`. Throttle is zero during this coast,
    and boostback angle curves begin at ignition. Rerun older cases to regenerate
    their histories with the added phase.
+   Legends contain only **Main vehicle** (phases 1–3) and **Booster**, and are
+   omitted when only one group is plotted.
    Ascent uses solid lines and booster return uses dashed lines. Select another
    case to compare a different vehicle, orbit, or recovery strategy.
    Loaded telemetry overlays any available altitude, speed, mass, throttle, and
@@ -289,3 +291,30 @@ payload estimates. Successful starts are cached in `Results/initial_guesses/` fo
 repeat runs; changes to the model, scenario, dispersion, or solver source invalidate
 the corresponding cache. Failed sweep points retain the preceding successful
 trajectory for subsequent points. Set `InitialGuessCache = None` to disable caching.
+
+Compare the three assessment missions with:
+
+```bash
+.venv/bin/python CompareMultipleTelemetry.py
+```
+
+This loads the local SXM-11, CSG-3, and MRV–MEP CSVs, optimizes each using
+Falcon 9 True, and saves `CompareMultipleTelemetry.png`: ECEF speed above
+altitude, with one column per mission. Use `--no-show` for batch runs and
+`--output path.png` to choose the figure destination. Blue curves are simulation;
+orange points are telemetry. No per-mission result directories are created.
+
+SXM-11 and CSG-3 use the supplied fixed payloads (6,950 and 2,205 kg).
+MRV–MEP defaults to an explicitly labelled optimized payload estimate; specify
+`--mrv-payload MASS_KG` when a fixed combined payload is available. Coordinates
+use existing regional launch-site presets. Mission times are preserved; optional
+`--time-shifts SXM11 CSG3 MRV` adds explicit offsets to telemetry timestamps.
+CSG-3 uses direct-injection terminal constraints for its single upper-stage burn
+(`Target_Orbit['direct_injection'] = True`). GTO missions retain the existing
+parking-orbit and later-burn propellant-reserve model: later coast/restart is not
+propagated in these curves. Defaults elsewhere retain the parking-orbit model.
+If a mission fails to converge, its panels show telemetry only with a failure
+annotation; the script reports the solver status and exits with a nonzero code.
+The iteration and per-attempt IPOPT CPU limits are configurable with `--max-iter`
+and `--max-cpu-time`. The initial validation converged for SXM-11 and MRV–MEP;
+CSG-3 direct injection reached the iteration limit with the current model.

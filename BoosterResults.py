@@ -2,6 +2,7 @@
 import numpy as np
 
 from LV_Type_scaled import VLType
+from PlotLegends import set_vehicle_legend
 from TelemetryCSV import aerodynamic_loads, numerical_acceleration
 
 
@@ -108,9 +109,8 @@ def draw_booster_altitude_results(figure, cases, *, telemetry=None, primary_grou
         axis.set(title=title, xlabel=xlabel, ylabel='Altitude [km]')
         axis.grid(True, alpha=.25)
         axis.tick_params(labelsize=8)
-        if axis.lines:
-            axis.legend(fontsize=7, loc='best')
-        else:
+        set_vehicle_legend(axis, {'Booster'})
+        if not axis.lines:
             axis.text(.5, .5, 'No matching data', transform=axis.transAxes, ha='center', color='#666666')
     figure.suptitle('Booster descent from ballistic apogee versus altitude', fontsize=12)
     return overlaid

@@ -3,6 +3,7 @@ import numpy as np
 
 from LV_Type_scaled import DispesrionFactorsType, LaunchVehicle_ECI, VLType
 from TelemetryFrames import eci_to_ecef_velocity
+from PlotLegends import set_vehicle_legend
 
 
 def vector_angle(velocity, thrust):
@@ -71,7 +72,14 @@ def return_controls(solution, model):
     landing_time = start + np.arange(len(landing) + 1) * float(solution['dt4_landing'])
     times.extend(landing_time)
     throttles.extend(np.r_[landing, 0.])
-    angles.extend(np.full(len(landing_time), np.nan))
+    if 'landing_thrust_angle' in solution:
+        states = np.asarray(solution['x4_landing'])
+        angle = np.asarray(solution['landing_thrust_angle']).ravel()
+        radial_angle = np.arctan2(states[0, :-1], model.R0 + states[1, :-1])
+        thrust_direction = np.array([np.sin(radial_angle + angle), np.cos(radial_angle + angle)])
+        angles.extend(np.r_[vector_angle(states[2:4, :-1], thrust_direction), np.nan])
+    else:
+        angles.extend(np.full(len(landing_time), np.nan))
     return np.asarray(times), np.asarray(throttles), np.asarray(angles)
 
 
@@ -139,12 +147,15 @@ def draw_integrated_results(figure, cases, *, telemetry=None, primary_group='Pha
              figure.add_subplot(grid[1, :3], sharex=axes[0]),
              figure.add_subplot(grid[1, 3:], sharex=axes[0])]
 
+    legend_phases = [set() for _ in axes]
     for s, color, label in cases:
         model = VLType()
         model.ApplyVehicleConfiguration(s.get('configuration', 1))
         model.ApplyScenarioDispersionToLV(DispesrionFactorsType(**s.get('dispersion', {})))
 
         def line(index, time, values, phase, style='-', control=False):
+            if np.isfinite(values).any():
+                legend_phases[index].add('Booster' if phase.startswith('Booster') else 'Main vehicle')
             axes[index].plot(np.asarray(time).ravel(), np.asarray(values).ravel(),
                              color=color, linestyle=style, linewidth=1.6,
                              label=f'{label} · {phase}', drawstyle='steps-post' if control else 'default')
@@ -183,9 +194,10 @@ def draw_integrated_results(figure, cases, *, telemetry=None, primary_group='Pha
             time, throttle, angle = return_controls(s, model)
             line(3, time, throttle * 100., 'Booster return', '--', control=True)
             if np.isfinite(angle).any():
-                line(4, time, angle, 'Booster return · boostback', '--', control=True)
+                line(4, time, angle, 'Booster return · thrust direction', '--', control=True)
 
     for index, time, values, label, style in curves:
+        legend_phases[index].add('Booster' if 'Booster return' in label else 'Main vehicle')
         axes[index].plot(time, values, color=telemetry_color, linestyle=style,
                          marker='.', markersize=3, linewidth=1.2, label=label)
 
@@ -195,9 +207,7 @@ def draw_integrated_results(figure, cases, *, telemetry=None, primary_group='Pha
         axis.set(title=title, xlabel='Time since launch [s]', ylabel=unit)
         axis.grid(True, alpha=.25)
         axis.tick_params(labelsize=8)
-        handles, labels = axis.get_legend_handles_labels()
-        unique = dict(zip(labels, handles))
-        axis.legend(unique.values(), unique.keys(), fontsize=7, loc='best')
+        set_vehicle_legend(axis, legend_phases[axes.index(axis)], fontsize=7, loc='best')
     figure.suptitle('Integrated flight results', fontsize=12)
     figure.supxlabel('S2/boostback angle: thrust vs. air-relative velocity; booster angle shown only during boostback. '
                      'Throttle uses each phase’s reference thrust.', fontsize=8)

@@ -45,6 +45,20 @@ def solution_orbits(solution, target, mu=VLType.mu):
     """
     state = np.asarray(solution['x3'], dtype=float)[:, -1]
     parking = orbit_curve(state[:3], state[3:6], mu)
+    if all(key in solution for key in ('final_burn_position', 'final_burn_velocity_before', 'final_burn_velocity_after')):
+        position = np.asarray(solution['final_burn_position'], dtype=float).reshape(3)
+        before = np.asarray(solution['final_burn_velocity_before'], dtype=float).reshape(3)
+        after = np.asarray(solution['final_burn_velocity_after'], dtype=float).reshape(3)
+        final = orbit_curve(position, after, mu)
+        inclination_change = float(np.arccos(np.clip(final['normal'][2], -1., 1.))
+                                   - np.arccos(np.clip(parking['normal'][2], -1., 1.)))
+        final.update(burn_position=position, velocity_before=before, velocity_after=after,
+                     delta_v=float(np.linalg.norm(after - before)),
+                     inclination_change=0. if abs(inclination_change) < 1e-10 else inclination_change,
+                     plane_change=float(np.arctan2(np.linalg.norm(np.cross(parking['normal'], final['normal'])),
+                                                   np.dot(parking['normal'], final['normal']))),
+                     burn_location='parking apogee')
+        return parking, final
     position = parking['apogee_position'].copy()
     inclination = np.arccos(np.clip(parking['normal'][2], -1, 1))
     target_inclination = float(target.get('i', inclination))
@@ -263,9 +277,7 @@ def draw_trajectory_3d(figure, cases):
     axis.tick_params(labelsize=8)
     for projection in projections:
         projection.set(xlim=(-limit, limit), ylim=(-limit, limit))
-    if cases:
-        axis.legend(fontsize=6.5, loc='upper left', ncol=2)
-    else:
+    if not cases:
         figure.text(.35, .5, 'Run a case and enable Display to see its 3D trajectory.',
                     ha='center', va='center', color='#666666')
     if notes:

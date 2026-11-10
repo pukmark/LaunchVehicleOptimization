@@ -340,11 +340,12 @@ class Trajectory3DTests(unittest.TestCase):
         app.telemetry_shift = 0.
         app.telemetry_info = Mock()
         app.notebook = Mock()
-        app.tabs = {'Booster': Mock(), 'First stage': Mock()}
+        app.tabs = {'Booster': Mock(), 'Booster 2': Mock(), 'First stage': Mock()}
         app.figures = {'3D trajectory': Figure(figsize=(12, 8))}
         app.canvases = {'3D trajectory': Mock()}
         app.summary = Mock()
         app.update_case_labels = Mock()
+        app.render_sensitivity_report = Mock()
         app.schedule_save = Mock()
         with patch('OptimizationGUI.overlay_telemetry') as overlay, \
              patch('OptimizationGUI.remaining_propellant_text', return_value='—'):

@@ -9,10 +9,12 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-from LV_Type_scaled import DispesrionFactorsType
+from LV_Type_scaled import DispesrionFactorsType, VLType
 from OptimizationGUI import ComparisonCase, OptimizationApp, nominal_request
-from PayloadSensitivity import compute_sensitivities, default_steps, draw_sensitivities, validate_steps, worker
+from PayloadSensitivity import (compute_sensitivities, default_steps, draw_sensitivities,
+                                validate_steps, worker, LAUNCH_PARAMETERS, parameter_values)
 
 
 class PayloadSensitivityTests(unittest.TestCase):
@@ -56,12 +58,138 @@ class PayloadSensitivityTests(unittest.TestCase):
     def test_defaults_use_physical_masses_instead_of_zero_dispersion_values(self):
         request = self.request()
         steps = default_steps(request)
-        self.assertEqual(set(steps), set(asdict(DispesrionFactorsType())))
+        self.assertEqual(set(steps), set(asdict(DispesrionFactorsType())) | set(LAUNCH_PARAMETERS))
         self.assertAlmostEqual(steps['SecondStage_EmptyMass'], 40)
         self.assertAlmostEqual(steps['FirstStage_PropMass'], 3957)
         self.assertEqual(steps['LaunchAltDelta'], 100)
         self.assertEqual(steps['StagePartitionDelta'], .001)
         self.assertEqual(validate_steps(request, steps), steps)
+        for name in LAUNCH_PARAMETERS:
+            self.assertAlmostEqual(steps[name], .01 * parameter_values(request)[name])
+
+    def test_physical_limits_hold_other_vehicle_parameters_and_dispersion_fixed(self):
+        request = self.request()
+        request['configuration'] = 5
+        request['dispersion']['FirstStageThrust'] = .93
+        request['dispersion']['FirstStage_EmptyMass'] = 100.
+        original = deepcopy(request)
+        coefficients = dict(zip(LAUNCH_PARAMETERS, (2., 3., -4., 5., -6.)))
+        steps = {name: default_steps(request)[name] for name in LAUNCH_PARAMETERS}
+        calls = []
+
+        def solve(candidate, init_guess=None):
+            calls.append(deepcopy(candidate))
+            model = VLType()
+            model.ApplyVehicleConfiguration(candidate['configuration'])
+            model.ApplyScenarioDispersionToLV(DispesrionFactorsType(**candidate['dispersion']))
+            return dict(success=True, payload_mass=1e6 + sum(
+                coefficients[name] * getattr(model, name) for name in LAUNCH_PARAMETERS),
+                configuration=candidate['configuration'])
+
+        report = compute_sensitivities(request, steps, solve=solve)
+        self.assertEqual(request, original)
+        self.assertEqual(report['evaluations'], 11)
+        baseline_parameters = calls[0]['configuration']['parameters']
+        for row in report['rows']:
+            self.assertAlmostEqual(row['derivative'], coefficients[row['parameter']], places=7)
+        for candidate in calls:
+            self.assertEqual(candidate['dispersion'], request['dispersion'])
+            changed = [name for name, value in candidate['configuration']['parameters'].items()
+                       if value != baseline_parameters[name]]
+            self.assertLessEqual(len(changed), 1)
+            self.assertTrue(set(changed) <= set(LAUNCH_PARAMETERS))
+        nominal = VLType()
+        nominal.ApplyVehicleConfiguration(request['configuration'])
+        self.assertAlmostEqual(baseline_parameters['FirstStage_SL_Thrust'], nominal.FirstStage_SL_Thrust)
+
+    def test_invalid_launch_limit_steps_rejected_before_solving(self):
+        request = self.request()
+        for name in LAUNCH_PARAMETERS:
+            solve = Mock()
+            with self.subTest(parameter=name), self.assertRaises(ValueError):
+                compute_sensitivities(request, {name: 2 * parameter_values(request)[name]}, solve=solve)
+            solve.assert_not_called()
+
+    def test_multiple_recoveries_have_independent_baselines_guesses_and_derivatives(self):
+        request = self.request()
+        calls, checkpoints = [], []
+        coefficients = dict(EXP=100., ASDS=200., RTLS=300.)
+
+        def solve(candidate, init_guess=None):
+            calls.append((candidate['recovery'], deepcopy(init_guess)))
+            strategy = candidate['recovery']
+            if init_guess is not None and init_guess.get('tag') != 'initial':
+                self.assertEqual(init_guess['strategy'], strategy)
+            return dict(success=True, payload_mass=10000 + coefficients[strategy] * candidate['dispersion']['FirstStageIsp'],
+                        strategy=strategy)
+
+        report = compute_sensitivities(request, {'FirstStageIsp': .01}, solve=solve,
+                                       recoveries=['EXP', 'ASDS', 'RTLS'],
+                                       initial_solution={'tag': 'initial'}, checkpoint=checkpoints.append)
+        self.assertEqual(report['evaluations'], 9)
+        self.assertEqual(report['total'], 9)
+        self.assertEqual(report['termination'], 'Complete')
+        self.assertEqual(len(report['runs']), 3)
+        self.assertEqual([row['recovery'] for row in report['rows']], ['EXP', 'ASDS', 'RTLS'])
+        for row in report['rows']:
+            self.assertAlmostEqual(row['derivative'], coefficients[row['recovery']])
+        for strategy, guess in calls[::3]:
+            self.assertEqual(guess, {'tag': 'initial'} if strategy == request['recovery'] else None)
+        self.assertEqual([r['evaluations'] for r in checkpoints], sorted(r['evaluations'] for r in checkpoints))
+        json.dumps(report, allow_nan=False)
+        figure = Figure()
+        draw_sensitivities(figure, report)
+        FigureCanvasAgg(figure).draw()
+        self.assertEqual(len(figure.axes[0].patches), 3)
+        self.assertTrue(all(any(strategy in label.get_text() for label in figure.axes[0].get_yticklabels())
+                            for strategy in coefficients))
+
+        app = OptimizationApp.__new__(OptimizationApp)
+        app.selected_case = 0
+        app.cases = [ComparisonCase('Case 1', 'blue', sensitivity_report=report,
+                                    sensitivity_recoveries=['EXP', 'ASDS', 'RTLS'])]
+        app.sensitivity_table = Mock(get_children=Mock(return_value=()))
+        app.sensitivity_summary, app.sensitivity_canvas = Mock(), Mock()
+        app.sensitivity_figure = Figure()
+        app.sensitivity_form_request = Mock(return_value=request)
+        app.render_sensitivity_report()
+        self.assertEqual(len(app.sensitivity_table.insert.call_args_list), 3)
+        self.assertEqual(app.sensitivity_table.insert.call_args_list[1].kwargs['text'], 'ASDS · FirstStageIsp')
+        self.assertIn('ASDS: 10,200.00 kg', app.sensitivity_summary.set.call_args.args[0])
+
+    def test_invalid_recovery_selections_rejected_before_solving(self):
+        for strategies in ([], ['unknown'], ['ASDS', 'invalid']):
+            solve = Mock()
+            with self.subTest(strategies=strategies), self.assertRaises(ValueError):
+                compute_sensitivities(self.request(), {'FirstStageIsp': .01},
+                                      recoveries=strategies, solve=solve)
+            solve.assert_not_called()
+
+    def test_failed_recovery_baseline_does_not_stop_next_strategy(self):
+        def solve(candidate, init_guess=None):
+            return dict(success=candidate['recovery'] != 'ASDS', payload_mass=10000., return_status='infeasible')
+
+        report = compute_sensitivities(self.request(), {'FirstStageIsp': .01}, solve=solve,
+                                       recoveries=['ASDS', 'RTLS'])
+        self.assertEqual(report['evaluations'], 4)
+        self.assertEqual(len(report['rows']), 1)
+        self.assertEqual(report['rows'][0]['recovery'], 'RTLS')
+        self.assertIn('failed', report['termination'])
+
+    def test_cancellation_stops_recovery_loop_and_keeps_partial_results(self):
+        cancelled = False
+
+        def checkpoint(report):
+            nonlocal cancelled
+            cancelled = report['evaluations'] >= 3
+
+        solve = Mock(return_value=dict(success=True, payload_mass=10000.))
+        report = compute_sensitivities(self.request(), {'FirstStageIsp': .01}, solve=solve,
+                                       recoveries=['ASDS', 'RTLS'], checkpoint=checkpoint,
+                                       cancel_callback=lambda: cancelled)
+        self.assertEqual(solve.call_count, 3)
+        self.assertEqual(len(report['runs']), 1)
+        self.assertIn('Cancelled', report['termination'])
 
     def test_invalid_steps_rejected_before_solving(self):
         for steps in ({}, {'unknown': 1}, {'SecondStageIsp': 0}, {'SecondStageIsp': np.nan},
@@ -130,6 +258,7 @@ class PayloadSensitivityTests(unittest.TestCase):
         app.selected_case = 0
         app.cases = [ComparisonCase('Case 1', 'blue', result={'payload_mass': 9000})]
         app.cases[0].sensitivity_settings = {'SecondStageIsp': .01}
+        app.cases[0].sensitivity_recoveries = ['ASDS', 'RTLS']
         app.sensitivity_form_request = Mock(return_value=self.request())
         app.capture_inputs = Mock(return_value={'test': 'draft'})
         app.log, app.notebook, app.root = Mock(), Mock(), Mock()
@@ -141,6 +270,7 @@ class PayloadSensitivityTests(unittest.TestCase):
                 app.run_sensitivities()
             submitted = json.loads((app.run_dir / 'sensitivity_inputs.json').read_text())
             self.assertEqual(submitted['base_request']['payload_mass_predefined'], -1)
+            self.assertEqual(submitted['recoveries'], ['ASDS', 'RTLS'])
             self.assertEqual(submitted['base_request']['target_orbit'], self.request()['target_orbit'])
             self.assertEqual(app.cases[0].result, {'payload_mass': 9000})
             self.assertEqual(app.job_kind, 'sensitivity')

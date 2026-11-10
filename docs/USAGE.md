@@ -19,14 +19,30 @@ The **Sensitivity** tab has a dedicated **Run payload sensitivities** button.
 Choose the vehicle, recovery strategy, target orbit, launch site, and baseline
 dispersion in the right panel. The sweep always maximizes payload, independently
 of the fixed-payload entry, and holds the other settings fixed while changing
-one parameter at a time. All 13 dispersion fields are selected by default;
+one parameter at a time. Dispersion fields and five physical launch limits are selected by default;
 **Parameters / steps…** lets you select a subset and edit the positive step sizes.
 Default steps are 1% of current multipliers or physical stage masses, 100 m for
 launch altitude, and 0.001 for stage partition. Mass steps remain meaningful
 when the baseline dispersion offsets are zero. Stage partition retains the
 model's coupled dry-mass/propellant changes.
 
-The sweep re-solves the baseline and both ±step cases (27 solves for all fields),
+The additional limits are `FirstStage_MaxDynamicPressure` (ascent),
+`Booster_MaxDynamicPressure` (recovery),
+`FirstStage_StageSeparationMaxDynamicPressure`, `FairingSeparationAltitude`, and
+`Payload_Max_acc`. Their default steps are 1% of the selected vehicle's values.
+Pressure values and steps use Pa, fairing altitude uses m, and acceleration uses
+m/s². These changes leave the other vehicle parameters and dispersion factors
+fixed. Recovery pressure has no effect on expendable trajectories.
+
+In **Parameters / steps…**, select one or more **Recovery strategies** (EXP,
+ASDS, RTLS). The program loops over the selected strategies, optimizing a fresh
+baseline for each. Each table row and chart bar identifies its strategy; the
+summary shows their separate baseline payloads. Strategy selections are saved
+with the case. A failed strategy does not prevent the remaining strategies
+from running, and cancellation preserves completed results.
+
+The sweep re-solves the baseline and both ±step cases (`1 + 2 × parameters`
+solves per selected recovery strategy),
 using the optimized baseline as each perturbed trajectory's initial guess.
 The table shows both maximum payloads, the central derivative
 `dP/dp = (P+ - P-) / (2 step)` in kg per parameter unit, and estimated payload
@@ -37,7 +53,30 @@ Failed solves show their status and contribute no derivative. The GUI stays
 responsive, displays progress, and supports **Cancel** with partial results.
 Each case retains its own sensitivity settings and report in saved GUI states;
 editing its inputs marks the displayed report as using its saved baseline.
-Reports and solver logs are saved under `Results/gui/sensitivity_caseN_*`.
+Reports persist in GUI state; worker files and logs use temporary job storage.
+
+Use **Export results CSV…** in the Sensitivity tab to save the selected case's
+report. The CSV contains a baseline row for each attempted recovery strategy
+and a row for every computed parameter, including failed or cancelled rows.
+Values retain their full numerical precision. Columns include units, orbit
+radii and altitudes, inclination, launch coordinates, nominal dispersion,
+nominal and dispersed vehicle parameters in SI, payloads, and error messages.
+Export uses the saved analysis inputs, even if the form has since changed.
+
+For new analyses, the first CSV data row's `report_json` cell also contains the
+complete report: requests, selected steps and strategies, run-time vehicle
+snapshots, initial and optimized-baseline warm starts, package versions, solver
+environment, and source-file SHA-256 hashes. Preserve the corresponding source
+version to reproduce its numerical model. Trajectory arrays are JSON lists;
+convert state/control/time fields back to NumPy arrays when reusing a saved
+warm start with the Python optimizer. Later rows leave `report_json` empty.
+Older saved reports can still be exported, but the CSV explicitly marks missing
+historical vehicle and solver snapshots; rerun the analysis to capture them.
+
+Python callers can use `compute_sensitivities(request, steps,
+recoveries=['ASDS', 'RTLS'])` from `PayloadSensitivity.py`. Step sizes use SI
+units for physical limits. A multi-strategy report includes individual `runs`
+and a combined `rows` list carrying each row's `recovery` strategy.
 
 ## Vehicle definitions and 3D trajectories
 
@@ -616,3 +655,24 @@ A clean Python 3.10 installation passed dependency consistency checks, applicati
 imports, loading all included telemetry CSVs, and a small IPOPT/MUMPS solve.
 This verifies installation and solver availability; it does not establish
 convergence of a complete launch/recovery optimization.
+
+## Smooth final maneuver and landing steering
+
+The deployment maneuver now optimizes its ECI post-burn velocity explicitly;
+plane-change Δv remains included in the propellant reserve. The parking-apogee
+geometry also supports circular parking orbits without selecting an apsidal
+direction through an eccentricity-vector division. Direct injection reserves
+no later-burn propellant.
+
+Booster landing now optimizes a thrust angle as well as throttle. The angle is
+measured from the current radial vertical, bounded to ±90°, and constrained to
+brake the vehicle. Saved results store `landing_thrust_angle` in radians while
+`u4_landing` keeps its previous throttle/force convention. Older saved cases
+remain usable as warm starts; initial angles are reconstructed from their
+velocity. Integrated plots show landing thrust–velocity angles, and orbit plots
+use the optimized maneuver vectors.
+
+The physical load limits are unchanged. A 1 mm/s regularization keeps the burn
+Δv norm and near-zero-speed return terms differentiable. See
+[the convergence diagnosis](CONVERGENCE_DIAGNOSIS.md) for checks and remaining
+cold-start limitations.

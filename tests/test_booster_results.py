@@ -41,6 +41,7 @@ class BoosterAltitudeTests(unittest.TestCase):
                                       density_factor=2., heat_coefficient=VLType.Booster_k_empirical)['heat_flux'],
                     numerical_acceleration(solution['t4_vec'], np.linalg.norm(solution['x4'][:, 2:4], axis=1))]
         for axis, values in zip(figure.axes, expected):
+            self.assertIsNone(axis.get_legend())
             self.assertEqual(axis.get_ylabel(), 'Altitude [km]')
             np.testing.assert_allclose(axis.lines[0].get_ydata(), [110, 1])
             np.testing.assert_allclose(axis.lines[0].get_xdata(),
