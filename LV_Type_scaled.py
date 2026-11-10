@@ -124,6 +124,8 @@ class VLType(PythonMsg):
     nu: int = field(default=2)
     dynamics: ca.Function = field(default=None)
     dynamics_kp1: ca.Function = field(default=None)
+    dynamics_isp: ca.Function = field(default=None)
+    dynamics_kp1_isp: ca.Function = field(default=None)
     dynamics_kp1_M50: ca.Function = field(default=None)
     dynamics_kp1_M20: ca.Function = field(default=None)
     dynamics_kp1_M10: ca.Function = field(default=None)
@@ -531,26 +533,38 @@ class LaunchVehicle_ECI(VLType):
         fz = sfz * self.scaleU[2]
 
         g = self.g0 * self.R0 ** 2 / (x**2 + y**2 + z**2)
-        Isp = self.SecondStage_Vac_Isp * (self.SecondStage_MinThrust_IspFactor + (1.0-self.SecondStage_MinThrust_IspFactor)*(ca.norm_2(sym_u)-self.SecondStage_MinThrust_Factor)/(1.0-self.SecondStage_MinThrust_Factor))
+        isp_sym = ca.MX.sym('second_stage_isp')
+        efficiency = (self.SecondStage_MinThrust_IspFactor
+                    + (1.0 - self.SecondStage_MinThrust_IspFactor)
+                    * (ca.norm_2(sym_u) - self.SecondStage_MinThrust_Factor)
+                    / (1.0 - self.SecondStage_MinThrust_Factor))
 
-        dx = vx
-        dy = vy
-        dz = vz
-        dvx = fx / m - g * x / ca.sqrt(x**2 + y**2 + z**2)
-        dvy = fy / m - g * y / ca.sqrt(x**2 + y**2 + z**2)
-        dvz = fz / m - g * z / ca.sqrt(x**2 + y**2 + z**2)
-        dm = -ca.sqrt(fx**2 + fy**2 + fz**2) / (Isp * self.g0)
-
-        dqdt_scaled = ca.vertcat(dx / self.scaleX[0], dy / self.scaleX[1],
-            dz / self.scaleX[2], dvx / self.scaleX[3],
-            dvy / self.scaleX[4], dvz / self.scaleX[5],
-            dm / self.scaleX[6]) * self.scaleT
+        def rates(isp):
+            dx = vx
+            dy = vy
+            dz = vz
+            dvx = fx / m - g * x / ca.sqrt(x**2 + y**2 + z**2)
+            dvy = fy / m - g * y / ca.sqrt(x**2 + y**2 + z**2)
+            dvz = fz / m - g * z / ca.sqrt(x**2 + y**2 + z**2)
+            dm = -ca.sqrt(fx**2 + fy**2 + fz**2) / (isp * efficiency * self.g0)
+            return ca.vertcat(dx / self.scaleX[0], dy / self.scaleX[1],
+                dz / self.scaleX[2], dvx / self.scaleX[3],
+                dvy / self.scaleX[4], dvz / self.scaleX[5],
+                dm / self.scaleX[6]) * self.scaleT
 
         sym_sx = ca.vertcat(sx, sy, sz, svx, svy, svz, sm)
         sym_su = ca.vertcat(sfx, sfy, sfz)
-        self.dynamics = ca.Function('dynamics_eci_scaled', [sym_sx, sym_su], [dqdt_scaled])
-        self.dynamics_kp1 = ca.Function('dynamics_eci_kp1_scaled', [sym_sx, sym_su, sdt], [self.RK4(self.dynamics, sym_sx, sym_su, sdt)])
-        self.ISP_calc = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [Isp])
+        self.dynamics_isp = ca.Function('dynamics_eci_isp', [sym_sx, sym_su, isp_sym], [rates(isp_sym)])
+        isp_step = self.RK4(lambda state, control: self.dynamics_isp(state, control, isp_sym),
+                            sym_sx, sym_su, sdt)
+        self.dynamics_kp1_isp = ca.Function(
+            'dynamics_eci_kp1_isp', [sym_sx, sym_su, sdt, isp_sym], [isp_step])
+        isp_nominal = float(self.SecondStage_Vac_Isp)
+        self.dynamics = ca.Function('dynamics_eci_scaled', [sym_sx, sym_su],
+                                   [self.dynamics_isp(sym_sx, sym_su, isp_nominal)])
+        self.dynamics_kp1 = ca.Function('dynamics_eci_kp1_scaled', [sym_sx, sym_su, sdt],
+                                       [self.dynamics_kp1_isp(sym_sx, sym_su, sdt, isp_nominal)])
+        self.ISP_calc = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [isp_nominal * efficiency])
         self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [ca.sqrt(fx**2+fy**2+fz**2)/m])
 # You can instantiate either class directly for use in your scaled optimization pipeline.
         self.local_to_eci()

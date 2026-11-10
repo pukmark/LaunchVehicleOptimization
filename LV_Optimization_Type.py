@@ -450,6 +450,105 @@ class VLType(PythonMsg):
     launch_site: dict = field(default=None)
 
 @dataclass
+class _ParameterBuffer:
+    """Pin selected dispersion factors with a two-sided inequality buffer.
+    """
+
+    MASS_CHANNELS = {
+        'SecondStage_EmptyMass': ('stack', 'second_full', 'second_empty'),
+        'SecondStage_PropMass': ('stack', 'second_full'),
+        'FirstStage_EmptyMass': ('stack', 'first_empty'),
+        'FirstStage_PropMass': ('stack',),
+    }
+    SUPPORTED = set(MASS_CHANNELS) | {'SecondStageIsp'}
+    # Held-fixed contribution of the factor to (final mass - reserve), in kg.
+    PERFORMANCE_OFFSET = {'SecondStage_EmptyMass': 1.0}
+
+    def __init__(self, opti, dispersion, names, eps):
+        self.opti = opti
+        self.rows = {}
+        self.physical_isp = None
+        names = list(names or [])
+        unknown = [name for name in names if name not in self.SUPPORTED]
+        if unknown:
+            raise ValueError(f'Parameter inequalities are not implemented for: {", ".join(unknown)}')
+        if names and (not np.isfinite(eps) or eps <= 0):
+            raise ValueError('parameter_eps must be positive and finite.')
+        self.eps = float(eps)
+        for name in names:
+            nominal = float(getattr(dispersion, name))
+            if not np.isfinite(nominal):
+                raise ValueError(f'Invalid nominal value for {name}.')
+            if name == 'SecondStageIsp' and nominal <= 0:
+                raise ValueError('SecondStageIsp nominal must be positive.')
+            variable = opti.variable()
+            upper = variable <= nominal + self.eps
+            lower = variable >= nominal - self.eps
+            opti.subject_to(upper)
+            opti.subject_to(lower)
+            opti.set_initial(variable, nominal)
+            self.rows[name] = {'variable': variable, 'upper': upper, 'lower': lower,
+                               'nominal': nominal,
+                               'performance_offset': self.PERFORMANCE_OFFSET.get(name, 0.0)}
+
+    @property
+    def active(self):
+        return bool(self.rows)
+
+    def _delta(self, name):
+        row = self.rows.get(name)
+        if row is None:
+            return 0.0
+        return row['variable'] - row['nominal']
+
+    def _channel(self, channel):
+        total = 0.0
+        for name, channels in self.MASS_CHANNELS.items():
+            if channel in channels:
+                total = total + self._delta(name)
+        return total
+
+    def stack_delta(self):
+        return self._channel('stack')
+
+    def second_full_delta(self):
+        return self._channel('second_full')
+
+    def second_empty_delta(self):
+        return self._channel('second_empty')
+
+    def first_empty_delta(self):
+        return self._channel('first_empty')
+
+    def bind_second_stage_isp(self, vacuum_isp):
+        """Physical vacuum specific impulse, with the multiplier free inside the buffer."""
+        row = self.rows.get('SecondStageIsp')
+        if row is None:
+            self.physical_isp = None
+            return None
+        self.physical_isp = float(vacuum_isp) * (row['variable'] / row['nominal'])
+        return self.physical_isp
+
+    def evaluate(self, value):
+        """Map a CasADi value function to dual sensitivities of the maximized performance."""
+        report = {}
+        for name, row in self.rows.items():
+            upper = float(value(self.opti.dual(row['upper'])))
+            lower = float(value(self.opti.dual(row['lower'])))
+            sensitivity = upper - lower
+            report[name] = {
+                'nominal': row['nominal'],
+                'value': float(value(row['variable'])),
+                'eps': self.eps,
+                'upper_dual': upper,
+                'lower_dual': lower,
+                'dual_sensitivity': sensitivity,
+                'performance_offset': row['performance_offset'],
+                'payload_sensitivity': sensitivity - row['performance_offset'],
+            }
+        return report
+
+
 class LV_Optimization(VLType):
     def __init__(self, ScenarioDispersion: LV_Type.DispesrionFactorsType, 
                          LV_Configuration: int = 1, launch_site=None):
@@ -476,9 +575,13 @@ class LV_Optimization(VLType):
                          init_guess = None,
                          ipopt_options = None,
                          output_dir = 'Results',
-                         initial_guess_diagnostics: bool = True):
+                         initial_guess_diagnostics: bool = True,
+                         lifted_parameters=None,
+                         parameter_eps: float = 1e-6):
         if RecoveryStrategy not in {'EXP', 'ASDS', 'RTLS'}:
             raise ValueError(f'Unknown recovery strategy: {RecoveryStrategy}')
+        if lifted_parameters and RecoveryStrategy != 'EXP':
+            raise ValueError('Parameter inequalities are implemented for EXP recovery.')
         if init_guess is None:
             init_guess = 0.5
         elif isinstance(init_guess, dict):
@@ -496,7 +599,6 @@ class LV_Optimization(VLType):
         Target_Orbit["a"] = 0.5 * (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # semi-major axis
         Target_Orbit["e"] = (Target_Orbit["apogee"] - Target_Orbit["perigee"]) / (Target_Orbit["apogee"] + Target_Orbit["perigee"]) # eccentricity    
 
-
         if RecoveryStrategy == 'EXP':
             LV_plot = LVp.LV_plot(self.booster, self.eci, None, None)
         elif RecoveryStrategy == 'ASDS':
@@ -506,6 +608,8 @@ class LV_Optimization(VLType):
 
         # define the optimization problem
         opti = ca.Opti()
+        lifted = _ParameterBuffer(opti, self.ScenarioDispersion, lifted_parameters, parameter_eps)
+        lifted.bind_second_stage_isp(self.eci.SecondStage_Vac_Isp)
         diagnostics = InitialGuessConstraintDiagnostics(opti, enabled=initial_guess_diagnostics)
         local_components = ('x', 'z', 'vx', 'vz', 'mass')
         local_units = ('m', 'm', 'm/s', 'm/s', 'kg')
@@ -534,15 +638,24 @@ class LV_Optimization(VLType):
         LaunchAz = opti.variable(1)
 
         payload_mass = payload_mass_scaled * self.booster.scaleX[4]
+        stack_mass = self.booster.LV_total_mass + lifted.stack_delta()
+        second_full = self.eci.SecondStage_FullMass + lifted.second_full_delta()
+        second_empty = self.eci.SecondStage_EmptyMass + lifted.second_empty_delta()
+        first_empty = self.eci.EmptyFirstStageMass + lifted.first_empty_delta()
+
+        def eci_step(state, control, step):
+            if lifted.physical_isp is None:
+                return self.eci.dynamics_kp1(state, control, step)
+            return self.eci.dynamics_kp1_isp(state, control, step, lifted.physical_isp)
 
         # Set the initial state
         init_time = 5.0
-        init_acc = self.booster.FirstStage_SL_Thrust / (self.booster.LV_total_mass + payload_mass) - self.booster.g0 * (self.booster.R0 / (self.booster.R0 + self.booster.LaunchAltitude))**2
+        init_acc = self.booster.FirstStage_SL_Thrust / (stack_mass + payload_mass) - self.booster.g0 * (self.booster.R0 / (self.booster.R0 + self.booster.LaunchAltitude))**2
         init_vz = init_acc * init_time
         init_vx = 0.0
         init_z = 0.5 * init_acc * init_time**2 + self.booster.LaunchAltitude
         init_x = 0.0
-        init_m = self.booster.LV_total_mass + payload_mass - (self.booster.FirstStage_SL_Thrust / (self.booster.FirstStage_SL_Isp * self.booster.g0)) * init_time
+        init_m = stack_mass + payload_mass - (self.booster.FirstStage_SL_Thrust / (self.booster.FirstStage_SL_Isp * self.booster.g0)) * init_time
 
         diagnostics.add(phase1, 'Initial state',
                         x1[:,0] == self.booster.scale_x(ca.vertcat(init_x, init_z, init_vx, init_vz, init_m)),
@@ -582,7 +695,7 @@ class LV_Optimization(VLType):
                         scale=self.booster.FirstStage_StageSeparationMaxDynamicPressure / 1000., unit='kPa')
         if RecoveryStrategy == 'EXP':
             diagnostics.add(phase1, 'Final mass lower bound',
-                            x1[4,self.booster.N] >= (self.eci.EmptyFirstStageMass + self.eci.SecondStage_FullMass + payload_mass) / self.booster.scaleX[4],
+                            x1[4,self.booster.N] >= (first_empty + second_full + payload_mass) / self.booster.scaleX[4],
                             self.booster.scaleX[4], 'kg')
 
         # Phase 2 - Second Stage, before fairing separation (if needed)
@@ -595,16 +708,16 @@ class LV_Optimization(VLType):
         diagnostics.add(phase2, 'Launch azimuth lower bound', LaunchAz >= -np.pi/2, 180. / np.pi, 'deg')
         diagnostics.add(phase2, 'Launch azimuth upper bound', LaunchAz <= np.pi/2, 180. / np.pi, 'deg')
         eci_pos, eci_vel = self.eci.local_to_eci_func(ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz)
-        x2_init = ca.vertcat(eci_pos, eci_vel, self.eci.SecondStage_FullMass + payload_mass)
+        x2_init = ca.vertcat(eci_pos, eci_vel, second_full + payload_mass)
         x2_beforeCoast = self.eci.scale_x(x2_init)
-        x2_afterCoast = self.eci.dynamics_kp1(x2_beforeCoast, 1e-8*np.ones((self.eci.nu,)), self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT)
+        x2_afterCoast = eci_step(x2_beforeCoast, 1e-8*np.ones((self.eci.nu,)), self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT)
         
         diagnostics.add(phase2, 'Initial state after coast', x2[:,0] == x2_afterCoast,
                         self.eci.scaleX, eci_units, eci_components)
         for k in range(self.eci.N[0]):
             # set the dynamics
             diagnostics.add(phase2, f'Dynamics k={k} → {k+1}',
-                            x2[:,k+1] == self.eci.dynamics_kp1(x2[:,k], u2[:,k], dt2),
+                            x2[:,k+1] == eci_step(x2[:,k], u2[:,k], dt2),
                             self.eci.scaleX, eci_units, eci_components)
             # set the thrust constraints
             diagnostics.add(phase2, f'Thrust norm upper bound k={k}', ca.norm_2(u2[:,k]) <= 1.0)
@@ -627,7 +740,7 @@ class LV_Optimization(VLType):
         for k in range(self.eci.N[1]):
             # set the dynamics
             diagnostics.add(phase3, f'Dynamics k={k} → {k+1}',
-                            x3[:,k+1] == self.eci.dynamics_kp1(x3[:,k], u3[:,k], dt3),
+                            x3[:,k+1] == eci_step(x3[:,k], u3[:,k], dt3),
                             self.eci.scaleX, eci_units, eci_components)
             # set the thrust constraints
             diagnostics.add(phase3, f'Thrust norm upper bound k={k}', ca.norm_2(u3[:,k]) <= 1.0)
@@ -640,11 +753,17 @@ class LV_Optimization(VLType):
         # may request direct injection into the supplied deployment orbit.
         x3f = self.eci.unscale_x(x3[:,self.eci.N[1]])
         direct_injection = bool(Target_Orbit.get('direct_injection', False))
-        maneuver = None if direct_injection else add_final_maneuver(opti, diagnostics, self.eci, x3f, Target_Orbit, phase3)
+        saved_isp = self.eci.SecondStage_Vac_Isp
+        try:
+            if lifted.physical_isp is not None:
+                self.eci.SecondStage_Vac_Isp = lifted.physical_isp
+            maneuver = None if direct_injection else add_final_maneuver(opti, diagnostics, self.eci, x3f, Target_Orbit, phase3)
+        finally:
+            self.eci.SecondStage_Vac_Isp = saved_isp
         extra_variables = [] if maneuver is None else list(maneuver['variables'])
         propellent_mass_for_final_dv = ca.MX(0.) if direct_injection else maneuver['reserve']
 
-        x3f_minmass_scaled = (self.eci.SecondStage_EmptyMass + payload_mass + propellent_mass_for_final_dv) / self.eci.scaleX[6]
+        x3f_minmass_scaled = (second_empty + payload_mass + propellent_mass_for_final_dv) / self.eci.scaleX[6]
         diagnostics.add(phase3, 'Final mass including orbit-burn reserve',
                         x3[6,self.eci.N[1]] >= x3f_minmass_scaled, self.eci.scaleX[6], 'kg')
         if direct_injection:
@@ -1374,8 +1493,11 @@ class LV_Optimization(VLType):
                     f"inc_{np.rad2deg(Target_Orbit['i']):.1f}deg_"
                     f"PL_{max(0,payload_mass_predefined):.0f}kg_Config{configuration_tag}_{case_id}")
         solve_error = None
+        objective_value = None
+        parameter_duals = None
         try:
             sol = opti.solve()
+            objective_value = float(sol.value(opti.f))
 
             u1_scaled_sol = np.array(sol.value(u1))
             x1_scaled_sol = np.array(sol.value(x1))
@@ -1406,7 +1528,8 @@ class LV_Optimization(VLType):
                     dt4_boostback_scaled_sol = np.array(sol.value(dt4_boostback))
                     x4_boostback_scaled_sol = np.array(sol.value(x4_boostback))
                     u4_boostback_scaled_sol = np.array(sol.value(u4_boostback))
-
+            if lifted.active:
+                parameter_duals = lifted.evaluate(sol.value)
 
         except RuntimeError as exc:
             solve_error = str(exc)
@@ -1689,7 +1812,7 @@ class LV_Optimization(VLType):
                     alt4_boostback_sol[k] = ca.norm_2(ca.vertcat(x4_boostback_vec_sol[0,k], self.rocket_return.R0+x4_boostback_vec_sol[1,k])) - self.rocket_return.R0
                     vel4_boostback_sol[k] = ca.norm_2(ca.vertcat(x4_boostback_vec_sol[2,k], x4_boostback_vec_sol[3,k]))
                     Qdyn4_boostback_sol[k] = 0.5 * (self.atmosphere.rho_fun(alt4_boostback_sol[k]) * self.ScenarioDispersion.AtmosphereDensity) * vel4_boostback_sol[k]**2
-            
+        
             N4_ballistic = 25
             x4_ballistic_sol = np.zeros((self.rocket_return.nx, N4_ballistic+1))
             alt4_ballistic_sol, vel4_ballistic_sol = np.zeros((N4_ballistic+1,1)), np.zeros((N4_ballistic+1,1))
@@ -1805,6 +1928,10 @@ class LV_Optimization(VLType):
             self.Solution['acc4_sol'] = acc4_sol
 
         self.Solution['v3_desired'] = v3_desired
+        self.Solution['objective'] = objective_value
+        if parameter_duals is not None:
+            self.Solution['parameter_duals'] = parameter_duals
+            self.Solution['parameter_eps'] = lifted.eps
         self.Solution['return_status'] = opti.return_status()
         self.Solution['success'] = opti.stats()['success']
         self.Solution['iter_count'] = opti.stats().get('iter_count')
