@@ -322,6 +322,62 @@ class VehicleDefinitionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.update_vehicle('Falcon 9', renamed)
 
+    def test_delete_only_custom_vehicle_and_preserve_computed_history(self):
+        app = self.library_app()
+        case = app.cases[0]
+        case.draft.update(vehicle=self.definition['name'], vehicle_definition=deepcopy(self.definition))
+        case.computed_inputs = deepcopy(case.draft)
+        case.request = {'configuration': deepcopy(self.definition)}
+        case.result = {'payload_mass': 1234.}
+        history = deepcopy((case.computed_inputs, case.request, case.result))
+        app.delete_vehicle()
+        self.assertNotIn(self.definition['name'], app.vehicles)
+        self.assertEqual(case.draft['vehicle'], 'Falcon 9')
+        self.assertNotIn('vehicle_definition', case.draft)
+        self.assertEqual((case.computed_inputs, case.request, case.result), history)
+        self.assertEqual({name: app.vehicles[name] for name in BUILTIN_VEHICLES}, BUILTIN_VEHICLES)
+        app.vehicle.get.return_value = 'Falcon 9'
+        app.schedule_save.reset_mock()
+        app.delete_vehicle()
+        app.schedule_save.assert_not_called()
+        app.vehicles = vehicle_catalog([self.definition])
+        app.vehicle.get.return_value = self.definition['name']
+        app.process = Mock()
+        app.delete_vehicle()
+        self.assertIn(self.definition['name'], app.vehicles)
+
+    def test_standard_copy_requires_unique_name_and_cancel_changes_nothing(self):
+        app = self.library_app()
+        app.vehicle.get.return_value = 'Falcon 9'
+        original = deepcopy(app.vehicles)
+        with patch('tkinter.simpledialog.askstring', return_value=None):
+            self.assertIsNone(app.copy_standard_vehicle('Falcon 9'))
+        self.assertEqual(app.vehicles, original)
+        with patch('tkinter.simpledialog.askstring', side_effect=['Falcon 9', 'Research vehicle', 'My rocket']), \
+             patch('tkinter.messagebox.showerror') as errors:
+            self.assertEqual(app.copy_standard_vehicle('Falcon 9'), 'My rocket')
+        self.assertEqual(errors.call_count, 2)
+        self.assertEqual(app.vehicles['Falcon 9'], 1)
+        self.assertEqual(app.vehicles['My rocket']['parameters'], self.definition['parameters'])
+
+    def test_standard_edit_creates_named_custom_copy_before_opening_editor(self):
+        app = self.library_app()
+        app.vehicle.get.return_value = 'Falcon 9'
+        widgets = {name: Mock() for name in ('Frame', 'Label', 'Entry', 'Notebook', 'Scrollbar', 'Button')}
+        def variable(**kwargs):
+            return Mock(get=Mock(return_value=kwargs['value']))
+        def open_editor(*args):
+            self.assertIn('My rocket', app.vehicles)
+            self.assertEqual(app.vehicles['Falcon 9'], 1)
+            return Mock()
+        with patch('tkinter.simpledialog.askstring', return_value='My rocket'), \
+             patch.multiple('tkinter', Toplevel=Mock(side_effect=open_editor), Canvas=Mock(), StringVar=variable), \
+             patch.multiple('tkinter.ttk', **widgets):
+            app.open_vehicle_dialog(edit=True)
+        buttons = {call.kwargs['text']: call.kwargs['command'] for call in widgets['Button'].call_args_list}
+        self.assertIn('Apply changes', buttons)
+        app.vehicle.set.assert_called_with('My rocket')
+
     def test_import_reuses_identical_definition_and_preserves_name_conflicts(self):
         app = self.library_app()
         before = deepcopy(app.vehicles)

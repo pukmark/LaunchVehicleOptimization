@@ -17,6 +17,8 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from IntegratedResults import draw_integrated_results, second_stage_coast, return_controls
+from Trajectory3D import second_burn_history
+from VehicleDefinitions import BUILTIN_VEHICLES
 
 from OptimizationGUI import (
     DispesrionFactorsType, OptimizationApp, draw_phase, nominal_request,
@@ -496,7 +498,10 @@ class ResultRenderingTests(unittest.TestCase):
                 self.assertEqual(len(figure.axes), 5)
                 for axis in figure.axes:
                     for line in axis.lines:
-                        self.assertEqual(line.get_linestyle(), '--' if 'Booster return' in line.get_label() else '-')
+                        expected_style = ('None' if line.get_marker() == 'o' else
+                                          '-.' if 'burn 2 (illustration)' in line.get_label() else
+                                          '--' if 'Booster return' in line.get_label() else '-')
+                        self.assertEqual(line.get_linestyle(), expected_style)
                         self.assertEqual(line.get_color(), 'blue')
                         self.assertEqual(len(line.get_xdata()), len(line.get_ydata()))
                 for axis in figure.axes[:4]:
@@ -577,7 +582,8 @@ class ResultRenderingTests(unittest.TestCase):
                         np.testing.assert_allclose(figure.axes[0].lines[0].get_ydata(), solution["Isp1_sol"])
                         np.testing.assert_allclose(figure.axes[2].lines[0].get_ydata(), np.rad2deg(solution["u1"][1]))
                     if phase == "S2 propulsion":
-                        self.assertEqual(len(figure.axes[0].lines), 2)
+                        self.assertEqual(len(figure.axes[0].lines), 2 +
+                                         (second_burn_history(solution, self.requests[recovery]['target_orbit']) is not None))
                         np.testing.assert_allclose(figure.axes[0].lines[1].get_xdata(), solution["t3_vec"][:-1])
                         np.testing.assert_allclose(figure.axes[3].lines[0].get_ydata(), solution["u2"][0] / 1000)
                     if phase == "S2 orbit":
@@ -721,7 +727,31 @@ class ResultRenderingTests(unittest.TestCase):
             self.assertEqual(restored.form_request()['configuration'], definition)
             restored.reset_gui()
             self.assertEqual(restored.vehicle.get(), 'Falcon 9')
-            self.assertIn('Research rocket', restored.vehicles)
+            self.assertEqual(restored.vehicles, dict(BUILTIN_VEHICLES))
+            self.assertEqual(restored.state_snapshot()['custom_vehicles'], [])
+
+    def test_delete_vehicle_button_protects_standards_and_updates_cases(self):
+        from VehicleDefinitions import vehicle_editor_values, vehicle_from_editor
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(directory)
+            self.assertEqual(str(app.delete_vehicle_button['state']), 'disabled')
+            app.add_vehicle(vehicle_from_editor('Delete me', vehicle_editor_values(1)))
+            self.assertEqual(str(app.delete_vehicle_button['state']), 'normal')
+            app.cases[1].draft = deepcopy(app.capture_inputs())
+            app.set_running(True)
+            self.assertEqual(str(app.delete_vehicle_button['state']), 'disabled')
+            app.set_running(False)
+            self.assertEqual(str(app.delete_vehicle_button['state']), 'normal')
+            app.delete_vehicle_button.invoke()
+            self.assertNotIn('Delete me', app.vehicles)
+            self.assertEqual(app.vehicle.get(), 'Falcon 9')
+            self.assertEqual(str(app.delete_vehicle_button['state']), 'disabled')
+            for case in app.cases:
+                self.assertEqual(case.draft['vehicle'], 'Falcon 9')
+                self.assertNotIn('vehicle_definition', case.draft)
+            app.save_state()
+            restored = self.make_app(directory)
+            self.assertNotIn('Delete me', restored.vehicles)
 
     def test_vehicle_edit_refreshes_nominals_and_preserves_history_after_restart(self):
         from VehicleDefinitions import vehicle_editor_values, vehicle_from_editor
@@ -1129,7 +1159,8 @@ class ResultRenderingTests(unittest.TestCase):
             self.assertEqual(saved["target_orbit"]["perigee"], 6793137.0)
             self.assertAlmostEqual(saved["target_orbit"]["i"], np.deg2rad(51.6))
             self.assertIn("420 × 415 km · 51.6°", app.summary.get())
-            target_lines = app.figures["Second stage"].axes[5].lines[-2:]
+            target_lines = [line for line in app.figures["Second stage"].axes[5].lines
+                            if len(line.get_xdata()) == 2 and line.get_linestyle() in (":", "-.")]
             np.testing.assert_allclose(target_lines[0].get_ydata(), [420, 420])
             np.testing.assert_allclose(target_lines[1].get_ydata(), [415, 415])
             self.assertEqual(app.notebook.tab(app.tabs["Booster"], "state"), "normal")
@@ -1186,10 +1217,13 @@ class ResultRenderingTests(unittest.TestCase):
             self.assertEqual(len(app.figures["Booster"].axes[6].lines), 2)
             self.assertEqual([curve.get_color() for curve in app.figures["Booster"].axes[6].lines],
                              [app.cases[1].color, app.cases[2].color])
-            self.assertEqual(len(app.figures["Second stage"].axes[0].lines), 6)
+            burn_count = sum(second_burn_history(case.result, case.request['target_orbit']) is not None
+                             for case in app.cases)
+            self.assertEqual(len(app.figures["Second stage"].axes[0].lines), 6 + burn_count)
             for tab, count in (("S1 details", 3), ("S2 propulsion", 6), ("S2 orbit", 6)):
                 self.assertEqual(app.notebook.tab(app.tabs[tab], "state"), "normal")
-                self.assertEqual(len(app.figures[tab].axes[0].lines), count)
+                self.assertEqual(len(app.figures[tab].axes[0].lines),
+                                 count + (burn_count if tab.startswith("S2") else 0))
                 self.assertEqual(app.figures[tab].axes[0].lines[-1].get_color(), app.cases[2].color)
 
             app.case_visible[1].set(False)

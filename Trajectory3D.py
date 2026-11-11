@@ -126,15 +126,98 @@ def solution_orbits(solution, target, mu=VLType.mu):
     return parking, final
 
 
+def second_burn_history(solution, target=None, samples=51):
+    """Illustrate the impulse at the payload limit, with a 100 s plot gap.
+
+    Duration is vector delta-v divided by the case's payload acceleration limit.
+    Position stays fixed: these samples illustrate a burn, not propagated dynamics.
+    """
+    if solution.get('direct_injection') or (target or {}).get('direct_injection'):
+        return None
+    try:
+        _, final = solution_orbits(solution, target or {})
+        if final['delta_v'] < .001:
+            return None
+        model = VLType()
+        model.ApplyVehicleConfiguration(solution.get('configuration', 1))
+        from LV_Type_scaled import DispesrionFactorsType
+        model.ApplyScenarioDispersionToLV(DispesrionFactorsType(**solution.get('dispersion', {})))
+        model.LaunchLatitude = parse_launch_site(solution.get('launch_site'))['latitude']
+        mass = float(np.asarray(solution['x3'])[6, -1])
+        fuel = float(solution['propellant_mass_for_final_dv'])
+        acceleration = float(model.Payload_Max_acc)
+        if not np.isfinite(acceleration) or acceleration <= 0:
+            return None
+        duration = final['delta_v'] / acceleration
+        if not np.isfinite([mass, fuel, duration]).all() or not 0 < fuel < mass or duration <= 0:
+            return None
+        end = float(np.ravel(solution['t3_vec'])[-1])
+        fraction = np.linspace(0., 1., samples)
+        # Constant acceleration gives linear delta-v and exponential fuel use.
+        masses = mass * np.exp(np.log1p(-fuel / mass) * fraction)
+        progress = fraction
+        before, after = final['velocity_before'], final['velocity_after']
+        velocity = before[:, None] + (after - before)[:, None] * progress
+        position = np.repeat(final['burn_position'][:, None], samples, axis=1)
+        state = np.vstack((position, velocity, masses))
+        initial = np.asarray(solution['x3'])[:, -1]
+        r, v = initial[:3], initial[3:6]
+        h = np.cross(r, v)
+        normal = h / np.linalg.norm(h)
+        eccentricity = np.cross(v, h) / model.mu - r / np.linalg.norm(r)
+        e = np.linalg.norm(eccentricity)
+        a = 1. / (2. / np.linalg.norm(r) - np.dot(v, v) / model.mu)
+        if a <= 0 or e >= 1:
+            return None
+        radial = eccentricity / e if e > 1e-8 else r / np.linalg.norm(r)
+        transverse = np.cross(normal, radial)
+        def mean_anomaly(point):
+            anomaly = np.arctan2(np.dot(point, transverse), np.dot(point, radial))
+            eccentric = np.arctan2(np.sqrt(1. - e*e) * np.sin(anomaly), e + np.cos(anomaly))
+            return eccentric - e * np.sin(eccentric)
+        delta_mean = (mean_anomaly(final['burn_position']) - mean_anomaly(r)) % (2*np.pi)
+        if 2*np.pi - delta_mean < 1e-8:
+            delta_mean = 0.
+        physical_start = end + delta_mean * np.sqrt(a**3 / model.mu)
+        return dict(time=end + 100. + duration * fraction, state=state,
+                    duration=duration, physical_start=physical_start, main_end=end,
+                    altitude=np.full(samples, float(model.eci_to_alt(position[:, 0]))),
+                    thrust=(after - before)[:, None] / final['delta_v'] * (acceleration * masses),
+                    isp=.99 * model.SecondStage_Vac_Isp, reference_thrust=model.SecondStage_Thrust)
+    except (KeyError, ValueError, TypeError, FloatingPointError):
+        return None
+
+
+def annotate_second_burn(axis, burn, color, label):
+    """Mark the synthetic timing and label the true physical event separately."""
+    start, end = burn['time'][[0, -1]]
+    axis.axvspan(start, end, color=color, alpha=.07)
+    text = (f"{label} · Start T+{burn['physical_start'] / 60:.2f} min · "
+            f"Length {burn['duration']:.1f} s")
+    count = sum(t.get_gid() == 'second-burn-note' for t in axis.texts)
+    note = axis.text(.02, .98 - count * .10, text, transform=axis.transAxes,
+                     va='top', fontsize=6.5, color=color,
+                     bbox=dict(facecolor='white', alpha=.85, edgecolor=color, pad=2))
+    note.set_gid('second-burn-note')
+    axis.set_xlabel('Time [s]; burn 2 uses illustrative offset')
+
+
 def maneuver_summary_text(solution, target):
     """Describe the maneuver using the computed case's target and state."""
+    if solution.get('direct_injection') or target.get('direct_injection'):
+        return 'Final maneuver: no second burn (direct injection)'
     try:
         _, final = solution_orbits(solution, target)
     except (KeyError, ValueError):
         return 'Final maneuver: unavailable (see 3D trajectory)'
+    burn = second_burn_history(solution, target)
+    detail = ''
+    if burn is not None:
+        detail = (f" · S2 pulse: start T+{burn['physical_start'] / 60:.2f} min · "
+                  f"length {burn['duration']:.1f} s")
     return (f"Final maneuver: Δv {final['delta_v']:,.2f} m/s · "
             f"Δi {np.rad2deg(final['inclination_change']):+.2f}° · "
-            f"Plane rotation {np.rad2deg(final['plane_change']):.2f}°")
+            f"Plane rotation {np.rad2deg(final['plane_change']):.2f}°" + detail)
 
 
 def first_stage_eci_positions(solution):

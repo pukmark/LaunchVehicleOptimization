@@ -4,6 +4,7 @@ import numpy as np
 from LV_Type_scaled import DispesrionFactorsType, LaunchVehicle_ECI, VLType
 from TelemetryFrames import eci_to_ecef_velocity
 from PlotLegends import set_vehicle_legend
+from Trajectory3D import second_burn_history, annotate_second_burn
 
 
 def vector_angle(velocity, thrust):
@@ -186,6 +187,21 @@ def draw_integrated_results(figure, cases, *, telemetry=None, primary_group='Pha
             line(3, t, np.r_[throttle, throttle[-1]], 'Stage 2', control=True)
             line(4, t, np.r_[angle, angle[-1]], 'Stage 2', control=True)
 
+        burn = second_burn_history(s)
+        if burn is not None:
+            t, x = burn['time'], burn['state']
+            relative = x[3:6] - np.cross([0., 0., model.omega_earth], x[:3].T).T
+            speeds = np.linalg.norm(relative, axis=0)
+            thrust = burn['thrust']
+            for index, values in enumerate((burn['altitude'] / 1000,
+                                            speeds, x[6] / 1000,
+                                            np.linalg.norm(thrust, axis=0) / burn['reference_thrust'] * 100.,
+                                            vector_angle(relative, thrust))):
+                line(index, t, values, 'Stage 2 burn 2 (illustration)', '-.')
+                axes[index].axvspan(t[0], t[-1], color=color, alpha=.05)
+            axes[1].plot(t[[0, -1]], speeds[[0, -1]], 'o', color=color, markersize=3)
+            annotate_second_burn(axes[1], burn, color, label)
+
         if 'x4' in s:
             t, x = np.ravel(s['t4_vec']), np.asarray(s['x4'])
             for index, values in enumerate((np.ravel(s['alt4_sol']) / 1000.,
@@ -204,7 +220,8 @@ def draw_integrated_results(figure, cases, *, telemetry=None, primary_group='Pha
     for axis, title, unit in zip(axes, ('Altitude', 'Velocity (Earth-fixed)', 'Mass', 'Throttle',
                                        'AoA / thrust–velocity angle'),
                                  ('Altitude [km]', 'Speed [m/s]', 'Mass [t]', 'Throttle [%]', 'Angle [deg]')):
-        axis.set(title=title, xlabel='Time since launch [s]', ylabel=unit)
+        axis.set(title=title, xlabel='Time since launch [s]; burn 2 offset illustrative'
+                 if any(t.get_gid() == 'second-burn-note' for t in axes[1].texts) else 'Time since launch [s]', ylabel=unit)
         axis.grid(True, alpha=.25)
         axis.tick_params(labelsize=8)
         set_vehicle_legend(axis, legend_phases[axes.index(axis)], fontsize=7, loc='best')

@@ -103,6 +103,13 @@ python OptimizationGUI.py
    their histories with the added phase.
    Legends contain only **Main vehicle** (phases 1–3) and **Booster**, and are
    omitted when only one group is plotted.
+   The second-stage, S2 propulsion, S2 orbit, and Summery plots show the final
+   second-stage burn as a separate dash-dot illustration starting 100 plot-seconds
+   after main cutoff. The gap is arbitrary; the estimated burn duration stays to
+   scale. Labels give only the physical start time in minutes and length in seconds.
+   The optimizer still treats this maneuver as an impulse; illustrated duration
+   assumes constant acceleration at the case’s payload acceleration limit. Direct
+   injection cases have no second burn.
    Ascent uses solid lines and booster return uses dashed lines. Select another
    case to compare a different vehicle, orbit, or recovery strategy.
    Loaded telemetry overlays any available altitude, speed, mass, throttle, and
@@ -122,7 +129,11 @@ and inclination in degrees. Recovery cases add booster-return plots.
 GUI runs, fits, and sensitivities use temporary worker files, removed before the
 next job or when the GUI closes; they do not create per-run folders in `Results/gui/`. The GUI automatically
 restores its session from `Results/gui/gui_state.json`; **Save state…** and
-**Load state…** transfer a complete session. **Reset GUI** restores defaults.
+**Load state…** transfer a complete session. **Reset GUI** restores defaults and
+removes custom vehicles from the library. Standard vehicles cannot be modified
+or deleted. **Edit…** on a standard vehicle first asks for a unique name and
+creates a custom copy. **Delete** removes the selected custom vehicle and resets
+case settings using it to Falcon 9; computed results retain their vehicle snapshots.
 These local outputs are excluded from Git.
 
 ## Running without the GUI

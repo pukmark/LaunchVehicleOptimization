@@ -33,7 +33,8 @@ from VehicleDefinitions import (VEHICLE_PARAMETERS, BUILTIN_VEHICLES, VEHICLE_PA
                                 validate_vehicle_definition, migrate_builtin_vehicles)
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from TelemetryFrames import local_to_ecef_velocity, eci_to_ecef_velocity
-from Trajectory3D import draw_trajectory_3d, maneuver_summary_text
+from Trajectory3D import (draw_trajectory_3d, maneuver_summary_text, second_burn_history,
+                          annotate_second_burn)
 from IntegratedResults import draw_integrated_results
 from PaperResults import draw_paper_results, paper_comparison_costs
 from BoosterResults import draw_booster_altitude_results
@@ -446,6 +447,42 @@ def draw_phase(figure, phase, solution, target, *, color="tab:blue", case_label=
         line(6, t, loads["heat_flux"], "Empirical heat flux", "Heat flux [kW/m²]")
     else:
         raise ValueError(f"Unknown phase: {phase}")
+    if phase in ("Second stage", "S2 propulsion", "S2 orbit"):
+        burn = second_burn_history(s, target)
+        if burn is not None:
+            t, x = burn['time'], burn['state']
+            velocity = x[3:6]
+            if speed_frame == 'ECEF':
+                velocity = eci_to_ecef_velocity(x[:3], velocity, burn['physical_start'] + t - t[0])
+            speeds = np.linalg.norm(velocity, axis=0)
+            orbit = orbital_diagnostics(x)
+            h = np.cross(x[:3].T, x[3:6].T).T
+            inclination = np.rad2deg(np.arccos(np.clip(h[2] / np.linalg.norm(h, axis=0), -1, 1)))
+            if phase == 'Second stage':
+                semimajor = -VLType.mu / (2 * orbit['energy'])
+                values = (burn['altitude'] / 1000,
+                          speeds, x[6] / 1000,
+                          np.linalg.norm(burn['thrust'], axis=0) / 1000, inclination,
+                          (semimajor * (1 + orbit['eccentricity']) - VLType.R0) / 1000)
+            elif phase == 'S2 orbit':
+                values = (orbit['radius'] / 1000, orbit['radial'], orbit['transverse'],
+                          orbit['flight_path'], orbit['eccentricity'], orbit['energy'] / 1e6)
+            else:
+                thrust = burn['thrust']
+                values = (np.full(len(t), burn['isp']), np.gradient(speeds, t),
+                          thrust_velocity_angle(np.column_stack((x, x[:, -1])), thrust),
+                          thrust[0] / 1000, thrust[1] / 1000, thrust[2] / 1000)
+            for ax, value in zip(axes, values):
+                ax.plot(t, value, color=color, linestyle='-.', linewidth=1.6,
+                        label=f'{case_label} · S2 burn 2 (illustration)')
+                ax.axvspan(t[0], t[-1], color=color, alpha=.05)
+                ax.set_xlabel('Time [s]; burn 2 offset illustrative')
+            if phase == 'Second stage':
+                axes[5].plot(t, (semimajor * (1 - orbit['eccentricity']) - VLType.R0) / 1000,
+                             color=color, linestyle=':', label=f'{case_label} · Burn 2 perigee')
+                axes[1].plot(t[[0, -1]], speeds[[0, -1]], 'o', color=color, markersize=3)
+            annotate_second_burn(axes[1 if phase == 'Second stage' else 0], burn, color,
+                                 case_label)
     for ax in axes:
         ax.tick_params(labelsize=8)
     for ax in figure.axes:
@@ -702,8 +739,11 @@ class OptimizationApp:
                                               command=lambda: self.open_vehicle_dialog(edit=True))
         self.save_vehicle_button = ttk.Button(vehicle_actions, text="Save…", width=6, command=self.save_vehicle_file)
         self.load_vehicle_button = ttk.Button(vehicle_actions, text="Load…", width=6, command=self.load_vehicle_file)
+        self.delete_vehicle_button = ttk.Button(vehicle_actions, text="Delete", width=6,
+                                                command=self.delete_vehicle)
         for column, button in enumerate((self.new_vehicle_button, self.edit_vehicle_button,
-                                         self.save_vehicle_button, self.load_vehicle_button)):
+                                         self.save_vehicle_button, self.load_vehicle_button,
+                                         self.delete_vehicle_button)):
             vehicle_actions.columnconfigure(column, weight=1)
             button.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 4, 0))
             self.controls.append((button, "normal"))
@@ -780,6 +820,8 @@ class OptimizationApp:
             variable.trace_add("write", self.inputs_changed)
         self.vehicle.trace_add("write", self.inputs_changed)
         self.vehicle.trace_add("write", self.refresh_dispersion_nominals)
+        self.vehicle.trace_add("write", self.refresh_vehicle_actions)
+        self.refresh_vehicle_actions()
         self.site_variables['altitude'].trace_add("write", self.refresh_dispersion_nominals)
         self.refresh_dispersion_nominals()
         self.recovery.trace_add("write", self.inputs_changed)
@@ -1047,6 +1089,8 @@ class OptimizationApp:
         restoring = self.restoring_state
         self.restoring_state = True
         try:
+            self.vehicles = vehicle_catalog()
+            self.vehicle_combo.configure(values=list(self.vehicles))
             self.cases = [ComparisonCase(f"Case {i + 1}", color) for i, color in
                           enumerate(("#0072B2", "#D55E00", "#009E73"))]
             self.load_case_form(0)
@@ -1503,6 +1547,8 @@ class OptimizationApp:
     def set_running(self, running):
         for control, idle_state in self.controls:
             control.configure(state="disabled" if running else idle_state)
+        if not running:
+            self.refresh_vehicle_actions()
         self.run_button.configure(state="disabled" if running else "normal")
         self.cancel_button.configure(state="normal" if running else "disabled")
         if running and self.job_kind == "fit":
@@ -1972,6 +2018,53 @@ class OptimizationApp:
         self.status.set(f"Created {name}. Run the selected case to simulate it.")
         self.schedule_save()
 
+    def refresh_vehicle_actions(self, *args):
+        if hasattr(self, 'delete_vehicle_button'):
+            custom = isinstance(self.vehicles.get(self.vehicle.get()), dict)
+            self.delete_vehicle_button.configure(
+                state='normal' if self.process is None and custom else 'disabled')
+
+    def delete_vehicle(self):
+        """Remove a custom library entry while retaining computed case snapshots."""
+        if self.process is not None:
+            return
+        selected = self.vehicle.get()
+        if not isinstance(self.vehicles.get(selected), dict):
+            return
+        del self.vehicles[selected]
+        for case in self.cases:
+            if case.draft['vehicle'] == selected:
+                case.draft['vehicle'] = 'Falcon 9'
+                case.draft.pop('vehicle_definition', None)
+        self.vehicle_combo.configure(values=list(self.vehicles))
+        self.vehicle.set('Falcon 9')
+        self.update_case_labels()
+        self.status.set(f'Deleted {selected}. Affected case settings now use Falcon 9.')
+        self.schedule_save()
+
+    def copy_standard_vehicle(self, selected):
+        """Name and create a custom copy before a standard vehicle is edited."""
+        from tkinter import simpledialog, messagebox
+        configuration = self.vehicles[selected]
+        if isinstance(configuration, dict):
+            raise ValueError('Select a standard vehicle to copy.')
+        values = vehicle_editor_values(configuration)
+        initial = f'{selected[:75]} copy'
+        while True:
+            name = simpledialog.askstring('New vehicle name',
+                f'{selected} is a standard vehicle. Name your custom copy:',
+                initialvalue=initial, parent=self.root)
+            if name is None:
+                return None
+            try:
+                definition = vehicle_from_editor(name, values)
+                self.add_vehicle(definition)
+            except ValueError as exc:
+                messagebox.showerror('Invalid vehicle name', str(exc), parent=self.root)
+                initial = name
+                continue
+            return definition['name']
+
     def update_vehicle(self, selected, definition):
         """Update a custom library entry and its drafts, retaining computed inputs."""
         if not isinstance(self.vehicles[selected], dict):
@@ -2053,6 +2146,11 @@ class OptimizationApp:
             return
         selected = self.vehicle.get()
         configuration = self.vehicles[selected]
+        if edit and not isinstance(configuration, dict):
+            selected = self.copy_standard_vehicle(selected)
+            if selected is None:
+                return
+            configuration = self.vehicles[selected]
         editing = edit and isinstance(configuration, dict)
         defaults = vehicle_editor_values(configuration)
         model = VLType()
@@ -2083,9 +2181,6 @@ class OptimizationApp:
                   wraplength=710).pack(fill='x', pady=10)
         if editing:
             ttk.Label(panel, text='Changes apply to all cases selecting this vehicle; recompute to update results.',
-                      wraplength=710).pack(fill='x', pady=(0, 8))
-        elif edit:
-            ttk.Label(panel, text='Editing a built-in creates a custom copy. Enter a unique name.',
                       wraplength=710).pack(fill='x', pady=(0, 8))
         notebook = ttk.Notebook(panel)
         notebook.pack(fill='both', expand=True)
