@@ -293,6 +293,27 @@ class PayloadSensitivityTests(unittest.TestCase):
         self.assertTrue(all(row['status'] == 'Equality multiplier' for row in report['rows']))
         self.assertTrue(all(row['equality_dual'] == 120. for row in report['rows']))
 
+    def test_launch_limits_use_one_equality_multiplier_solve(self):
+        request = self.request()
+        steps = {name: default_steps(request)[name] for name in LAUNCH_PARAMETERS}
+        self.assertEqual(expected_sensitivity_evaluations(request, steps), 1)
+        calls = []
+
+        def solve(candidate, init_guess=None, lifted_parameters=None, parameter_eps=1e-6,
+                  parameter_equalities=False):
+            calls.append((lifted_parameters, parameter_equalities))
+            return {'success': True, 'payload_mass': 10000., 'parameter_duals': {
+                name: {'payload_sensitivity': float(index), 'equality_dual': float(index),
+                       'upper_dual': None, 'lower_dual': None}
+                for index, name in enumerate(LAUNCH_PARAMETERS)}}
+
+        report = compute_reported_sensitivities(request, steps, solve=solve,
+                                                parameter_equalities=True)
+        self.assertEqual(calls, [(list(LAUNCH_PARAMETERS), True)])
+        self.assertEqual(report['evaluations'], 1)
+        self.assertEqual([row['base'] for row in report['rows']],
+                         [parameter_values(request)[name] for name in LAUNCH_PARAMETERS])
+
     def test_worker_persists_json_report_and_plot_ranks_signed_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)

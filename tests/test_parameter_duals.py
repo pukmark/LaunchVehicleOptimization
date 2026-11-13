@@ -9,7 +9,7 @@ from LV_Type_scaled import DispesrionFactorsType, LaunchVehicle_ECI
 
 
 class ParameterDualTests(unittest.TestCase):
-    def test_rtls_lifted_mass_and_thrust_build_solver(self):
+    def test_rtls_lifted_factors_and_launch_limits_build_solver(self):
         model = LV_Optimization(DispesrionFactorsType(), 1)
         model.booster.N = 2
         model.eci.N = [2, 2]
@@ -18,7 +18,8 @@ class ParameterDualTests(unittest.TestCase):
             RecoveryStrategy='RTLS',
             Target_Orbit={'apogee': 6878137., 'perigee': 6878137., 'i': np.deg2rad(28.6)},
             payload_mass_predefined=-1., output_dir=None, initial_guess_diagnostics=False,
-            lifted_parameters=['FirstStage_EmptyMass', 'FirstStageThrust'],
+            lifted_parameters=['FirstStage_EmptyMass', 'FirstStageThrust',
+                               *_ParameterBuffer.LAUNCH_LIMITS], parameter_equalities=True,
             ipopt_options={'max_iter': 0})
         self.assertEqual(result['return_status'], 'Maximum_Iterations_Exceeded')
 

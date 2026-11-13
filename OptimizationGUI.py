@@ -1865,7 +1865,7 @@ class OptimizationApp:
             count = len(case.sensitivity_settings) if case.sensitivity_settings else len(asdict(DispesrionFactorsType())) + len(LAUNCH_PARAMETERS)
             text = (f'{case.name}: choose vehicle, recovery, orbit and launch site in the right panel, then run. '
                     f"Recovery strategies: {', '.join(case.sensitivity_recoveries) if case.sensitivity_recoveries else 'current selection'}. "
-                    f'{count} parameters selected. Multiplier reads every factor from one buffered solve. '
+                    f'{count} parameters selected. Multiplier reads every selected input from one buffered solve. '
                     'Equality reads multipliers from exact parameter equality constraints. '
                     'Sampled re-optimizes the maximum payload at ±each step. '
                     'dP/dp is kg per parameter unit; the chart compares the configured steps. '

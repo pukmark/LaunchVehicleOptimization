@@ -454,11 +454,14 @@ class _ParameterBuffer:
     """Pin selected dispersion factors with a two-sided inequality buffer.
     """
 
-    SUPPORTED = {item.name for item in fields(LV_Type.DispesrionFactorsType)}
+    LAUNCH_LIMITS = ('FirstStage_MaxDynamicPressure', 'Booster_MaxDynamicPressure',
+                     'FirstStage_StageSeparationMaxDynamicPressure',
+                     'FairingSeparationAltitude', 'Payload_Max_acc')
+    SUPPORTED = {item.name for item in fields(LV_Type.DispesrionFactorsType)} | set(LAUNCH_LIMITS)
     MULTIPLIERS = {'FirstStageIsp', 'SecondStageIsp', 'FirstStageThrust', 'SecondStageThrust',
                    'FirstStageCx0', 'BoosterStageCx0', 'AtmosphereDensity'}
 
-    def __init__(self, opti, dispersion, names, eps, equalities=False):
+    def __init__(self, opti, dispersion, names, eps, equalities=False, launch_limits=None):
         self.opti = opti
         self.rows = {}
         self.physical_isp = None
@@ -471,7 +474,9 @@ class _ParameterBuffer:
             raise ValueError('parameter_eps must be positive and finite.')
         self.eps = float(eps)
         for name in names:
-            nominal = float(getattr(dispersion, name))
+            if name in self.LAUNCH_LIMITS and (launch_limits is None or name not in launch_limits):
+                raise ValueError(f'Missing nominal launch limit: {name}')
+            nominal = float(launch_limits[name] if name in self.LAUNCH_LIMITS else getattr(dispersion, name))
             if not np.isfinite(nominal):
                 raise ValueError(f'Invalid nominal value for {name}.')
             if name in self.MULTIPLIERS and nominal <= 0:
@@ -501,6 +506,10 @@ class _ParameterBuffer:
         if row is None:
             return float(getattr(dispersion, name))
         return row['variable']
+
+    def limit(self, name, nominal):
+        row = self.rows.get(name)
+        return float(nominal) if row is None else row['variable']
 
     def scale(self, name):
         """Multiplier relative to the value already stored on the vehicle."""
@@ -636,8 +645,10 @@ class LV_Optimization(VLType):
 
         # define the optimization problem
         opti = ca.Opti()
+        launch_limits = {name: float(getattr(self.booster, name))
+                         for name in _ParameterBuffer.LAUNCH_LIMITS}
         lifted = _ParameterBuffer(opti, self.ScenarioDispersion, lifted_parameters, parameter_eps,
-                                  equalities=parameter_equalities)
+                                  equalities=parameter_equalities, launch_limits=launch_limits)
         lifted.bind_second_stage_isp(self.eci.SecondStage_Vac_Isp)
         diagnostics = InitialGuessConstraintDiagnostics(opti, enabled=initial_guess_diagnostics)
         local_components = ('x', 'z', 'vx', 'vz', 'mass')
@@ -683,6 +694,12 @@ class LV_Optimization(VLType):
         sl_isp = self.booster.FirstStage_SL_Isp * lifted.scale('FirstStageIsp')
         booster_parameters = lifted.booster_parameters()
         second_stage_thrust = lifted.scale('SecondStageThrust')
+        ascent_q_limit = lifted.limit('FirstStage_MaxDynamicPressure', self.booster.FirstStage_MaxDynamicPressure)
+        separation_q_limit = lifted.limit('FirstStage_StageSeparationMaxDynamicPressure',
+                                          self.booster.FirstStage_StageSeparationMaxDynamicPressure)
+        return_q_limit = lifted.limit('Booster_MaxDynamicPressure', self.rocket_return.Booster_MaxDynamicPressure)
+        fairing_altitude = lifted.limit('FairingSeparationAltitude', self.eci.FairingSeparationAltitude)
+        payload_acc_limit = lifted.limit('Payload_Max_acc', self.booster.Payload_Max_acc)
 
         def eci_step(state, control, step):
             if not lifted.active:
@@ -764,20 +781,20 @@ class LV_Optimization(VLType):
             uk = self.booster.unscale_u(u1[:,k])
             q = booster_pressure(x1[:,k])
 
-            diagnostics.add(phase1, f'Dynamic pressure k={k}', q/self.booster.FirstStage_MaxDynamicPressure <= 1.0,
+            diagnostics.add(phase1, f'Dynamic pressure k={k}', q/ascent_q_limit <= 1.0,
                             scale=self.booster.FirstStage_MaxDynamicPressure / 1000., unit='kPa')
             diagnostics.add(phase1, f'Absolute dynamic pressure × angle k={k}',
                             (uk[1] * q / self.booster.FirstStage_MaxQdynAlpha)**2 <= 1.0,
                             scale=self.booster.FirstStage_MaxQdynAlpha / 1000., unit='kPa·rad', squared=True)
             diagnostics.add(phase1, f'Payload acceleration k={k}',
-                            booster_acceleration(x1[:,k], u1[:,k])/self.booster.Payload_Max_acc <= 1.0,
+                            booster_acceleration(x1[:,k], u1[:,k])/payload_acc_limit <= 1.0,
                             scale=self.booster.Payload_Max_acc, unit='m/s²')
 
         # set the final state constraints    
         x1f = self.booster.unscale_x(x1[:,self.booster.N])
         q1f = booster_pressure(x1[:,self.booster.N])
         diagnostics.add(phase1, 'Separation dynamic pressure',
-                        q1f/self.booster.FirstStage_StageSeparationMaxDynamicPressure <= 1.0,
+                        q1f/separation_q_limit <= 1.0,
                         scale=self.booster.FirstStage_StageSeparationMaxDynamicPressure / 1000., unit='kPa')
         if RecoveryStrategy == 'EXP':
             diagnostics.add(phase1, 'Final mass lower bound',
@@ -815,7 +832,7 @@ class LV_Optimization(VLType):
 
         # set the final state constraints
         diagnostics.add(phase2, 'Fairing separation altitude',
-                        self.eci.eci_to_alt(self.eci.unscale_x(x2[:,self.eci.N[0]]))/self.eci.FairingSeparationAltitude >= 1.0,
+                        self.eci.eci_to_alt(self.eci.unscale_x(x2[:,self.eci.N[0]]))/fairing_altitude >= 1.0,
                         self.eci.FairingSeparationAltitude, 'm')
 
         ## phase 3 - Second Stage, after fairing separation
@@ -836,7 +853,7 @@ class LV_Optimization(VLType):
             diagnostics.add(phase3, f'Thrust norm upper bound k={k}', ca.norm_2(u3[:,k]) <= 1.0)
             diagnostics.add(phase3, f'Thrust norm lower bound k={k}', ca.norm_2(u3[:,k]) >= self.eci.SecondStage_MinThrust_Factor)
             diagnostics.add(phase3, f'Payload acceleration k={k}',
-                            second_stage_acceleration(x3[:,k], u3[:,k])/self.booster.Payload_Max_acc <= 1.0,
+                            second_stage_acceleration(x3[:,k], u3[:,k])/payload_acc_limit <= 1.0,
                             self.booster.Payload_Max_acc, 'm/s²')
 
         # Default: parking orbit plus a later-burn propellant reserve. Callers
@@ -970,7 +987,7 @@ class LV_Optimization(VLType):
             for i in range(N_before_landing_constraints):
                 x4_before_landing_intren = return_step(x4_before_landing_intren, 0, dt4_before_landing/N_before_landing_constraints, 1)
                 diagnostics.add(coast, f'Dynamic pressure sample={i+1}/{N_before_landing_constraints}',
-                                return_pressure(x4_before_landing_intren)/self.rocket_return.Booster_MaxDynamicPressure <= 1.0,
+                                return_pressure(x4_before_landing_intren)/return_q_limit <= 1.0,
                                 self.rocket_return.Booster_MaxDynamicPressure / 1000., 'kPa')
                 diagnostics.add(coast, f'Heat flux sample={i+1}/{N_before_landing_constraints}',
                                 return_heat(x4_before_landing_intren)/self.rocket_return.Booster_MaxHeatFlux <= 1.0,
@@ -997,7 +1014,7 @@ class LV_Optimization(VLType):
                 diagnostics.add(landing, f'Thrust factor lower bound k={k}',
                                 u4_landing[0,k] >= landing_thrust_min)
                 diagnostics.add(landing, f'Dynamic pressure k={k+1}',
-                                return_pressure(x4_landing[:,k+1])/self.rocket_return.Booster_MaxDynamicPressure <= 1.0,
+                                return_pressure(x4_landing[:,k+1])/return_q_limit <= 1.0,
                                 self.rocket_return.Booster_MaxDynamicPressure / 1000., 'kPa')
                 diagnostics.add(landing, f'Heat flux k={k+1}',
                                 return_heat(x4_landing[:,k+1])/self.rocket_return.Booster_MaxHeatFlux <= 1.0,

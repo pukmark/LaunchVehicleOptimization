@@ -111,7 +111,7 @@ def validate_steps(request, steps):
 
 
 def _dual_names(request, steps):
-    """Factors whose payload derivative is available from inequality multipliers."""
+    """Inputs whose payload derivative is available from constraint multipliers."""
     from LV_Optimization_Type import _ParameterBuffer
     return [name for name in steps if name in _ParameterBuffer.SUPPORTED]
 
@@ -127,8 +127,9 @@ def expected_sensitivity_evaluations(request, steps):
 def _multiplier_rows(request, steps, names, solution, payload, error, *, equalities=False):
     rows = []
     duals = (solution or {}).get('parameter_duals') or {}
+    values = parameter_values(request)
     for name in names:
-        row = dict(parameter=name, base=request['dispersion'][name], step=steps[name],
+        row = dict(parameter=name, base=values[name], step=steps[name],
                    minus_payload=None, plus_payload=None, derivative=None,
                    delta_payload=None, percent=None, status='Failed', errors={})
         record = duals.get(name)
