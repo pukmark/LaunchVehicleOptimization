@@ -110,6 +110,134 @@ def validate_steps(request, steps):
     return parsed
 
 
+def _dual_names(request, steps):
+    """Factors whose payload derivative is available from inequality multipliers."""
+    from LV_Optimization_Type import _ParameterBuffer
+    return [name for name in steps if name in _ParameterBuffer.SUPPORTED]
+
+
+def expected_sensitivity_evaluations(request, steps):
+    """Solves the sensitivity tab will run for this selection."""
+    request = sensitivity_request(request)
+    dual = _dual_names(request, steps)
+    central = len(steps) - len(dual)
+    return (1 if dual else 0) + ((1 + 2 * central) if central else 0)
+
+
+def _multiplier_rows(request, steps, names, solution, payload, error, *, equalities=False):
+    rows = []
+    duals = (solution or {}).get('parameter_duals') or {}
+    for name in names:
+        row = dict(parameter=name, base=request['dispersion'][name], step=steps[name],
+                   minus_payload=None, plus_payload=None, derivative=None,
+                   delta_payload=None, percent=None, status='Failed', errors={})
+        record = duals.get(name)
+        if error or payload is None or record is None:
+            row['errors']['multiplier'] = error or 'Solver did not return a multiplier'
+        else:
+            derivative = float(record['payload_sensitivity'])
+            delta = derivative * steps[name]
+            percent = 100 * delta / payload
+            if np.isfinite([derivative, delta, percent]).all():
+                row.update(derivative=derivative, delta_payload=delta, percent=percent,
+                           status='Equality multiplier' if equalities else 'Multiplier')
+                if equalities:
+                    row['equality_dual'] = float(record['equality_dual'])
+                else:
+                    row['upper_dual'] = float(record['upper_dual'])
+                    row['lower_dual'] = float(record['lower_dual'])
+            else:
+                row['errors']['multiplier'] = 'Nonfinite multiplier'
+        rows.append(row)
+    return rows
+
+
+def compute_reported_sensitivities(base_request, steps, *, solve=None, initial_solution=None,
+                                   checkpoint=None, cancel_callback=None, parameter_eps=1e-6,
+                                   recoveries=None, parameter_equalities=False):
+    """Sensitivities shown in the tab.
+
+    Every selected dispersion factor is read from one buffered solve. The sampled
+    button is the path that re-solves at plus and minus each step.
+    """
+    request = sensitivity_request(base_request)
+    steps = validate_steps(request, steps)
+    strategies = validate_recoveries(request, recoveries)
+    if len(strategies) > 1:
+        return _compute_recoveries(
+            request, steps, strategies, solve=solve, initial_solution=initial_solution,
+            checkpoint=checkpoint, cancel_callback=cancel_callback, parameter_eps=parameter_eps,
+            parameter_equalities=parameter_equalities,
+            run=compute_reported_sensitivities,
+            total_per_strategy=expected_sensitivity_evaluations(request, steps))
+    request['recovery'] = strategies[0]
+    dual = _dual_names(request, steps)
+    central = {name: steps[name] for name in steps if name not in dual}
+    if not dual:
+        return compute_sensitivities(request, central, solve=solve, initial_solution=initial_solution,
+                                     checkpoint=checkpoint, cancel_callback=cancel_callback,
+                                     recoveries=[strategies[0]])
+    solve = solve or _solve_candidate
+    report = dict(request=request, steps=steps, baseline=None, rows=[],
+                  evaluations=0, total=expected_sensitivity_evaluations(request, steps),
+                  termination='Running')
+
+    def publish():
+        if checkpoint:
+            checkpoint(deepcopy(report))
+
+    def stopped():
+        return cancel_callback is not None and cancel_callback()
+
+    if stopped():
+        report['termination'] = 'Cancelled'
+        publish()
+        return report
+    try:
+        solve_options = dict(lifted_parameters=list(dual), parameter_eps=parameter_eps)
+        if parameter_equalities:
+            solve_options['parameter_equalities'] = True
+        solution = solve(deepcopy(request), init_guess=deepcopy(initial_solution), **solve_options)
+        if not solution.get('success'):
+            solution, payload, error = None, None, str(solution.get('return_status', 'Solver did not converge'))
+        else:
+            payload = float(np.asarray(solution['payload_mass']).item())
+            error = None if np.isfinite(payload) and payload > 0 else 'Solver returned an invalid payload'
+            if error:
+                payload = None
+    except Exception as exc:
+        solution, payload, error = None, None, str(exc)
+    finally:
+        report['evaluations'] += 1
+    report['baseline'] = dict(payload=payload, error=error)
+    multiplier_rows = _multiplier_rows(request, steps, dual, solution, payload, error,
+                                      equalities=parameter_equalities)
+    report['rows'] = list(multiplier_rows)
+    publish()
+    if central and not stopped():
+        def central_checkpoint(central_report):
+            by_name = {row['parameter']: row for row in multiplier_rows + central_report['rows']}
+            report['rows'] = [by_name[name] for name in steps if name in by_name]
+            report['evaluations'] = 1 + central_report['evaluations']
+            report['termination'] = central_report['termination']
+            publish()
+
+        central_report = compute_sensitivities(
+            request, central, solve=solve,
+            initial_solution=solution if error is None else initial_solution,
+            checkpoint=central_checkpoint, cancel_callback=cancel_callback)
+        by_name = {row['parameter']: row for row in multiplier_rows + central_report['rows']}
+        report['rows'] = [by_name[name] for name in steps if name in by_name]
+        report['evaluations'] = 1 + central_report['evaluations']
+        if report['baseline'].get('payload') is None:
+            report['baseline'] = central_report['baseline']
+    report['termination'] = ('Cancelled; partial results' if stopped() else
+                             'Complete with failed parameters' if any(row['errors'] for row in report['rows']) else
+                             'Complete')
+    publish()
+    return report
+
+
 def compute_sensitivities(base_request, steps, *, solve=None, initial_solution=None,
                           checkpoint=None, cancel_callback=None, recoveries=None):
     """Hold all other settings fixed and estimate d(max payload)/d(parameter).
@@ -208,12 +336,15 @@ def compute_sensitivities(base_request, steps, *, solve=None, initial_solution=N
     return report
 
 
-def _compute_recoveries(request, steps, strategies, **options):
+def _compute_recoveries(request, steps, strategies, *, run=None, total_per_strategy=None, **options):
+    run = run or compute_sensitivities
+    if total_per_strategy is None:
+        total_per_strategy = 1 + 2 * len(steps)
     checkpoint = options.pop('checkpoint')
     cancel = options.get('cancel_callback')
     initial = options.pop('initial_solution')
     report = dict(request=request, steps=steps, recoveries=strategies, runs=[], rows=[],
-                  baseline=None, evaluations=0, total=len(strategies) * (1 + 2 * len(steps)),
+                  baseline=None, evaluations=0, total=len(strategies) * total_per_strategy,
                   termination='Running')
     for strategy in strategies:
         if cancel and cancel():
@@ -228,8 +359,8 @@ def _compute_recoveries(request, steps, strategies, **options):
             if checkpoint:
                 checkpoint(deepcopy(report))
 
-        compute_sensitivities(request, steps, recoveries=[strategy], checkpoint=publish,
-                              initial_solution=initial if strategy == request['recovery'] else None, **options)
+        run(request, steps, recoveries=[strategy], checkpoint=publish,
+            initial_solution=initial if strategy == request['recovery'] else None, **options)
     report['termination'] = ('Cancelled; partial results' if cancel and cancel() else
                              'Complete with failed strategies or parameters'
                              if any(run['termination'] != 'Complete' for run in report['runs']) else 'Complete')
@@ -267,8 +398,14 @@ def worker(directory):
         _atomic_json(directory / 'sensitivity_report.json', report)
         print(f"Sensitivity solve {report['evaluations']}/{report['total']} · {report['termination']}", flush=True)
 
-    compute_sensitivities(**settings, initial_solution=initial, checkpoint=checkpoint,
-                          cancel_callback=lambda: (directory / 'CANCEL').exists())
+    method = settings.pop('method', 'multipliers')
+    if method not in {'multipliers', 'equalities', 'samples'}:
+        raise ValueError(f'Unknown sensitivity method: {method}')
+    run = compute_sensitivities if method == 'samples' else compute_reported_sensitivities
+    if method == 'equalities':
+        settings['parameter_equalities'] = True
+    run(**settings, initial_solution=initial, checkpoint=checkpoint,
+        cancel_callback=lambda: (directory / 'CANCEL').exists())
 
 
 if __name__ == '__main__':

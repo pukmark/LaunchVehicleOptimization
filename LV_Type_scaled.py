@@ -126,13 +126,23 @@ class VLType(PythonMsg):
     dynamics_kp1: ca.Function = field(default=None)
     dynamics_isp: ca.Function = field(default=None)
     dynamics_kp1_isp: ca.Function = field(default=None)
+    dynamics_p: ca.Function = field(default=None)
+    dynamics_kp1_p: ca.Function = field(default=None)
+    specific_acc_p: ca.Function = field(default=None)
+    dynamic_pressure_p: ca.Function = field(default=None)
+    local_to_eci_p: ca.Function = field(default=None)
     dynamics_kp1_M50: ca.Function = field(default=None)
     dynamics_kp1_M20: ca.Function = field(default=None)
     dynamics_kp1_M10: ca.Function = field(default=None)
     landing_dynamics: ca.Function = field(default=None)
     landing_dynamics_kp1: ca.Function = field(default=None)
+    landing_dynamics_p: ca.Function = field(default=None)
+    landing_dynamics_kp1_p: ca.Function = field(default=None)
     landing_specific_acc_fun: ca.Function = field(default=None)
     landing_thrust_direction: ca.Function = field(default=None)
+    dynamics_kp1_M50_p: ca.Function = field(default=None)
+    dynamics_kp1_M20_p: ca.Function = field(default=None)
+    heat_flux_p: ca.Function = field(default=None)
     local_to_eci_func: ca.Function = field(default=None)
     specific_acc_fun: ca.Function = field(default=None)
     dynamic_pressure_fun: ca.Function = field(default=None)
@@ -451,18 +461,22 @@ class BoosterLaunchVehicle_2D(VLType):
         Tfac = sTfac * self.scaleU[0]
         alpha = salpha * self.scaleU[1]
 
+        # density, drag coefficient, thrust, and specific impulse, each 1 at the built vehicle.
+        booster_p = ca.MX.sym('booster_p', 4)
         Alt = self.local_to_alt(ca.vertcat(x, z, vx, vz, m))
-        rho = atmosphere.rho_fun(Alt) * ScenarioDispersion.AtmosphereDensity
+        rho = atmosphere.rho_fun(Alt) * ScenarioDispersion.AtmosphereDensity * booster_p[0]
         pres = atmosphere.p_fun(Alt)
         g = self.g0 * self.R0 ** 2 / (x**2 + (self.R0 + z) ** 2)
         g_angle = ca.asin(x / (self.R0 + z))
         v2 = vx**2 + vz**2
 
-        Drag = 0.5 * rho * v2 * self.Sref * (self.FirstStage_Cd0 + self.FirstStage_Cda2 * alpha ** 2)
+        Drag = 0.5 * rho * v2 * self.Sref * (self.FirstStage_Cd0 * booster_p[1] + self.FirstStage_Cda2 * alpha ** 2)
         Lift = 0.5 * rho * v2 * self.Sref * (self.FirstStage_CLa * alpha)
         gama_v = ca.atan2(vz, vx)
 
-        Thrust = Tfac * (self.FirstStage_Vac_Thrust - (self.FirstStage_Vac_Thrust - self.FirstStage_SL_Thrust) * pres / atmosphere.p_fun(0))
+        vac_thrust = self.FirstStage_Vac_Thrust * booster_p[2]
+        sl_thrust = self.FirstStage_SL_Thrust * booster_p[2]
+        Thrust = Tfac * (vac_thrust - (vac_thrust - sl_thrust) * pres / atmosphere.p_fun(0))
         Isp = (self.FirstStage_Vac_Isp - (self.FirstStage_Vac_Isp - self.FirstStage_SL_Isp) * pres / atmosphere.p_fun(0)) * (1.0 - (1.0 - self.FirstStage_MinThrust_IspFactor) * (1.0 - Tfac) / (1.0 - self.FirstStage_MinThrust_Factor))
 
         Fx = -Drag * ca.cos(gama_v) - Lift * ca.sin(gama_v) + Thrust * ca.cos(alpha + gama_v)
@@ -474,7 +488,7 @@ class BoosterLaunchVehicle_2D(VLType):
         dvz = Fz / m - g * ca.cos(g_angle)
         # dm = -Thrust / (Isp * self.g0)
         # dm = -self.FirstStage_Vac_Thrust / (self.FirstStage_Vac_Isp * self.g0) * Tfac / (1.0 - (1.0 - self.FirstStage_MinThrust_IspFactor) * (1.0 - Tfac) / (1.0 - self.FirstStage_MinThrust_Factor))
-        dm = -self.FirstStage_Vac_Thrust / (self.FirstStage_Vac_Isp * self.g0) * Tfac 
+        dm = -vac_thrust / (self.FirstStage_Vac_Isp * booster_p[3] * self.g0) * Tfac
 
         dqdt_scaled = ca.vertcat(dx / self.scaleX[0], dz / self.scaleX[1],
             dvx / self.scaleX[2], dvz / self.scaleX[3],
@@ -482,12 +496,22 @@ class BoosterLaunchVehicle_2D(VLType):
 
         sym_sx = ca.vertcat(sx, sz, svx, svz, sm)
         sym_su = ca.vertcat(sTfac, salpha)
-        self.dynamics = ca.Function('dynamics_scaled', [sym_sx, sym_su], [dqdt_scaled])
-        self.dynamics_kp1 = ca.Function('dynamics_kp1_scaled', [sym_sx, sym_su, sdt], [self.RK4(self.dynamics, sym_sx, sym_su, sdt)])
-        self.ISP_calc = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [Isp])
-        self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [ca.sqrt(Fx**2+Fz**2)/m])
-        self.dynamic_pressure_fun = ca.Function('dynamic_pressure_scaled', [sym_sx], [0.5 * rho * v2])
-        self.heat_flux_fun = ca.Function('heat_flux_scaled', [sym_sx], [self.Booster_k_empirical * ca.sqrt(rho) * v2**1.5 ])
+        nominal_p = ca.DM.ones(4)
+        self.dynamics_p = ca.Function('dynamics_scaled_p', [sym_sx, sym_su, booster_p], [dqdt_scaled])
+        booster_step = self.RK4(lambda state, control: self.dynamics_p(state, control, booster_p), sym_sx, sym_su, sdt)
+        self.dynamics_kp1_p = ca.Function('dynamics_kp1_scaled_p', [sym_sx, sym_su, sdt, booster_p], [booster_step])
+        self.dynamics = ca.Function('dynamics_scaled', [sym_sx, sym_su], [self.dynamics_p(sym_sx, sym_su, nominal_p)])
+        self.dynamics_kp1 = ca.Function('dynamics_kp1_scaled', [sym_sx, sym_su, sdt],
+                                       [self.dynamics_kp1_p(sym_sx, sym_su, sdt, nominal_p)])
+        self.ISP_calc = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [ca.substitute(Isp, booster_p, nominal_p)])
+        self.specific_acc_p = ca.Function('specific_acc_p', [sym_sx, sym_su, booster_p], [ca.sqrt(Fx**2+Fz**2)/m])
+        self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su],
+                                           [self.specific_acc_p(sym_sx, sym_su, nominal_p)])
+        self.dynamic_pressure_p = ca.Function('dynamic_pressure_p', [sym_sx, booster_p], [0.5 * rho * v2])
+        self.dynamic_pressure_fun = ca.Function('dynamic_pressure_scaled', [sym_sx],
+                                               [self.dynamic_pressure_p(sym_sx, nominal_p)])
+        self.heat_flux_fun = ca.Function('heat_flux_scaled', [sym_sx],
+                                        [ca.substitute(self.Booster_k_empirical * ca.sqrt(rho) * v2**1.5, booster_p, nominal_p)])
 
 @dataclass
 class LaunchVehicle_ECI(VLType):
@@ -539,14 +563,16 @@ class LaunchVehicle_ECI(VLType):
                     * (ca.norm_2(sym_u) - self.SecondStage_MinThrust_Factor)
                     / (1.0 - self.SecondStage_MinThrust_Factor))
 
-        def rates(isp):
+        thrust_sym = ca.MX.sym('second_stage_thrust_scale')
+
+        def rates(isp, thrust_scale):
             dx = vx
             dy = vy
             dz = vz
-            dvx = fx / m - g * x / ca.sqrt(x**2 + y**2 + z**2)
-            dvy = fy / m - g * y / ca.sqrt(x**2 + y**2 + z**2)
-            dvz = fz / m - g * z / ca.sqrt(x**2 + y**2 + z**2)
-            dm = -ca.sqrt(fx**2 + fy**2 + fz**2) / (isp * efficiency * self.g0)
+            dvx = thrust_scale * fx / m - g * x / ca.sqrt(x**2 + y**2 + z**2)
+            dvy = thrust_scale * fy / m - g * y / ca.sqrt(x**2 + y**2 + z**2)
+            dvz = thrust_scale * fz / m - g * z / ca.sqrt(x**2 + y**2 + z**2)
+            dm = -thrust_scale * ca.sqrt(fx**2 + fy**2 + fz**2) / (isp * efficiency * self.g0)
             return ca.vertcat(dx / self.scaleX[0], dy / self.scaleX[1],
                 dz / self.scaleX[2], dvx / self.scaleX[3],
                 dvy / self.scaleX[4], dvz / self.scaleX[5],
@@ -554,18 +580,25 @@ class LaunchVehicle_ECI(VLType):
 
         sym_sx = ca.vertcat(sx, sy, sz, svx, svy, svz, sm)
         sym_su = ca.vertcat(sfx, sfy, sfz)
-        self.dynamics_isp = ca.Function('dynamics_eci_isp', [sym_sx, sym_su, isp_sym], [rates(isp_sym)])
-        isp_step = self.RK4(lambda state, control: self.dynamics_isp(state, control, isp_sym),
+        self.dynamics_p = ca.Function('dynamics_eci_p', [sym_sx, sym_su, isp_sym, thrust_sym],
+                                     [rates(isp_sym, thrust_sym)])
+        isp_step = self.RK4(lambda state, control: self.dynamics_p(state, control, isp_sym, thrust_sym),
                             sym_sx, sym_su, sdt)
+        self.dynamics_kp1_p = ca.Function(
+            'dynamics_eci_kp1_p', [sym_sx, sym_su, sdt, isp_sym, thrust_sym], [isp_step])
         self.dynamics_kp1_isp = ca.Function(
-            'dynamics_eci_kp1_isp', [sym_sx, sym_su, sdt, isp_sym], [isp_step])
+            'dynamics_eci_kp1_isp', [sym_sx, sym_su, sdt, isp_sym],
+            [self.dynamics_kp1_p(sym_sx, sym_su, sdt, isp_sym, 1)])
         isp_nominal = float(self.SecondStage_Vac_Isp)
         self.dynamics = ca.Function('dynamics_eci_scaled', [sym_sx, sym_su],
-                                   [self.dynamics_isp(sym_sx, sym_su, isp_nominal)])
+                                   [self.dynamics_p(sym_sx, sym_su, isp_nominal, 1)])
         self.dynamics_kp1 = ca.Function('dynamics_eci_kp1_scaled', [sym_sx, sym_su, sdt],
-                                       [self.dynamics_kp1_isp(sym_sx, sym_su, sdt, isp_nominal)])
+                                       [self.dynamics_kp1_p(sym_sx, sym_su, sdt, isp_nominal, 1)])
         self.ISP_calc = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [isp_nominal * efficiency])
-        self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [ca.sqrt(fx**2+fy**2+fz**2)/m])
+        self.specific_acc_p = ca.Function('specific_acc_eci_p', [sym_sx, sym_su, thrust_sym],
+                                         [thrust_sym * ca.sqrt(fx**2+fy**2+fz**2)/m])
+        self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su],
+                                           [self.specific_acc_p(sym_sx, sym_su, 1)])
 # You can instantiate either class directly for use in your scaled optimization pipeline.
         self.local_to_eci()
     
@@ -590,7 +623,8 @@ class LaunchVehicle_ECI(VLType):
 
         eci_origin =  ca.vertcat(x, y, z)
         # local origin velocity
-        launch_radius = R + self.LaunchAltitude
+        launch_alt = ca.MX.sym('launch_alt')
+        launch_radius = R + launch_alt
         v_x = -self.omega_earth * launch_radius * ca.cos(lat) * ca.sin(lon)
         v_y = self.omega_earth * launch_radius * ca.cos(lat) * ca.cos(lon)
         v_z = 0.0
@@ -623,7 +657,9 @@ class LaunchVehicle_ECI(VLType):
         pos_eci = eci_origin + local_pos_eci
         vel_eci = origin_vel_eci + local_vel_eci
 
-        self.local_to_eci_func = ca.Function('local_to_eci', [local_pos_m, local_vel_mps, az], [pos_eci, vel_eci])
+        self.local_to_eci_p = ca.Function('local_to_eci_p', [local_pos_m, local_vel_mps, az, launch_alt], [pos_eci, vel_eci])
+        pos_nominal, vel_nominal = self.local_to_eci_p(local_pos_m, local_vel_mps, az, self.LaunchAltitude)
+        self.local_to_eci_func = ca.Function('local_to_eci', [local_pos_m, local_vel_mps, az], [pos_nominal, vel_nominal])
 
     def local_to_eci_calc(self, p, v, az):
         return self.local_to_eci_func(p, v, az)
@@ -667,19 +703,21 @@ class BoosterReturn_2D(VLType):
         vx = svx * self.scaleX[2]
         vz = svz * self.scaleX[3]
         m = sm * self.scaleX[4]
-        Thrust = sTfac * self.scaleU[0]
+        # density, booster drag, thrust, and specific impulse, each 1 at the built vehicle.
+        return_p = ca.MX.sym('return_p', 4)
+        Thrust = sTfac * self.scaleU[0] * return_p[2]
 
         Alt = ca.norm_2(ca.vertcat(x, self.R0 + z)) - self.R0
-        rho = atmosphere.rho_fun(Alt) * ScenarioDispersion.AtmosphereDensity
+        rho = atmosphere.rho_fun(Alt) * ScenarioDispersion.AtmosphereDensity * return_p[0]
         g = self.g0 * self.R0**2 / (x**2 + (self.R0 + z)**2)
         g_angle = ca.asin(x / (self.R0 + z))
         # A 1 mm/s speed floor keeps coast/reentry derivatives finite at rest.
         # Landing thrust has its own independent direction below.
         speed = ca.sqrt(vx**2 + vz**2 + 1e-6)
-        drag_coefficient = 0.5 * rho * self.Sref * self.Booster_Cd0
+        drag_coefficient = 0.5 * rho * self.Sref * self.Booster_Cd0 * return_p[1]
         Fx = -drag_coefficient * speed * vx - Thrust * vx / speed
         Fz = -drag_coefficient * speed * vz - Thrust * vz / speed
-        Isp = self.FirstStage_SL_Isp
+        Isp = self.FirstStage_SL_Isp * return_p[3]
 
         dx = vx
         dz = vz
@@ -696,19 +734,41 @@ class BoosterReturn_2D(VLType):
 
         sym_sx = ca.vertcat(sx, sz, svx, svz, sm)
         sym_su = ca.vertcat(sTfac)
-        self.dynamics = ca.Function('dynamics_return_scaled', [sym_sx, sym_su], [dqdt_scaled])
-        self.dynamics_kp1 = ca.Function('dynamics_return_kp1', [sym_sx, sym_su, sdt], [self.RK4(self.dynamics, sym_sx, sym_su, sdt)])
-        self.dynamics_kp1_M50 = ca.Function('dynamics_return_kp1_M50', [sym_sx, sym_su, sdt], [self.RK4(self.dynamics, sym_sx, sym_su, sdt, 50)])
-        self.dynamics_kp1_M20 = ca.Function('dynamics_return_kp1_M20', [sym_sx, sym_su, sdt], [self.RK4(self.dynamics, sym_sx, sym_su, sdt, 20)])
-        self.dynamics_kp1_M10 = ca.Function('dynamics_return_kp1_M10', [sym_sx, sym_su, sdt], [self.RK4(self.dynamics, sym_sx, sym_su, sdt, 10)])
-        self.ISP_calc = ca.Function('Isp_return_scaled', [sym_sx, sym_su], [Isp])
-        self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [ca.sqrt(Fx**2+Fz**2)/m])
-        self.dynamic_pressure_fun = ca.Function('dynamic_pressure_scaled', [sym_sx], [0.5 * rho * (vx**2 + vz**2)])
+        nominal_p = ca.DM.ones(4)
+        self.dynamics_p = ca.Function('dynamics_return_p', [sym_sx, sym_su, return_p], [dqdt_scaled])
+
+        def return_step(substeps):
+            step = self.RK4(lambda state, control: self.dynamics_p(state, control, return_p),
+                            sym_sx, sym_su, sdt, substeps)
+            return ca.Function('dynamics_return_step', [sym_sx, sym_su, sdt, return_p], [step])
+
+        self.dynamics_kp1_p = return_step(1)
+        self.dynamics_kp1_M50_p = return_step(50)
+        self.dynamics_kp1_M20_p = return_step(20)
+        self.dynamics = ca.Function('dynamics_return_scaled', [sym_sx, sym_su],
+                                   [self.dynamics_p(sym_sx, sym_su, nominal_p)])
+        self.dynamics_kp1 = ca.Function('dynamics_return_kp1', [sym_sx, sym_su, sdt],
+                                       [self.dynamics_kp1_p(sym_sx, sym_su, sdt, nominal_p)])
+        self.dynamics_kp1_M50 = ca.Function('dynamics_return_kp1_M50', [sym_sx, sym_su, sdt],
+                                           [self.dynamics_kp1_M50_p(sym_sx, sym_su, sdt, nominal_p)])
+        self.dynamics_kp1_M20 = ca.Function('dynamics_return_kp1_M20', [sym_sx, sym_su, sdt],
+                                           [self.dynamics_kp1_M20_p(sym_sx, sym_su, sdt, nominal_p)])
+        self.dynamics_kp1_M10 = ca.Function('dynamics_return_kp1_M10', [sym_sx, sym_su, sdt],
+                                           [return_step(10)(sym_sx, sym_su, sdt, nominal_p)])
+        self.ISP_calc = ca.Function('Isp_return_scaled', [sym_sx, sym_su],
+                                   [ca.substitute(Isp, return_p, nominal_p)])
+        self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su],
+                                           [ca.substitute(ca.sqrt(Fx**2+Fz**2)/m, return_p, nominal_p)])
+        self.dynamic_pressure_p = ca.Function('dynamic_pressure_return_p', [sym_sx, return_p],
+                                             [0.5 * rho * (vx**2 + vz**2)])
+        self.dynamic_pressure_fun = ca.Function('dynamic_pressure_scaled', [sym_sx],
+                                               [self.dynamic_pressure_p(sym_sx, nominal_p)])
+        self.heat_flux_p = ca.Function('heat_flux_return_p', [sym_sx, return_p],
+                                      [self.Booster_k_empirical * ca.sqrt(rho) * (speed**3 - 1e-9)])
         self.heat_flux_fun = ca.Function('heat_flux_scaled', [sym_sx],
-                                         [self.Booster_k_empirical * ca.sqrt(rho) * (speed**3 - 1e-9)])
+                                        [self.heat_flux_p(sym_sx, nominal_p)])
 
         # Angle is radians from the current radial vertical, positive downrange.
-        # Throttle retains exactly the reentry model's force and mass-flow scale.
         landing_angle = ca.MX.sym('landing_angle')
         landing_control = ca.vertcat(sTfac, landing_angle)
         radial_vertical = ca.atan2(x, self.R0 + z)
@@ -719,12 +779,19 @@ class BoosterReturn_2D(VLType):
             (landing_force[0] / m - g * ca.sin(g_angle)) / self.scaleX[2],
             (landing_force[1] / m - g * ca.cos(g_angle)) / self.scaleX[3],
             dm / self.scaleX[4]) * self.scaleT
-        self.landing_dynamics = ca.Function('landing_dynamics', [sym_sx, landing_control], [landing_rate])
+        self.landing_dynamics_p = ca.Function('landing_dynamics_p',
+                                              [sym_sx, landing_control, return_p], [landing_rate])
+        self.landing_dynamics_kp1_p = ca.Function('landing_step_p',
+                                                  [sym_sx, landing_control, sdt, return_p],
+                                                  [self.RK4(lambda state, control: self.landing_dynamics_p(state, control, return_p),
+                                                            sym_sx, landing_control, sdt)])
+        self.landing_dynamics = ca.Function('landing_dynamics', [sym_sx, landing_control],
+                                             [self.landing_dynamics_p(sym_sx, landing_control, nominal_p)])
         self.landing_dynamics_kp1 = ca.Function('landing_step', [sym_sx, landing_control, sdt],
-                                              [self.RK4(self.landing_dynamics, sym_sx, landing_control, sdt)])
+                                                 [self.landing_dynamics_kp1_p(sym_sx, landing_control, sdt, nominal_p)])
         self.landing_thrust_direction = ca.Function('landing_direction', [sym_sx, landing_angle], [direction])
         self.landing_specific_acc_fun = ca.Function('landing_acceleration', [sym_sx, landing_control],
-                                                   [ca.norm_2(landing_force) / m])
+                                                     [ca.substitute(ca.norm_2(landing_force) / m, return_p, nominal_p)])
 
 @dataclass
 class BoostBackBurn_2D(VLType):
@@ -758,12 +825,13 @@ class BoostBackBurn_2D(VLType):
         vx = svx * self.scaleX[2]
         vz = svz * self.scaleX[3]
         m = sm * self.scaleX[4]
-        Tx = sTx * self.scaleU[0]
-        Tz = sTz * self.scaleU[1]
+        boost_p = ca.MX.sym('boost_p', 2)
+        Tx = sTx * self.scaleU[0] * boost_p[0]
+        Tz = sTz * self.scaleU[1] * boost_p[0]
 
         g = self.g0 * self.R0**2 / (x**2 + (self.R0 + z)**2)
         g_angle = ca.asin(x / (self.R0 + z))
-        Isp = self.FirstStage_Vac_Isp
+        Isp = self.FirstStage_Vac_Isp * boost_p[1]
 
         dx = vx
         dz = vz
@@ -780,8 +848,21 @@ class BoostBackBurn_2D(VLType):
 
         sym_sx = ca.vertcat(sx, sz, svx, svz, sm)
         sym_su = ca.vertcat(sTx, sTz)
-        self.dynamics = ca.Function('dynamics_boostback_scaled', [sym_sx, sym_su], [dqdt_scaled])
-        self.dynamics_kp1 = ca.Function('dynamics_boostback_kp1', [sym_sx, sym_su, sdt], [self.RK4(self.dynamics, sym_sx, sym_su, sdt)])
-        self.dynamics_kp1_M20 = ca.Function('dynamics_boostback_kp1_M20', [sym_sx, sym_su, sdt], [self.RK4(self.dynamics, sym_sx, sym_su, sdt, 20)])
-        self.ISP_calc = ca.Function('Isp_boostback_scaled', [sym_sx, sym_su], [Isp])
-        self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su], [ca.sqrt(Tx**2+Tz**2)/m])
+        nominal_p = ca.DM.ones(2)
+        self.dynamics_p = ca.Function('dynamics_boostback_p', [sym_sx, sym_su, boost_p], [dqdt_scaled])
+        self.dynamics_kp1_p = ca.Function(
+            'dynamics_boostback_kp1_p', [sym_sx, sym_su, sdt, boost_p],
+            [self.RK4(lambda state, control: self.dynamics_p(state, control, boost_p), sym_sx, sym_su, sdt)])
+        self.dynamics_kp1_M20_p = ca.Function(
+            'dynamics_boostback_kp1_M20_p', [sym_sx, sym_su, sdt, boost_p],
+            [self.RK4(lambda state, control: self.dynamics_p(state, control, boost_p), sym_sx, sym_su, sdt, 20)])
+        self.dynamics = ca.Function('dynamics_boostback_scaled', [sym_sx, sym_su],
+                                   [self.dynamics_p(sym_sx, sym_su, nominal_p)])
+        self.dynamics_kp1 = ca.Function('dynamics_boostback_kp1', [sym_sx, sym_su, sdt],
+                                       [self.dynamics_kp1_p(sym_sx, sym_su, sdt, nominal_p)])
+        self.dynamics_kp1_M20 = ca.Function('dynamics_boostback_kp1_M20', [sym_sx, sym_su, sdt],
+                                           [self.dynamics_kp1_M20_p(sym_sx, sym_su, sdt, nominal_p)])
+        self.ISP_calc = ca.Function('Isp_boostback_scaled', [sym_sx, sym_su],
+                                   [ca.substitute(Isp, boost_p, nominal_p)])
+        self.specific_acc_fun = ca.Function('Isp_calc_scaled', [sym_sx, sym_su],
+                                           [ca.substitute(ca.sqrt(Tx**2+Tz**2)/m, boost_p, nominal_p)])

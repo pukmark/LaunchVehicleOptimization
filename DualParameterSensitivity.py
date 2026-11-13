@@ -28,12 +28,14 @@ def comparison_request():
     model = VLType()
     model.ApplyVehicleConfiguration(1)
     steps = {
-        'SecondStageIsp': 0.01,
-        'FirstStageIsp': 0.01,
+        'SecondStageIsp': 0.01, 'FirstStageIsp': 0.01,
+        'FirstStageThrust': 0.01, 'SecondStageThrust': 0.01,
+        'FirstStageCx0': 0.01, 'BoosterStageCx0': 0.01, 'AtmosphereDensity': 0.01,
         'SecondStage_EmptyMass': 0.01 * model.EmptySecondStageMass,
         'FirstStage_EmptyMass': 0.01 * model.EmptyFirstStageMass,
         'SecondStage_PropMass': 0.01 * model.SecondStagePropellentMass,
         'FirstStage_PropMass': 0.01 * model.FirstStagePropellentMass,
+        'LaunchAltDelta': 100., 'StagePartitionDelta': 0.001,
     }
     return {
         'launch_site': parse_launch_site(None),

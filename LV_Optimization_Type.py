@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from copy import deepcopy
 import hashlib
 import json
@@ -454,71 +454,93 @@ class _ParameterBuffer:
     """Pin selected dispersion factors with a two-sided inequality buffer.
     """
 
-    MASS_CHANNELS = {
-        'SecondStage_EmptyMass': ('stack', 'second_full', 'second_empty'),
-        'SecondStage_PropMass': ('stack', 'second_full'),
-        'FirstStage_EmptyMass': ('stack', 'first_empty'),
-        'FirstStage_PropMass': ('stack',),
-    }
-    SUPPORTED = set(MASS_CHANNELS) | {'SecondStageIsp'}
-    # Held-fixed contribution of the factor to (final mass - reserve), in kg.
-    PERFORMANCE_OFFSET = {'SecondStage_EmptyMass': 1.0}
+    SUPPORTED = {item.name for item in fields(LV_Type.DispesrionFactorsType)}
+    MULTIPLIERS = {'FirstStageIsp', 'SecondStageIsp', 'FirstStageThrust', 'SecondStageThrust',
+                   'FirstStageCx0', 'BoosterStageCx0', 'AtmosphereDensity'}
 
-    def __init__(self, opti, dispersion, names, eps):
+    def __init__(self, opti, dispersion, names, eps, equalities=False):
         self.opti = opti
         self.rows = {}
         self.physical_isp = None
+        self.equalities = bool(equalities)
         names = list(names or [])
         unknown = [name for name in names if name not in self.SUPPORTED]
         if unknown:
-            raise ValueError(f'Parameter inequalities are not implemented for: {", ".join(unknown)}')
-        if names and (not np.isfinite(eps) or eps <= 0):
+            raise ValueError(f'Unknown dispersion factor: {", ".join(unknown)}')
+        if names and not self.equalities and (not np.isfinite(eps) or eps <= 0):
             raise ValueError('parameter_eps must be positive and finite.')
         self.eps = float(eps)
         for name in names:
             nominal = float(getattr(dispersion, name))
             if not np.isfinite(nominal):
                 raise ValueError(f'Invalid nominal value for {name}.')
-            if name == 'SecondStageIsp' and nominal <= 0:
-                raise ValueError('SecondStageIsp nominal must be positive.')
+            if name in self.MULTIPLIERS and nominal <= 0:
+                raise ValueError(f'{name} nominal must be positive.')
             variable = opti.variable()
-            upper = variable <= nominal + self.eps
-            lower = variable >= nominal - self.eps
-            opti.subject_to(upper)
-            opti.subject_to(lower)
+            index = int(opti.ng)
+            if self.equalities:
+                equality = variable == nominal
+                opti.subject_to(equality)
+                upper = lower = None
+            else:
+                equality = None
+                upper = variable <= nominal + self.eps
+                lower = variable >= nominal - self.eps
+                opti.subject_to(upper)
+                opti.subject_to(lower)
             opti.set_initial(variable, nominal)
             self.rows[name] = {'variable': variable, 'upper': upper, 'lower': lower,
-                               'nominal': nominal,
-                               'performance_offset': self.PERFORMANCE_OFFSET.get(name, 0.0)}
+                               'equality': equality, 'index': index, 'nominal': nominal}
 
     @property
     def active(self):
         return bool(self.rows)
 
-    def _delta(self, name):
+    def factor(self, dispersion, name):
         row = self.rows.get(name)
         if row is None:
-            return 0.0
-        return row['variable'] - row['nominal']
+            return float(getattr(dispersion, name))
+        return row['variable']
 
-    def _channel(self, channel):
-        total = 0.0
-        for name, channels in self.MASS_CHANNELS.items():
-            if channel in channels:
-                total = total + self._delta(name)
-        return total
+    def scale(self, name):
+        """Multiplier relative to the value already stored on the vehicle."""
+        row = self.rows.get(name)
+        if row is None:
+            return 1.0
+        return row['variable'] / row['nominal']
 
-    def stack_delta(self):
-        return self._channel('stack')
+    def masses(self, configuration, dispersion):
+        """Stack and stage masses from the same dispersion rules as the vehicle builder."""
+        base = LV_Type.VLType()
+        base.ApplyVehicleConfiguration(configuration)
+        ratio2 = base.EmptySecondStageMass / base.SecondStagePropellentMass
+        total = base.FirstStagePropellentMass + base.SecondStagePropellentMass
+        partition = base.FirstStagePropellentMass / total + self.factor(dispersion, 'StagePartitionDelta')
+        prop1 = partition * total + self.factor(dispersion, 'FirstStage_PropMass')
+        prop2 = (1 - partition) * total + self.factor(dispersion, 'SecondStage_PropMass')
+        empty1 = (base.EmptyFirstStageMass / base.FirstStagePropellentMass) * partition * total
+        empty1 = empty1 + self.factor(dispersion, 'FirstStage_EmptyMass')
+        empty2 = ratio2 * (1 - partition) * total + self.factor(dispersion, 'SecondStage_EmptyMass')
+        return {'stack': empty1 + empty2 + prop1 + prop2 + base.FairingMass,
+                'second_full': empty2 + prop2 + base.FairingMass,
+                'second_empty': empty2,
+                'first_empty': empty1}
 
-    def second_full_delta(self):
-        return self._channel('second_full')
+    def launch_altitude(self, dispersed_altitude, dispersion):
+        if 'LaunchAltDelta' not in self.rows:
+            return dispersed_altitude
+        return dispersed_altitude - float(dispersion.LaunchAltDelta) + self.rows['LaunchAltDelta']['variable']
 
-    def second_empty_delta(self):
-        return self._channel('second_empty')
+    def booster_parameters(self):
+        return ca.vertcat(self.scale('AtmosphereDensity'), self.scale('FirstStageCx0'),
+                          self.scale('FirstStageThrust'), self.scale('FirstStageIsp'))
 
-    def first_empty_delta(self):
-        return self._channel('first_empty')
+    def return_parameters(self):
+        return ca.vertcat(self.scale('AtmosphereDensity'), self.scale('BoosterStageCx0'),
+                          self.scale('FirstStageThrust'), self.scale('FirstStageIsp'))
+
+    def boostback_parameters(self):
+        return ca.vertcat(self.scale('FirstStageThrust'), self.scale('FirstStageIsp'))
 
     def bind_second_stage_isp(self, vacuum_isp):
         """Physical vacuum specific impulse, with the multiplier free inside the buffer."""
@@ -530,21 +552,28 @@ class _ParameterBuffer:
         return self.physical_isp
 
     def evaluate(self, value):
-        """Map a CasADi value function to dual sensitivities of the maximized performance."""
+        """Map constraint duals to sensitivities of the directly maximized payload."""
         report = {}
         for name, row in self.rows.items():
-            upper = float(value(self.opti.dual(row['upper'])))
-            lower = float(value(self.opti.dual(row['lower'])))
-            sensitivity = upper - lower
+            if row['equality'] is not None:
+                lam = value(self.opti.lam_g)
+                multiplier = float(lam[row['index']])
+                upper = lower = None
+                sensitivity = multiplier
+            else:
+                upper = float(value(self.opti.dual(row['upper'])))
+                lower = float(value(self.opti.dual(row['lower'])))
+                multiplier = None
+                sensitivity = upper - lower
             report[name] = {
                 'nominal': row['nominal'],
                 'value': float(value(row['variable'])),
                 'eps': self.eps,
                 'upper_dual': upper,
                 'lower_dual': lower,
+                'equality_dual': multiplier,
                 'dual_sensitivity': sensitivity,
-                'performance_offset': row['performance_offset'],
-                'payload_sensitivity': sensitivity - row['performance_offset'],
+                'payload_sensitivity': sensitivity,
             }
         return report
 
@@ -577,11 +606,10 @@ class LV_Optimization(VLType):
                          output_dir = 'Results',
                          initial_guess_diagnostics: bool = True,
                          lifted_parameters=None,
-                         parameter_eps: float = 1e-6):
+                         parameter_eps: float = 1e-6,
+                         parameter_equalities: bool = False):
         if RecoveryStrategy not in {'EXP', 'ASDS', 'RTLS'}:
             raise ValueError(f'Unknown recovery strategy: {RecoveryStrategy}')
-        if lifted_parameters and RecoveryStrategy != 'EXP':
-            raise ValueError('Parameter inequalities are implemented for EXP recovery.')
         if init_guess is None:
             init_guess = 0.5
         elif isinstance(init_guess, dict):
@@ -608,7 +636,8 @@ class LV_Optimization(VLType):
 
         # define the optimization problem
         opti = ca.Opti()
-        lifted = _ParameterBuffer(opti, self.ScenarioDispersion, lifted_parameters, parameter_eps)
+        lifted = _ParameterBuffer(opti, self.ScenarioDispersion, lifted_parameters, parameter_eps,
+                                  equalities=parameter_equalities)
         lifted.bind_second_stage_isp(self.eci.SecondStage_Vac_Isp)
         diagnostics = InitialGuessConstraintDiagnostics(opti, enabled=initial_guess_diagnostics)
         local_components = ('x', 'z', 'vx', 'vz', 'mass')
@@ -638,24 +667,81 @@ class LV_Optimization(VLType):
         LaunchAz = opti.variable(1)
 
         payload_mass = payload_mass_scaled * self.booster.scaleX[4]
-        stack_mass = self.booster.LV_total_mass + lifted.stack_delta()
-        second_full = self.eci.SecondStage_FullMass + lifted.second_full_delta()
-        second_empty = self.eci.SecondStage_EmptyMass + lifted.second_empty_delta()
-        first_empty = self.eci.EmptyFirstStageMass + lifted.first_empty_delta()
+        if lifted.active:
+            dispersed = lifted.masses(self.LV_Configuration, self.ScenarioDispersion)
+            stack_mass = dispersed['stack']
+            second_full = dispersed['second_full']
+            second_empty = dispersed['second_empty']
+            first_empty = dispersed['first_empty']
+        else:
+            stack_mass = self.booster.LV_total_mass
+            second_full = self.eci.SecondStage_FullMass
+            second_empty = self.eci.SecondStage_EmptyMass
+            first_empty = self.eci.EmptyFirstStageMass
+        launch_altitude = lifted.launch_altitude(self.booster.LaunchAltitude, self.ScenarioDispersion)
+        sl_thrust = self.booster.FirstStage_SL_Thrust * lifted.scale('FirstStageThrust')
+        sl_isp = self.booster.FirstStage_SL_Isp * lifted.scale('FirstStageIsp')
+        booster_parameters = lifted.booster_parameters()
+        second_stage_thrust = lifted.scale('SecondStageThrust')
 
         def eci_step(state, control, step):
-            if lifted.physical_isp is None:
+            if not lifted.active:
                 return self.eci.dynamics_kp1(state, control, step)
-            return self.eci.dynamics_kp1_isp(state, control, step, lifted.physical_isp)
+            isp = self.eci.SecondStage_Vac_Isp if lifted.physical_isp is None else lifted.physical_isp
+            return self.eci.dynamics_kp1_p(state, control, step, isp, second_stage_thrust)
+
+        def booster_step(state, control, step):
+            if not lifted.active:
+                return self.booster.dynamics_kp1(state, control, step)
+            return self.booster.dynamics_kp1_p(state, control, step, booster_parameters)
+
+        def booster_pressure(state):
+            if not lifted.active:
+                return self.booster.dynamic_pressure_fun(state)
+            return self.booster.dynamic_pressure_p(state, booster_parameters)
+
+        def booster_acceleration(state, control):
+            if not lifted.active:
+                return self.booster.specific_acc_fun(state, control)
+            return self.booster.specific_acc_p(state, control, booster_parameters)
+
+        def second_stage_acceleration(state, control):
+            if not lifted.active:
+                return self.eci.specific_acc_fun(state, control)
+            return self.eci.specific_acc_p(state, control, second_stage_thrust)
+
+        def return_step(state, control, step, substeps):
+            if not lifted.active:
+                if substeps == 50:
+                    return self.rocket_return.dynamics_kp1_M50(state, control, step)
+                if substeps == 20:
+                    return self.rocket_return.dynamics_kp1_M20(state, control, step)
+                return self.rocket_return.dynamics_kp1(state, control, step)
+            parameters = lifted.return_parameters()
+            if substeps == 50:
+                return self.rocket_return.dynamics_kp1_M50_p(state, control, step, parameters)
+            if substeps == 20:
+                return self.rocket_return.dynamics_kp1_M20_p(state, control, step, parameters)
+            return self.rocket_return.dynamics_kp1_p(state, control, step, parameters)
+
+        def return_pressure(state):
+            if not lifted.active:
+                return self.rocket_return.dynamic_pressure_fun(state)
+            return self.rocket_return.dynamic_pressure_p(state, lifted.return_parameters())
+
+        def return_heat(state):
+            if not lifted.active:
+                return self.rocket_return.heat_flux_fun(state)
+            return self.rocket_return.heat_flux_p(state, lifted.return_parameters())
 
         # Set the initial state
         init_time = 5.0
-        init_acc = self.booster.FirstStage_SL_Thrust / (stack_mass + payload_mass) - self.booster.g0 * (self.booster.R0 / (self.booster.R0 + self.booster.LaunchAltitude))**2
+        init_acc = sl_thrust / (stack_mass + payload_mass) - self.booster.g0 * (self.booster.R0 / (self.booster.R0 + launch_altitude))**2
         init_vz = init_acc * init_time
         init_vx = 0.0
-        init_z = 0.5 * init_acc * init_time**2 + self.booster.LaunchAltitude
+        init_z = 0.5 * init_acc * init_time**2 + launch_altitude
         init_x = 0.0
-        init_m = stack_mass + payload_mass - (self.booster.FirstStage_SL_Thrust / (self.booster.FirstStage_SL_Isp * self.booster.g0)) * init_time
+        init_m = stack_mass + payload_mass - (sl_thrust / (sl_isp * self.booster.g0)) * init_time
 
         diagnostics.add(phase1, 'Initial state',
                         x1[:,0] == self.booster.scale_x(ca.vertcat(init_x, init_z, init_vx, init_vz, init_m)),
@@ -666,7 +752,7 @@ class LV_Optimization(VLType):
         for k in range(self.booster.N):
             # set the dynamics
             diagnostics.add(phase1, f'Dynamics k={k} → {k+1}',
-                            x1[:,k+1] == self.booster.dynamics_kp1(x1[:,k], u1[:,k], dt1),
+                            x1[:,k+1] == booster_step(x1[:,k], u1[:,k], dt1),
                             self.booster.scaleX, local_units, local_components)
             # set the thrust constraints
             diagnostics.add(phase1, f'Thrust factor upper bound k={k}', u1[0,k] <= 1.0)
@@ -676,7 +762,7 @@ class LV_Optimization(VLType):
 
             # set the state constraints
             uk = self.booster.unscale_u(u1[:,k])
-            q = self.booster.dynamic_pressure_fun(x1[:,k])
+            q = booster_pressure(x1[:,k])
 
             diagnostics.add(phase1, f'Dynamic pressure k={k}', q/self.booster.FirstStage_MaxDynamicPressure <= 1.0,
                             scale=self.booster.FirstStage_MaxDynamicPressure / 1000., unit='kPa')
@@ -684,12 +770,12 @@ class LV_Optimization(VLType):
                             (uk[1] * q / self.booster.FirstStage_MaxQdynAlpha)**2 <= 1.0,
                             scale=self.booster.FirstStage_MaxQdynAlpha / 1000., unit='kPa·rad', squared=True)
             diagnostics.add(phase1, f'Payload acceleration k={k}',
-                            self.booster.specific_acc_fun(x1[:,k], u1[:,k])/self.booster.Payload_Max_acc <= 1.0,
+                            booster_acceleration(x1[:,k], u1[:,k])/self.booster.Payload_Max_acc <= 1.0,
                             scale=self.booster.Payload_Max_acc, unit='m/s²')
 
         # set the final state constraints    
         x1f = self.booster.unscale_x(x1[:,self.booster.N])
-        q1f = self.booster.dynamic_pressure_fun(x1[:,self.booster.N])
+        q1f = booster_pressure(x1[:,self.booster.N])
         diagnostics.add(phase1, 'Separation dynamic pressure',
                         q1f/self.booster.FirstStage_StageSeparationMaxDynamicPressure <= 1.0,
                         scale=self.booster.FirstStage_StageSeparationMaxDynamicPressure / 1000., unit='kPa')
@@ -707,7 +793,11 @@ class LV_Optimization(VLType):
         diagnostics.add(phase2, 'Time step lower bound', dt2 >= 0.1/self.eci.scaleT, self.eci.scaleT, 's')
         diagnostics.add(phase2, 'Launch azimuth lower bound', LaunchAz >= -np.pi/2, 180. / np.pi, 'deg')
         diagnostics.add(phase2, 'Launch azimuth upper bound', LaunchAz <= np.pi/2, 180. / np.pi, 'deg')
-        eci_pos, eci_vel = self.eci.local_to_eci_func(ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz)
+        if lifted.active:
+            eci_pos, eci_vel = self.eci.local_to_eci_p(
+                ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz, launch_altitude)
+        else:
+            eci_pos, eci_vel = self.eci.local_to_eci_func(ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz)
         x2_init = ca.vertcat(eci_pos, eci_vel, second_full + payload_mass)
         x2_beforeCoast = self.eci.scale_x(x2_init)
         x2_afterCoast = eci_step(x2_beforeCoast, 1e-8*np.ones((self.eci.nu,)), self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT)
@@ -746,7 +836,7 @@ class LV_Optimization(VLType):
             diagnostics.add(phase3, f'Thrust norm upper bound k={k}', ca.norm_2(u3[:,k]) <= 1.0)
             diagnostics.add(phase3, f'Thrust norm lower bound k={k}', ca.norm_2(u3[:,k]) >= self.eci.SecondStage_MinThrust_Factor)
             diagnostics.add(phase3, f'Payload acceleration k={k}',
-                            self.eci.specific_acc_fun(x3[:,k], u3[:,k])/self.booster.Payload_Max_acc <= 1.0,
+                            second_stage_acceleration(x3[:,k], u3[:,k])/self.booster.Payload_Max_acc <= 1.0,
                             self.booster.Payload_Max_acc, 'm/s²')
 
         # Default: parking orbit plus a later-burn propellant reserve. Callers
@@ -782,11 +872,14 @@ class LV_Optimization(VLType):
             reentry_altitude_min = 70000.
             reentry_thrust_max = 0.8
             landing_thrust_max = 1./3.
-            landing_thrust_min = (0.75/3. * self.rocket_return.EmptyFirstStageMass
-                                  * self.rocket_return.g0/self.rocket_return.scaleU[0])
+            numeric_landing_min = (0.75/3. * self.rocket_return.EmptyFirstStageMass
+                                   * self.rocket_return.g0 / self.rocket_return.scaleU[0])
+            landing_thrust_min = (numeric_landing_min * first_empty / self.rocket_return.EmptyFirstStageMass
+                                  / lifted.scale('FirstStageThrust'))
             if self.rocket_return.FirstStage_MinThrust_Factor > reentry_thrust_max:
                 raise ValueError('Reentry minimum thrust exceeds the permitted maximum of 0.6.')
-            if landing_thrust_min > landing_thrust_max:
+            # The lifted limit is symbolic; validate its nominal value here.
+            if numeric_landing_min > landing_thrust_max:
                 raise ValueError('Landing minimum thrust exceeds the permitted maximum of 1/3.')
             if RecoveryStrategy == 'RTLS':
                 dt4_boostback = opti.variable(1)
@@ -820,27 +913,30 @@ class LV_Optimization(VLType):
                             self.rocket_return.scaleT, 's')
 
             # Set the initial state
-            x4_init_unscaled = ca.vertcat(x1f[0:4], x1f[4] - (self.eci.SecondStage_FullMass + payload_mass))
+            x4_init_unscaled = ca.vertcat(x1f[0:4], x1f[4] - (second_full + payload_mass))
             
             # Boostback phase and ballistic phase
             if RecoveryStrategy == 'RTLS':
                 diagnostics.add(separation, 'Initial state', x4_0 == self.boostback.scale_x(x4_init_unscaled),
                                 self.boostback.scaleX, local_units, local_components)
                 x4_afterCoast = _boostback_coast(self.boostback, x4_0)
-
+                boostback_step = (self.boostback.dynamics_kp1_M20_p(x4_afterCoast, u4_boostback, dt4_boostback,
+                                                                  lifted.boostback_parameters())
+                                  if lifted.active else
+                                  self.boostback.dynamics_kp1_M20(x4_afterCoast, u4_boostback, dt4_boostback))
                 diagnostics.add(boostback, 'Dynamics',
-                                x4_boostback == self.boostback.dynamics_kp1_M20(x4_afterCoast, u4_boostback, dt4_boostback),
+                                x4_boostback == boostback_step,
                                 self.boostback.scaleX, local_units, local_components)
                 diagnostics.add(boostback, 'Thrust norm upper bound', ca.norm_2(u4_boostback) <= 1.0)
 
                 diagnostics.add(ballistic, 'Dynamics',
-                                x4_before_reentry == self.rocket_return.dynamics_kp1_M50(self.rocket_return.scale_x(self.boostback.unscale_x(x4_boostback)), 0, dt4_ballistic),
+                                x4_before_reentry == return_step(self.rocket_return.scale_x(self.boostback.unscale_x(x4_boostback)), 0, dt4_ballistic, 50),
                                 self.rocket_return.scaleX, local_units, local_components)
             else:
                 diagnostics.add(separation, 'Initial state', x4_0 == self.rocket_return.scale_x(x4_init_unscaled),
                                 self.rocket_return.scaleX, local_units, local_components)
                 diagnostics.add(ballistic, 'Dynamics',
-                                x4_before_reentry == self.rocket_return.dynamics_kp1_M50(x4_0, 0, dt4_ballistic),
+                                x4_before_reentry == return_step(x4_0, 0, dt4_ballistic, 50),
                                 self.rocket_return.scaleX, local_units, local_components)
             diagnostics.add(ballistic, 'Reentry start altitude lower bound',
                             self.rocket_return.local_to_alt(self.rocket_return.unscale_x(x4_before_reentry))/reentry_altitude_min >= 1.0,
@@ -848,7 +944,7 @@ class LV_Optimization(VLType):
 
             # rentry burn
             diagnostics.add(reentry, 'Dynamics',
-                            x4_after_reentryburn == self.rocket_return.dynamics_kp1_M20(x4_before_reentry, u4_reentry, dt4_reentry),
+                            x4_after_reentryburn == return_step(x4_before_reentry, u4_reentry, dt4_reentry, 20),
                             self.rocket_return.scaleX, local_units, local_components)
             ### set the thrust constraints
             diagnostics.add(reentry, 'Thrust factor upper bound', u4_reentry[0] <= reentry_thrust_max)
@@ -866,19 +962,19 @@ class LV_Optimization(VLType):
 
             ### After Reentry, before landing burn (ballistic)
             diagnostics.add(coast, 'Dynamics',
-                            x4_before_landing == self.rocket_return.dynamics_kp1_M20(x4_after_reentryburn, 0, dt4_before_landing),
+                            x4_before_landing == return_step(x4_after_reentryburn, 0, dt4_before_landing, 20),
                             self.rocket_return.scaleX, local_units, local_components)
 
             N_before_landing_constraints = 20
             x4_before_landing_intren = x4_after_reentryburn
             for i in range(N_before_landing_constraints):
+                x4_before_landing_intren = return_step(x4_before_landing_intren, 0, dt4_before_landing/N_before_landing_constraints, 1)
                 diagnostics.add(coast, f'Dynamic pressure sample={i+1}/{N_before_landing_constraints}',
-                                self.rocket_return.dynamic_pressure_fun(x4_before_landing_intren)/self.rocket_return.Booster_MaxDynamicPressure <= 1.0,
+                                return_pressure(x4_before_landing_intren)/self.rocket_return.Booster_MaxDynamicPressure <= 1.0,
                                 self.rocket_return.Booster_MaxDynamicPressure / 1000., 'kPa')
                 diagnostics.add(coast, f'Heat flux sample={i+1}/{N_before_landing_constraints}',
-                                self.rocket_return.heat_flux_fun(x4_before_landing_intren)/self.rocket_return.Booster_MaxHeatFlux <= 1.0,
+                                return_heat(x4_before_landing_intren)/self.rocket_return.Booster_MaxHeatFlux <= 1.0,
                                 self.rocket_return.Booster_MaxHeatFlux / 1000., 'kW/m²')
-                x4_before_landing_intren = self.rocket_return.dynamics_kp1(x4_before_landing_intren, 0, dt4_before_landing/N_before_landing_constraints)
 
             ### Landing Burn:
             diagnostics.add(landing, 'Initial state', x4_landing[:,0] == x4_before_landing,
@@ -886,7 +982,12 @@ class LV_Optimization(VLType):
             for k in range(self.rocket_return.N):
                 landing_control = ca.vertcat(u4_landing[0,k], landing_angle[0,k])
                 diagnostics.add(landing, f'Dynamics k={k} → {k+1}',
-                                x4_landing[:,k+1] == self.rocket_return.landing_dynamics_kp1(x4_landing[:,k], landing_control, dt4_landing),
+                                x4_landing[:,k+1] == (
+                                    self.rocket_return.landing_dynamics_kp1_p(
+                                        x4_landing[:,k], landing_control, dt4_landing, lifted.return_parameters())
+                                    if lifted.active else
+                                    self.rocket_return.landing_dynamics_kp1(
+                                        x4_landing[:,k], landing_control, dt4_landing)),
                                 self.rocket_return.scaleX, local_units, local_components)
                 diagnostics.add(landing, f'Thrust angle bounds k={k}', opti.bounded(-np.pi/2., landing_angle[0,k], np.pi/2.),
                                 180. / np.pi, 'deg')
@@ -896,10 +997,10 @@ class LV_Optimization(VLType):
                 diagnostics.add(landing, f'Thrust factor lower bound k={k}',
                                 u4_landing[0,k] >= landing_thrust_min)
                 diagnostics.add(landing, f'Dynamic pressure k={k+1}',
-                                self.rocket_return.dynamic_pressure_fun(x4_landing[:,k+1])/self.rocket_return.Booster_MaxDynamicPressure <= 1.0,
+                                return_pressure(x4_landing[:,k+1])/self.rocket_return.Booster_MaxDynamicPressure <= 1.0,
                                 self.rocket_return.Booster_MaxDynamicPressure / 1000., 'kPa')
                 diagnostics.add(landing, f'Heat flux k={k+1}',
-                                self.rocket_return.heat_flux_fun(x4_landing[:,k+1])/self.rocket_return.Booster_MaxHeatFlux <= 1.0,
+                                return_heat(x4_landing[:,k+1])/self.rocket_return.Booster_MaxHeatFlux <= 1.0,
                                 self.rocket_return.Booster_MaxHeatFlux / 1000., 'kW/m²')
 
             # final state constraints
@@ -908,7 +1009,7 @@ class LV_Optimization(VLType):
                 diagnostics.add(landing, 'Final downrange target', x4_landing[0,self.rocket_return.N] == 0.0,
                                 self.rocket_return.scaleX[0], 'm')
                 diagnostics.add(landing, 'Final local height target',
-                                x4_landing[1,self.rocket_return.N] == self.rocket_return.LaunchAltitude/self.rocket_return.scaleX[1],
+                                x4_landing[1,self.rocket_return.N] == launch_altitude/self.rocket_return.scaleX[1],
                                 self.rocket_return.scaleX[1], 'm')
             else:
                 # zero altitude at the end of the flight
@@ -919,7 +1020,7 @@ class LV_Optimization(VLType):
                             ca.sumsqr(x4_landing[2:4,self.rocket_return.N]) / (5.0/self.rocket_return.scaleX[2])**2 <= 1.,
                             5., 'm/s', squared=True)
             diagnostics.add(landing, 'Final mass lower bound',
-                            x4_landing[4,self.rocket_return.N] >= self.rocket_return.EmptyFirstStageMass/self.rocket_return.scaleX[4],
+                            x4_landing[4,self.rocket_return.N] >= first_empty/self.rocket_return.scaleX[4],
                             self.rocket_return.scaleX[4], 'kg')
 
         # set the cost function
@@ -1315,7 +1416,7 @@ class LV_Optimization(VLType):
             best_landing = _BestInitialGuess()
             while iter < 20:
                 landing_control = _landing_guess_control(
-                    self.rocket_return, landing_thrust_min, landing_thrust_max, thrust_factor)
+                    self.rocket_return, numeric_landing_min, landing_thrust_max, thrust_factor)
 
                 try:
                     x4_landing_guess, u4_landing_guess = _rollout_initial_guess(
@@ -1416,7 +1517,7 @@ class LV_Optimization(VLType):
                                      boostback_state=x4_boostback_guess, boostback_control=u4_boostback_guess)
             recovery_guess = _fit_recovery_guess(
                 self.rocket_return, self.boostback, x4_0_guess, recovery_seed, RecoveryStrategy,
-                (landing_thrust_min, landing_thrust_max, reentry_thrust_max), recovery_residuals,
+                (numeric_landing_min, landing_thrust_max, reentry_thrust_max), recovery_residuals,
                 reentry_altitude_min=reentry_altitude_min)
             opti.set_initial(dt4_ballistic, recovery_guess['ballistic_time'] / self.rocket_return.scaleT)
             opti.set_initial(dt4_reentry, recovery_guess['reentry_time'] / self.rocket_return.scaleT)

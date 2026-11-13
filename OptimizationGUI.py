@@ -24,7 +24,8 @@ from DispersionFit import (DEFAULT_PARAMETERS, ERROR_SCALES, CHANNEL_UNITS, defa
                            validate_fit_parameter_bounds)
 from LaunchSites import LAUNCH_SITES, DEFAULT_LAUNCH_SITE, launch_site_inputs, parse_launch_site
 from GUIState import read_gui_state, write_gui_state
-from PayloadSensitivity import (default_steps, sensitivity_request, validate_steps, draw_sensitivities,
+from PayloadSensitivity import (default_steps, expected_sensitivity_evaluations,
+                                sensitivity_request, validate_steps, draw_sensitivities,
                                 parameter_values, validate_recoveries, LAUNCH_PARAMETERS, LAUNCH_UNITS)
 from SensitivityCSV import export_sensitivity_csv
 from VehicleDefinitions import (VEHICLE_PARAMETERS, BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
@@ -673,15 +674,24 @@ class OptimizationApp:
         self.notebook.add(sensitivity_tab, text='Sensitivity')
         sensitivity_header = ttk.Frame(sensitivity_tab)
         sensitivity_header.pack(fill='x')
-        self.sensitivity_button = ttk.Button(sensitivity_header, text='Run payload sensitivities',
+        self.sensitivity_button = ttk.Button(sensitivity_header, text='Run multiplier sensitivities',
                                              command=self.run_sensitivities)
         self.sensitivity_button.pack(side='left')
+        self.sample_sensitivity_button = ttk.Button(
+            sensitivity_header, text='Run sampled sensitivities',
+            command=lambda: self.run_sensitivities(method='samples'))
+        self.sample_sensitivity_button.pack(side='left', padx=8)
+        self.equality_sensitivity_button = ttk.Button(
+            sensitivity_header, text='Run equality sensitivities',
+            command=lambda: self.run_sensitivities(method='equalities'))
+        self.equality_sensitivity_button.pack(side='left', padx=8)
         step_button = ttk.Button(sensitivity_header, text='Parameters / steps…', command=self.open_sensitivity_dialog)
         step_button.pack(side='left', padx=8)
         export_button = ttk.Button(sensitivity_header, text='Export results CSV…', command=self.export_sensitivity_results)
         export_button.pack(side='left')
-        self.controls.extend(((self.sensitivity_button, 'normal'), (step_button, 'normal'),
-                              (export_button, 'normal')))
+        self.controls.extend(((self.sensitivity_button, 'normal'), (self.sample_sensitivity_button, 'normal'),
+                              (self.equality_sensitivity_button, 'normal'),
+                              (step_button, 'normal'), (export_button, 'normal')))
         self.sensitivity_summary = tk.StringVar(value='')
         ttk.Label(sensitivity_tab, textvariable=self.sensitivity_summary, wraplength=950,
                   justify='left').pack(fill='x', pady=6)
@@ -1556,7 +1566,7 @@ class OptimizationApp:
             self.progress.configure(mode="determinate", maximum=self.fit_options["max_evaluations"], value=0)
         elif running and self.job_kind == 'sensitivity':
             self.progress.stop()
-            self.progress.configure(mode='determinate', maximum=len(self.sensitivity_recoveries) * (1 + 2 * len(self.sensitivity_steps)), value=0)
+            self.progress.configure(mode='determinate', maximum=self.sensitivity_total, value=0)
         elif running:
             self.progress.configure(mode="indeterminate")
             self.progress.start(12)
@@ -1855,9 +1865,11 @@ class OptimizationApp:
             count = len(case.sensitivity_settings) if case.sensitivity_settings else len(asdict(DispesrionFactorsType())) + len(LAUNCH_PARAMETERS)
             text = (f'{case.name}: choose vehicle, recovery, orbit and launch site in the right panel, then run. '
                     f"Recovery strategies: {', '.join(case.sensitivity_recoveries) if case.sensitivity_recoveries else 'current selection'}. "
-                    f'{count} parameters selected. Maximum payload is re-optimized at the baseline and at ±each step. '
-                    'dP/dp is kg per parameter unit; chart compares the configured steps. '
-                    'Very small steps can be dominated by solver noise; compare results at a second step size.')
+                    f'{count} parameters selected. Multiplier reads every factor from one buffered solve. '
+                    'Equality reads multipliers from exact parameter equality constraints. '
+                    'Sampled re-optimizes the maximum payload at ±each step. '
+                    'dP/dp is kg per parameter unit; the chart compares the configured steps. '
+                    'Very small sampled steps can be dominated by solver noise; compare results at a second step size.')
         else:
             request = report['request']
             orbit, site = request['target_orbit'], request['launch_site']
@@ -1876,8 +1888,8 @@ class OptimizationApp:
                     f"({site['latitude']:g}°, {site['longitude']:g}°, {site['altitude']:g} m). "
                     f"Baseline maximum payload: {baseline_text}. "
                     f"{report['termination']} · {report['evaluations']}/{report['total']} solves. "
-                    'dP/dp: kg per parameter unit. ΔP: central estimate for +one step. '
-                    'Chart ranking depends on step sizes; compare a second step size to check solver noise.')
+                    'dP/dp: kg per parameter unit. ΔP: change for +one configured step, '
+                    'from constraint multipliers where indicated, otherwise from a central difference.')
             try:
                 if sensitivity_request(self.sensitivity_form_request()) != request:
                     text += ' Inputs changed; displayed results use the saved baseline.'
@@ -1918,10 +1930,12 @@ class OptimizationApp:
         unit = field_unit(row['text'].split(' · ', 1)[-1]).replace('Δ ', '')
         self.sensitivity_detail.set(f"{row['text']}: dP/dp in kg per {unit}. {row['values'][-1]}")
 
-    def run_sensitivities(self):
+    def run_sensitivities(self, method='multipliers'):
         from tkinter import messagebox
         if self.process is not None:
             return
+        if method not in {'multipliers', 'equalities', 'samples'}:
+            raise ValueError(f'Unknown sensitivity method: {method}')
         try:
             request = sensitivity_request(self.sensitivity_form_request())
             case = self.cases[self.selected_case]
@@ -1929,7 +1943,8 @@ class OptimizationApp:
                                    else default_steps(request))
             recoveries = validate_recoveries(request, case.sensitivity_recoveries)
             directory = self._new_job_directory(f'sensitivity_case{self.selected_case + 1}_')
-            (directory / 'sensitivity_inputs.json').write_text(json.dumps(dict(base_request=request, steps=steps, recoveries=recoveries), indent=2))
+            (directory / 'sensitivity_inputs.json').write_text(json.dumps(
+                dict(base_request=request, steps=steps, recoveries=recoveries, method=method), indent=2))
             # Only use compatible successful computed cases as the baseline's initial guess.
             if case.result is not None and case.result.get('success') and case.request == request:
                 with (directory / 'initial_solution.pickle').open('wb') as stream:
@@ -1950,6 +1965,9 @@ class OptimizationApp:
         self.run_dir = directory
         self.sensitivity_steps = steps
         self.sensitivity_recoveries = recoveries
+        self.sensitivity_total = len(recoveries) * (
+            1 + 2 * len(steps) if method == 'samples'
+            else expected_sensitivity_evaluations(request, steps))
         self.sensitivity_progress_evaluations = -1
         self.job_kind = 'sensitivity'
         self.running_case = self.selected_case

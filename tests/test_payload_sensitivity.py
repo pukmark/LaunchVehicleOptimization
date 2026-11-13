@@ -13,8 +13,9 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from OptimizationGUI import ComparisonCase, OptimizationApp, nominal_request
-from PayloadSensitivity import (compute_sensitivities, default_steps, draw_sensitivities,
-                                validate_steps, worker, LAUNCH_PARAMETERS, parameter_values)
+from PayloadSensitivity import (compute_reported_sensitivities, compute_sensitivities, default_steps,
+                                draw_sensitivities, expected_sensitivity_evaluations, validate_steps, worker,
+                                LAUNCH_PARAMETERS, parameter_values)
 
 
 class PayloadSensitivityTests(unittest.TestCase):
@@ -234,14 +235,71 @@ class PayloadSensitivityTests(unittest.TestCase):
         self.assertEqual(report['rows'][0]['derivative'], 0)
         self.assertIn('Cancelled', report['termination'])
 
+    def test_expendable_supported_factors_use_one_multiplier_solve(self):
+        def solve(candidate, init_guess=None, lifted_parameters=None, parameter_eps=1e-6):
+            self.assertEqual(lifted_parameters, ['SecondStageIsp', 'SecondStage_EmptyMass'])
+            self.assertEqual(parameter_eps, 1e-6)
+            return {'success': True, 'payload_mass': np.array(10000), 'parameter_duals': {
+                'SecondStageIsp': {'payload_sensitivity': 1000., 'upper_dual': 1000., 'lower_dual': 0.},
+                'SecondStage_EmptyMass': {'payload_sensitivity': -1., 'upper_dual': 0., 'lower_dual': 1.}}}
+
+        request = self.request()
+        report = compute_reported_sensitivities(
+            request, {'SecondStageIsp': .01, 'SecondStage_EmptyMass': 40}, solve=solve)
+        self.assertEqual(report['evaluations'], 1)
+        self.assertEqual(report['total'], 1)
+        isp, mass = report['rows']
+        self.assertEqual(isp['status'], 'Multiplier')
+        self.assertAlmostEqual(isp['derivative'], 1000)
+        self.assertAlmostEqual(isp['delta_payload'], 10)
+        self.assertEqual(mass['status'], 'Multiplier')
+        self.assertAlmostEqual(mass['derivative'], -1)
+        self.assertAlmostEqual(mass['delta_payload'], -40)
+        self.assertEqual(expected_sensitivity_evaluations(request, {'SecondStageIsp': .01, 'FirstStageIsp': .01}), 1)
+
+    def test_multiplier_runs_cover_selected_recoveries(self):
+        calls = []
+
+        def solve(candidate, init_guess=None, lifted_parameters=None, parameter_eps=1e-6):
+            calls.append((candidate['recovery'], init_guess))
+            return {'success': True, 'payload_mass': 10000., 'parameter_duals': {
+                'FirstStageIsp': {'payload_sensitivity': 100., 'upper_dual': 100., 'lower_dual': 0.}}}
+
+        request = self.request()
+        report = compute_reported_sensitivities(
+            request, {'FirstStageIsp': .01}, solve=solve, recoveries=['ASDS', 'RTLS'],
+            initial_solution={'tag': 'initial'})
+        self.assertEqual(report['total'], 2)
+        self.assertEqual(report['evaluations'], 2)
+        self.assertEqual([row['recovery'] for row in report['rows']], ['ASDS', 'RTLS'])
+        self.assertEqual(calls, [('ASDS', None), ('RTLS', None)])
+
+    def test_equality_multiplier_uses_exact_constraint_for_each_recovery(self):
+        calls = []
+
+        def solve(candidate, init_guess=None, lifted_parameters=None, parameter_eps=1e-6,
+                  parameter_equalities=False):
+            calls.append((candidate['recovery'], parameter_equalities, lifted_parameters))
+            return {'success': True, 'payload_mass': 10000., 'parameter_duals': {
+                'FirstStageIsp': {'payload_sensitivity': 120., 'equality_dual': 120.,
+                                  'upper_dual': None, 'lower_dual': None}}}
+
+        report = compute_reported_sensitivities(
+            self.request(), {'FirstStageIsp': .01}, solve=solve,
+            recoveries=['ASDS', 'RTLS'], parameter_equalities=True)
+        self.assertEqual(calls, [('ASDS', True, ['FirstStageIsp']),
+                                 ('RTLS', True, ['FirstStageIsp'])])
+        self.assertEqual(report['evaluations'], 2)
+        self.assertTrue(all(row['status'] == 'Equality multiplier' for row in report['rows']))
+        self.assertTrue(all(row['equality_dual'] == 120. for row in report['rows']))
+
     def test_worker_persists_json_report_and_plot_ranks_signed_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             (path / 'sensitivity_inputs.json').write_text(json.dumps(dict(
                 base_request=self.request(), steps={'FirstStageIsp': .01})))
-            solve = Mock(side_effect=[{'success': True, 'payload_mass': 10000},
-                                      {'success': True, 'payload_mass': 9900},
-                                      {'success': True, 'payload_mass': 10100}])
+            solve = Mock(return_value={'success': True, 'payload_mass': 10000, 'parameter_duals': {
+                'FirstStageIsp': {'payload_sensitivity': 10000., 'upper_dual': 10000., 'lower_dual': 0.}}})
             with patch('PayloadSensitivity._solve_candidate', solve):
                 worker(path)
             report = json.loads((path / 'sensitivity_report.json').read_text())
@@ -269,13 +327,29 @@ class PayloadSensitivityTests(unittest.TestCase):
             with patch('OptimizationGUI.subprocess.Popen', return_value=Mock()) as popen:
                 app.run_sensitivities()
             submitted = json.loads((app.run_dir / 'sensitivity_inputs.json').read_text())
+            self.assertEqual(submitted['method'], 'multipliers')
+            self.assertEqual(app.sensitivity_total, 2)
+            app.log_stream.close()
+            app.process = None
+            with patch('OptimizationGUI.subprocess.Popen', return_value=Mock()):
+                app.run_sensitivities(method='samples')
+            sampled = json.loads((app.run_dir / 'sensitivity_inputs.json').read_text())
+            self.assertEqual(sampled['method'], 'samples')
+            self.assertEqual(app.sensitivity_total, 6)
+            app.log_stream.close()
+            app.process = None
+            with patch('OptimizationGUI.subprocess.Popen', return_value=Mock()):
+                app.run_sensitivities(method='equalities')
+            equality = json.loads((app.run_dir / 'sensitivity_inputs.json').read_text())
+            self.assertEqual(equality['method'], 'equalities')
+            self.assertEqual(app.sensitivity_total, 2)
             self.assertEqual(submitted['base_request']['payload_mass_predefined'], -1)
             self.assertEqual(submitted['recoveries'], ['ASDS', 'RTLS'])
             self.assertEqual(submitted['base_request']['target_orbit'], self.request()['target_orbit'])
             self.assertEqual(app.cases[0].result, {'payload_mass': 9000})
             self.assertEqual(app.job_kind, 'sensitivity')
             self.assertIn('PayloadSensitivity.py', popen.call_args.args[0][1])
-            app.notebook.select.assert_called_once_with('sensitivity-tab')
+            self.assertEqual(app.notebook.select.call_count, 3)
             app.log_stream.close()
 
 
