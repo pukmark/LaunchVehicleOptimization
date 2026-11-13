@@ -27,6 +27,7 @@ from GUIState import read_gui_state, write_gui_state
 from PayloadSensitivity import (default_steps, sensitivity_request, validate_steps, draw_sensitivities,
                                 parameter_values, validate_recoveries, LAUNCH_PARAMETERS, LAUNCH_UNITS)
 from SensitivityCSV import export_sensitivity_csv
+from TrajectoryCSV import export_trajectory_csv
 from VehicleDefinitions import (VEHICLE_PARAMETERS, BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name,
                                 read_vehicle_definition, write_vehicle_definition,
@@ -562,6 +563,9 @@ class OptimizationApp:
         self.scenario_details_button = ttk.Button(plot_header, text="Show scenario details",
                                                   command=self.toggle_scenario_details)
         self.scenario_details_button.pack(side="right")
+        self.export_data_button = ttk.Button(plot_header, text="Export data CSV…",
+                                             command=self.open_export_data_dialog)
+        self.export_data_button.pack(side="right", padx=6)
         self.summary = tk.StringVar(value="No result yet. Set the factors and run the nominal case.")
         self.scenario_details = ttk.Frame(left)
         self.scenario_details.grid(row=1, column=0, sticky="ew", pady=(0, 4))
@@ -1486,6 +1490,62 @@ class OptimizationApp:
         else:
             lines.append("Load/display telemetry and enable Display for cases to compare costs.")
         self.paper_cost_text.set('\n'.join(lines))
+
+    def open_export_data_dialog(self):
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
+        if not any(case.result is not None for case in self.cases) and self.telemetry is None:
+            messagebox.showinfo('No data to export', 'Compute a case or load telemetry first.', parent=self.root)
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title('Export flight data')
+        dialog.transient(self.root)
+        panel = ttk.Frame(dialog, padding=16)
+        panel.pack(fill='both', expand=True)
+        ttk.Label(panel, text='Select cases and/or telemetry to include:').pack(anchor='w')
+        selections = []
+        for case in self.cases:
+            available = case.result is not None
+            selected = tk.BooleanVar(value=available)
+            ttk.Checkbutton(panel, text=case.name + ('' if available else ' (no result)'),
+                            variable=selected, state='normal' if available else 'disabled').pack(anchor='w', pady=3)
+            selections.append(selected)
+        include_telemetry = tk.BooleanVar(value=self.telemetry is not None)
+        ttk.Checkbutton(panel, text=f'Telemetry · {self.telemetry.path.name}' if self.telemetry else 'Telemetry (not loaded)',
+                        variable=include_telemetry, state='normal' if self.telemetry else 'disabled').pack(anchor='w', pady=3)
+        ttk.Label(panel, text='Time since launch [s] is the first column. Each case/phase has its own columns.\n'
+                  'Original sample times are preserved; unavailable values are blank.\n'
+                  'Case parameters appear above the time data: payload, site, target, vehicle, dispersions.\n'
+                  'Telemetry uses the current time shift. Export uses the last computed results.',
+                  wraplength=500).pack(anchor='w', pady=10)
+
+        def save():
+            cases = [(case.name, case.result, (case.request or {}).get('target_orbit'))
+                     for case, selected in zip(self.cases, selections)
+                     if selected.get() and case.result is not None]
+            telemetry = self.telemetry if include_telemetry.get() else None
+            if not cases and telemetry is None:
+                messagebox.showinfo('Select data', 'Select at least one case or telemetry.', parent=dialog)
+                return
+            filename = filedialog.asksaveasfilename(parent=dialog, title='Export flight data',
+                defaultextension='.csv', initialfile='flight_data.csv', filetypes=[('CSV files', '*.csv')])
+            if not filename:
+                return
+            try:
+                rows, columns = export_trajectory_csv(filename, cases, telemetry=telemetry,
+                    telemetry_shift=self.telemetry_shift, primary_group=self.telemetry_primary.get(),
+                    case_requests={case.name: case.request for case in self.cases})
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                messagebox.showerror('Could not export flight data', str(exc), parent=dialog)
+                return
+            self.status.set(f'Exported {rows:,} rows and {columns} columns to {filename}')
+            dialog.destroy()
+
+        buttons = ttk.Frame(panel)
+        buttons.pack(fill='x')
+        ttk.Button(buttons, text='Save CSV…', command=save).pack(side='right')
+        ttk.Button(buttons, text='Cancel', command=dialog.destroy).pack(side='right', padx=6)
+        dialog.grab_set()
 
     def export_sensitivity_results(self):
         from tkinter import filedialog, messagebox

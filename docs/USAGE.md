@@ -5,6 +5,39 @@ below assume you are in the repository root with `.venv` activated.
 
 ## Cases, targets, and payload sensitivities
 
+Click **Export data CSV…** beside the flight simulation title to choose any
+combination of completed cases and loaded telemetry, then choose **Save CSV…**.
+Export selection is independent of the plot Display checkboxes and uses the
+last computed results for each case. The first column, `time_since_launch_s`,
+is launch-relative time in seconds; remaining columns identify the case,
+flight phase, measurement, and units. The file includes altitude, velocity
+components and speed, mass, specific acceleration, speed acceleration, Qdyn,
+controls, Isp, and saved orbital histories where available, including booster
+return and reconstructed second-stage coast. Derived quantities have separate
+columns. Illustrated second burns are labelled and use their calculated
+physical start time rather than the plot's illustrative offset.
+
+The CSV starts with a parameter block listing each selected case's constants once:
+computed payload mass (kg), launch vehicle name, launch site name/latitude/
+longitude/altitude, and target orbit name/apogee/perigee/inclination. Orbit
+altitudes use km, radii use m, and angles use degrees. These values come from
+the saved result and run request, so subsequent form edits do not change them.
+`non_nominal_dispersions_json` lists the dispersion settings that differ from
+`DispesrionFactorsType` defaults; each changed setting also has a separate
+`dispersion.` parameter in its original model units. `{}` means all
+saved dispersions are nominal; unavailable metadata stays blank.
+Parameter rows begin with `#` and have case, parameter, and value fields.
+A blank line separates them from the time-series header and data; constants
+are not repeated as time-series columns. To load just the time data in pandas,
+use `pd.read_csv(path, comment='#')`.
+
+Samples retain their original timestamps, including repeated phase-boundary
+times. Different sample grids share one sorted time column without interpolation;
+missing values and terminal controls remain blank. Telemetry includes its
+original loaded columns and recognized/derived channels, with the current time
+shift applied to the first column. Original telemetry time columns retain their
+source values.
+
 The GUI starts with nominal `DispesrionFactorsType` defaults, Falcon 9,
 expendable flight, and a 200 × 200 km LEO target at 28.6° inclination, maximizing
 payload. The **Target orbit** fields let you edit apogee and perigee altitudes

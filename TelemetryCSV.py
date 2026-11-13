@@ -155,6 +155,7 @@ class TelemetryData:
     time: np.ndarray
     groups: dict
     time_note: str
+    raw_columns: dict = None
 
     def channels(self, group, primary_group):
         channels = dict(self.groups[group])
@@ -229,7 +230,8 @@ def load_telemetry_csv(path):
         groups[group] = channels
     if not any(groups.values()):
         raise ValueError("No recognized telemetry measurements with valid times. Use unit-labelled columns such as altitude_km or speed_kmh.")
-    return TelemetryData(path, time[order], groups, note)
+    return TelemetryData(path, time[order], groups, note,
+                         {name: frame[name].to_numpy()[order] for name in frame})
 
 
 def interpolate_speed_time(time, speed, target_speed):

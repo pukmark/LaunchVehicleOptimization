@@ -470,6 +470,51 @@ class ResultRenderingTests(unittest.TestCase):
                 cls.results[recovery] = run_optimization(request, None)
             cls.requests[recovery] = request
 
+    def test_csv_exports_real_solver_schema_for_all_recoveries(self):
+        import pandas as pd
+        from TrajectoryCSV import export_trajectory_csv
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'flight.csv'
+            export_trajectory_csv(path, [(recovery, solution, self.requests[recovery]['target_orbit'])
+                                        for recovery, solution in self.results.items()])
+            frame = pd.read_csv(path, comment='#')
+            self.assertEqual(frame.columns[0], 'time_since_launch_s')
+            for recovery, solution in self.results.items():
+                for phase, number in (('stage1', 1), ('stage2_before_fairing', 2), ('stage2_after_fairing', 3)):
+                    np.testing.assert_allclose(frame[f'{recovery}.{phase}.altitude_m'].dropna(),
+                                               np.ravel(solution[f'alt{number}_sol'])[np.argsort(np.ravel(solution[f't{number}_vec']), kind='stable')])
+                if recovery != 'EXP':
+                    self.assertIn(f'{recovery}.booster.Qdyn_pa', frame)
+                    self.assertIn(f'{recovery}.booster_controls.thrust_factor', frame)
+
+    def test_export_dialog_can_select_telemetry_without_cases(self):
+        import tkinter as tk
+        import pandas as pd
+        from tkinter import ttk
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.make_app(directory)
+            app.cases[0].result = self.results['EXP']
+            source = Path(directory) / 'telemetry.csv'
+            source.write_text('time_s,speed_mps\n0,0\n1,10\n')
+            from TelemetryCSV import load_telemetry_csv
+            app.telemetry = load_telemetry_csv(source)
+            app.telemetry_shift = 2.
+            app.export_data_button.invoke()
+            dialog = next(widget for widget in app.root.winfo_children() if isinstance(widget, tk.Toplevel))
+            panel = dialog.winfo_children()[0]
+            checks = [widget for widget in panel.winfo_children() if isinstance(widget, ttk.Checkbutton)]
+            checks[0].invoke()
+            self.assertEqual(str(checks[1]['state']), 'disabled')
+            buttons = panel.winfo_children()[-1].winfo_children()
+            save = next(widget for widget in buttons if widget['text'] == 'Save CSV…')
+            output = Path(directory) / 'out.csv'
+            with patch('tkinter.filedialog.asksaveasfilename', return_value=str(output)):
+                save.invoke()
+            frame = pd.read_csv(output, comment='#')
+            self.assertFalse(any(key.startswith('Case') for key in frame))
+            np.testing.assert_array_equal(frame.iloc[:, 0], [2, 3])
+            self.assertIn('Exported', app.status.get())
+
     def test_paper_results_render_all_recovery_modes(self):
         from PaperResults import draw_paper_results
         for recovery, solution in self.results.items():
