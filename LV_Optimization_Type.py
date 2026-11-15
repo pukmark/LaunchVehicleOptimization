@@ -450,9 +450,8 @@ class VLType(PythonMsg):
     launch_site: dict = field(default=None)
 
 @dataclass
-class _ParameterBuffer:
-    """Pin selected dispersion factors with a two-sided inequality buffer.
-    """
+class _EqualityParameters:
+    """Fix selected inputs with exact equality constraints."""
 
     LAUNCH_LIMITS = ('FirstStage_MaxDynamicPressure', 'Booster_MaxDynamicPressure',
                      'FirstStage_StageSeparationMaxDynamicPressure',
@@ -461,18 +460,14 @@ class _ParameterBuffer:
     MULTIPLIERS = {'FirstStageIsp', 'SecondStageIsp', 'FirstStageThrust', 'SecondStageThrust',
                    'FirstStageCx0', 'BoosterStageCx0', 'AtmosphereDensity'}
 
-    def __init__(self, opti, dispersion, names, eps, equalities=False, launch_limits=None):
+    def __init__(self, opti, dispersion, names, launch_limits=None):
         self.opti = opti
         self.rows = {}
         self.physical_isp = None
-        self.equalities = bool(equalities)
         names = list(names or [])
         unknown = [name for name in names if name not in self.SUPPORTED]
         if unknown:
             raise ValueError(f'Unknown dispersion factor: {", ".join(unknown)}')
-        if names and not self.equalities and (not np.isfinite(eps) or eps <= 0):
-            raise ValueError('parameter_eps must be positive and finite.')
-        self.eps = float(eps)
         for name in names:
             if name in self.LAUNCH_LIMITS and (launch_limits is None or name not in launch_limits):
                 raise ValueError(f'Missing nominal launch limit: {name}')
@@ -483,19 +478,11 @@ class _ParameterBuffer:
                 raise ValueError(f'{name} nominal must be positive.')
             variable = opti.variable()
             index = int(opti.ng)
-            if self.equalities:
-                equality = variable == nominal
-                opti.subject_to(equality)
-                upper = lower = None
-            else:
-                equality = None
-                upper = variable <= nominal + self.eps
-                lower = variable >= nominal - self.eps
-                opti.subject_to(upper)
-                opti.subject_to(lower)
+            equality = variable == nominal
+            opti.subject_to(equality)
             opti.set_initial(variable, nominal)
-            self.rows[name] = {'variable': variable, 'upper': upper, 'lower': lower,
-                               'equality': equality, 'index': index, 'nominal': nominal}
+            self.rows[name] = {'variable': variable, 'equality': equality,
+                               'index': index, 'nominal': nominal}
 
     @property
     def active(self):
@@ -552,7 +539,7 @@ class _ParameterBuffer:
         return ca.vertcat(self.scale('FirstStageThrust'), self.scale('FirstStageIsp'))
 
     def bind_second_stage_isp(self, vacuum_isp):
-        """Physical vacuum specific impulse, with the multiplier free inside the buffer."""
+        """Physical vacuum specific impulse for a selected equality-constrained input."""
         row = self.rows.get('SecondStageIsp')
         if row is None:
             self.physical_isp = None
@@ -564,25 +551,14 @@ class _ParameterBuffer:
         """Map constraint duals to sensitivities of the directly maximized payload."""
         report = {}
         for name, row in self.rows.items():
-            if row['equality'] is not None:
-                lam = value(self.opti.lam_g)
-                multiplier = float(lam[row['index']])
-                upper = lower = None
-                sensitivity = multiplier
-            else:
-                upper = float(value(self.opti.dual(row['upper'])))
-                lower = float(value(self.opti.dual(row['lower'])))
-                multiplier = None
-                sensitivity = upper - lower
+            lam = value(self.opti.lam_g)
+            multiplier = float(lam[row['index']])
             report[name] = {
                 'nominal': row['nominal'],
                 'value': float(value(row['variable'])),
-                'eps': self.eps,
-                'upper_dual': upper,
-                'lower_dual': lower,
                 'equality_dual': multiplier,
-                'dual_sensitivity': sensitivity,
-                'payload_sensitivity': sensitivity,
+                'dual_sensitivity': multiplier,
+                'payload_sensitivity': multiplier,
             }
         return report
 
@@ -614,9 +590,7 @@ class LV_Optimization(VLType):
                          ipopt_options = None,
                          output_dir = 'Results',
                          initial_guess_diagnostics: bool = True,
-                         lifted_parameters=None,
-                         parameter_eps: float = 1e-6,
-                         parameter_equalities: bool = False):
+                         lifted_parameters=None):
         if RecoveryStrategy not in {'EXP', 'ASDS', 'RTLS'}:
             raise ValueError(f'Unknown recovery strategy: {RecoveryStrategy}')
         if init_guess is None:
@@ -646,9 +620,9 @@ class LV_Optimization(VLType):
         # define the optimization problem
         opti = ca.Opti()
         launch_limits = {name: float(getattr(self.booster, name))
-                         for name in _ParameterBuffer.LAUNCH_LIMITS}
-        lifted = _ParameterBuffer(opti, self.ScenarioDispersion, lifted_parameters, parameter_eps,
-                                  equalities=parameter_equalities, launch_limits=launch_limits)
+                         for name in _EqualityParameters.LAUNCH_LIMITS}
+        lifted = _EqualityParameters(opti, self.ScenarioDispersion, lifted_parameters,
+                                  launch_limits=launch_limits)
         lifted.bind_second_stage_isp(self.eci.SecondStage_Vac_Isp)
         diagnostics = InitialGuessConstraintDiagnostics(opti, enabled=initial_guess_diagnostics)
         local_components = ('x', 'z', 'vx', 'vz', 'mass')
@@ -2049,7 +2023,6 @@ class LV_Optimization(VLType):
         self.Solution['objective'] = objective_value
         if parameter_duals is not None:
             self.Solution['parameter_duals'] = parameter_duals
-            self.Solution['parameter_eps'] = lifted.eps
         self.Solution['return_status'] = opti.return_status()
         self.Solution['success'] = opti.stats()['success']
         self.Solution['iter_count'] = opti.stats().get('iter_count')

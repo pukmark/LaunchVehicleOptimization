@@ -112,8 +112,8 @@ def validate_steps(request, steps):
 
 def _dual_names(request, steps):
     """Inputs whose payload derivative is available from constraint multipliers."""
-    from LV_Optimization_Type import _ParameterBuffer
-    return [name for name in steps if name in _ParameterBuffer.SUPPORTED]
+    from LV_Optimization_Type import _EqualityParameters
+    return [name for name in steps if name in _EqualityParameters.SUPPORTED]
 
 
 def expected_sensitivity_evaluations(request, steps):
@@ -124,7 +124,7 @@ def expected_sensitivity_evaluations(request, steps):
     return (1 if dual else 0) + ((1 + 2 * central) if central else 0)
 
 
-def _multiplier_rows(request, steps, names, solution, payload, error, *, equalities=False):
+def _multiplier_rows(request, steps, names, solution, payload, error):
     rows = []
     duals = (solution or {}).get('parameter_duals') or {}
     values = parameter_values(request)
@@ -141,12 +141,8 @@ def _multiplier_rows(request, steps, names, solution, payload, error, *, equalit
             percent = 100 * delta / payload
             if np.isfinite([derivative, delta, percent]).all():
                 row.update(derivative=derivative, delta_payload=delta, percent=percent,
-                           status='Equality multiplier' if equalities else 'Multiplier')
-                if equalities:
-                    row['equality_dual'] = float(record['equality_dual'])
-                else:
-                    row['upper_dual'] = float(record['upper_dual'])
-                    row['lower_dual'] = float(record['lower_dual'])
+                           status='Equality multiplier',
+                           equality_dual=float(record['equality_dual']))
             else:
                 row['errors']['multiplier'] = 'Nonfinite multiplier'
         rows.append(row)
@@ -154,11 +150,10 @@ def _multiplier_rows(request, steps, names, solution, payload, error, *, equalit
 
 
 def compute_reported_sensitivities(base_request, steps, *, solve=None, initial_solution=None,
-                                   checkpoint=None, cancel_callback=None, parameter_eps=1e-6,
-                                   recoveries=None, parameter_equalities=False):
+                                   checkpoint=None, cancel_callback=None, recoveries=None):
     """Sensitivities shown in the tab.
 
-    Every selected dispersion factor is read from one buffered solve. The sampled
+    Every selected input is read from one equality-constrained solve. The sampled
     button is the path that re-solves at plus and minus each step.
     """
     request = sensitivity_request(base_request)
@@ -167,8 +162,7 @@ def compute_reported_sensitivities(base_request, steps, *, solve=None, initial_s
     if len(strategies) > 1:
         return _compute_recoveries(
             request, steps, strategies, solve=solve, initial_solution=initial_solution,
-            checkpoint=checkpoint, cancel_callback=cancel_callback, parameter_eps=parameter_eps,
-            parameter_equalities=parameter_equalities,
+            checkpoint=checkpoint, cancel_callback=cancel_callback,
             run=compute_reported_sensitivities,
             total_per_strategy=expected_sensitivity_evaluations(request, steps))
     request['recovery'] = strategies[0]
@@ -195,9 +189,7 @@ def compute_reported_sensitivities(base_request, steps, *, solve=None, initial_s
         publish()
         return report
     try:
-        solve_options = dict(lifted_parameters=list(dual), parameter_eps=parameter_eps)
-        if parameter_equalities:
-            solve_options['parameter_equalities'] = True
+        solve_options = dict(lifted_parameters=list(dual))
         solution = solve(deepcopy(request), init_guess=deepcopy(initial_solution), **solve_options)
         if not solution.get('success'):
             solution, payload, error = None, None, str(solution.get('return_status', 'Solver did not converge'))
@@ -211,8 +203,7 @@ def compute_reported_sensitivities(base_request, steps, *, solve=None, initial_s
     finally:
         report['evaluations'] += 1
     report['baseline'] = dict(payload=payload, error=error)
-    multiplier_rows = _multiplier_rows(request, steps, dual, solution, payload, error,
-                                      equalities=parameter_equalities)
+    multiplier_rows = _multiplier_rows(request, steps, dual, solution, payload, error)
     report['rows'] = list(multiplier_rows)
     publish()
     if central and not stopped():
@@ -399,12 +390,10 @@ def worker(directory):
         _atomic_json(directory / 'sensitivity_report.json', report)
         print(f"Sensitivity solve {report['evaluations']}/{report['total']} · {report['termination']}", flush=True)
 
-    method = settings.pop('method', 'multipliers')
-    if method not in {'multipliers', 'equalities', 'samples'}:
+    method = settings.pop('method', 'equalities')
+    if method not in {'equalities', 'samples'}:
         raise ValueError(f'Unknown sensitivity method: {method}')
     run = compute_sensitivities if method == 'samples' else compute_reported_sensitivities
-    if method == 'equalities':
-        settings['parameter_equalities'] = True
     run(**settings, initial_solution=initial, checkpoint=checkpoint,
         cancel_callback=lambda: (directory / 'CANCEL').exists())
 

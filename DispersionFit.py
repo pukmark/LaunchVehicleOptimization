@@ -127,7 +127,7 @@ def _validate_request(request):
 
 
 def _solve_candidate(request, init_guess=None, ipopt_options=None,
-                     lifted_parameters=None, parameter_eps=1e-6, parameter_equalities=False):
+                     lifted_parameters=None):
     from LV_Optimization_Type import LV_Optimization
     dispersion = _validate_request(request)
     model = LV_Optimization(dispersion, request['configuration'],
@@ -150,8 +150,7 @@ def _solve_candidate(request, init_guess=None, ipopt_options=None,
         RecoveryStrategy=request['recovery'], Target_Orbit=request['target_orbit'],
         payload_mass_predefined=request['payload_mass_predefined'], init_guess=init_guess,
         Plot_interm=False, print_ipopt=False, output_dir=None, ipopt_options=ipopt_options,
-        lifted_parameters=lifted_parameters, parameter_eps=parameter_eps,
-        parameter_equalities=parameter_equalities)
+        lifted_parameters=lifted_parameters)
 
 
 def simulation_channels(solution, phase):

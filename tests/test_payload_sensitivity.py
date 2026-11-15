@@ -235,13 +235,12 @@ class PayloadSensitivityTests(unittest.TestCase):
         self.assertEqual(report['rows'][0]['derivative'], 0)
         self.assertIn('Cancelled', report['termination'])
 
-    def test_expendable_supported_factors_use_one_multiplier_solve(self):
-        def solve(candidate, init_guess=None, lifted_parameters=None, parameter_eps=1e-6):
+    def test_expendable_supported_factors_use_one_equality_solve(self):
+        def solve(candidate, init_guess=None, lifted_parameters=None):
             self.assertEqual(lifted_parameters, ['SecondStageIsp', 'SecondStage_EmptyMass'])
-            self.assertEqual(parameter_eps, 1e-6)
             return {'success': True, 'payload_mass': np.array(10000), 'parameter_duals': {
-                'SecondStageIsp': {'payload_sensitivity': 1000., 'upper_dual': 1000., 'lower_dual': 0.},
-                'SecondStage_EmptyMass': {'payload_sensitivity': -1., 'upper_dual': 0., 'lower_dual': 1.}}}
+                'SecondStageIsp': {'payload_sensitivity': 1000., 'equality_dual': 1000.},
+                'SecondStage_EmptyMass': {'payload_sensitivity': -1., 'equality_dual': -1.}}}
 
         request = self.request()
         report = compute_reported_sensitivities(
@@ -249,10 +248,10 @@ class PayloadSensitivityTests(unittest.TestCase):
         self.assertEqual(report['evaluations'], 1)
         self.assertEqual(report['total'], 1)
         isp, mass = report['rows']
-        self.assertEqual(isp['status'], 'Multiplier')
+        self.assertEqual(isp['status'], 'Equality multiplier')
         self.assertAlmostEqual(isp['derivative'], 1000)
         self.assertAlmostEqual(isp['delta_payload'], 10)
-        self.assertEqual(mass['status'], 'Multiplier')
+        self.assertEqual(mass['status'], 'Equality multiplier')
         self.assertAlmostEqual(mass['derivative'], -1)
         self.assertAlmostEqual(mass['delta_payload'], -40)
         self.assertEqual(expected_sensitivity_evaluations(request, {'SecondStageIsp': .01, 'FirstStageIsp': .01}), 1)
@@ -260,10 +259,10 @@ class PayloadSensitivityTests(unittest.TestCase):
     def test_multiplier_runs_cover_selected_recoveries(self):
         calls = []
 
-        def solve(candidate, init_guess=None, lifted_parameters=None, parameter_eps=1e-6):
+        def solve(candidate, init_guess=None, lifted_parameters=None):
             calls.append((candidate['recovery'], init_guess))
             return {'success': True, 'payload_mass': 10000., 'parameter_duals': {
-                'FirstStageIsp': {'payload_sensitivity': 100., 'upper_dual': 100., 'lower_dual': 0.}}}
+                'FirstStageIsp': {'payload_sensitivity': 100., 'equality_dual': 100.}}}
 
         request = self.request()
         report = compute_reported_sensitivities(
@@ -277,18 +276,16 @@ class PayloadSensitivityTests(unittest.TestCase):
     def test_equality_multiplier_uses_exact_constraint_for_each_recovery(self):
         calls = []
 
-        def solve(candidate, init_guess=None, lifted_parameters=None, parameter_eps=1e-6,
-                  parameter_equalities=False):
-            calls.append((candidate['recovery'], parameter_equalities, lifted_parameters))
+        def solve(candidate, init_guess=None, lifted_parameters=None):
+            calls.append((candidate['recovery'], lifted_parameters))
             return {'success': True, 'payload_mass': 10000., 'parameter_duals': {
-                'FirstStageIsp': {'payload_sensitivity': 120., 'equality_dual': 120.,
-                                  'upper_dual': None, 'lower_dual': None}}}
+                'FirstStageIsp': {'payload_sensitivity': 120., 'equality_dual': 120.}}}
 
         report = compute_reported_sensitivities(
             self.request(), {'FirstStageIsp': .01}, solve=solve,
-            recoveries=['ASDS', 'RTLS'], parameter_equalities=True)
-        self.assertEqual(calls, [('ASDS', True, ['FirstStageIsp']),
-                                 ('RTLS', True, ['FirstStageIsp'])])
+            recoveries=['ASDS', 'RTLS'])
+        self.assertEqual(calls, [('ASDS', ['FirstStageIsp']),
+                                 ('RTLS', ['FirstStageIsp'])])
         self.assertEqual(report['evaluations'], 2)
         self.assertTrue(all(row['status'] == 'Equality multiplier' for row in report['rows']))
         self.assertTrue(all(row['equality_dual'] == 120. for row in report['rows']))
@@ -299,17 +296,14 @@ class PayloadSensitivityTests(unittest.TestCase):
         self.assertEqual(expected_sensitivity_evaluations(request, steps), 1)
         calls = []
 
-        def solve(candidate, init_guess=None, lifted_parameters=None, parameter_eps=1e-6,
-                  parameter_equalities=False):
-            calls.append((lifted_parameters, parameter_equalities))
+        def solve(candidate, init_guess=None, lifted_parameters=None):
+            calls.append(lifted_parameters)
             return {'success': True, 'payload_mass': 10000., 'parameter_duals': {
-                name: {'payload_sensitivity': float(index), 'equality_dual': float(index),
-                       'upper_dual': None, 'lower_dual': None}
+                name: {'payload_sensitivity': float(index), 'equality_dual': float(index)}
                 for index, name in enumerate(LAUNCH_PARAMETERS)}}
 
-        report = compute_reported_sensitivities(request, steps, solve=solve,
-                                                parameter_equalities=True)
-        self.assertEqual(calls, [(list(LAUNCH_PARAMETERS), True)])
+        report = compute_reported_sensitivities(request, steps, solve=solve)
+        self.assertEqual(calls, [list(LAUNCH_PARAMETERS)])
         self.assertEqual(report['evaluations'], 1)
         self.assertEqual([row['base'] for row in report['rows']],
                          [parameter_values(request)[name] for name in LAUNCH_PARAMETERS])
@@ -320,7 +314,7 @@ class PayloadSensitivityTests(unittest.TestCase):
             (path / 'sensitivity_inputs.json').write_text(json.dumps(dict(
                 base_request=self.request(), steps={'FirstStageIsp': .01})))
             solve = Mock(return_value={'success': True, 'payload_mass': 10000, 'parameter_duals': {
-                'FirstStageIsp': {'payload_sensitivity': 10000., 'upper_dual': 10000., 'lower_dual': 0.}}})
+                'FirstStageIsp': {'payload_sensitivity': 10000., 'equality_dual': 10000.}}})
             with patch('PayloadSensitivity._solve_candidate', solve):
                 worker(path)
             report = json.loads((path / 'sensitivity_report.json').read_text())
@@ -348,7 +342,7 @@ class PayloadSensitivityTests(unittest.TestCase):
             with patch('OptimizationGUI.subprocess.Popen', return_value=Mock()) as popen:
                 app.run_sensitivities()
             submitted = json.loads((app.run_dir / 'sensitivity_inputs.json').read_text())
-            self.assertEqual(submitted['method'], 'multipliers')
+            self.assertEqual(submitted['method'], 'equalities')
             self.assertEqual(app.sensitivity_total, 2)
             app.log_stream.close()
             app.process = None
@@ -357,20 +351,13 @@ class PayloadSensitivityTests(unittest.TestCase):
             sampled = json.loads((app.run_dir / 'sensitivity_inputs.json').read_text())
             self.assertEqual(sampled['method'], 'samples')
             self.assertEqual(app.sensitivity_total, 6)
-            app.log_stream.close()
-            app.process = None
-            with patch('OptimizationGUI.subprocess.Popen', return_value=Mock()):
-                app.run_sensitivities(method='equalities')
-            equality = json.loads((app.run_dir / 'sensitivity_inputs.json').read_text())
-            self.assertEqual(equality['method'], 'equalities')
-            self.assertEqual(app.sensitivity_total, 2)
             self.assertEqual(submitted['base_request']['payload_mass_predefined'], -1)
             self.assertEqual(submitted['recoveries'], ['ASDS', 'RTLS'])
             self.assertEqual(submitted['base_request']['target_orbit'], self.request()['target_orbit'])
             self.assertEqual(app.cases[0].result, {'payload_mass': 9000})
             self.assertEqual(app.job_kind, 'sensitivity')
             self.assertIn('PayloadSensitivity.py', popen.call_args.args[0][1])
-            self.assertEqual(app.notebook.select.call_count, 3)
+            self.assertEqual(app.notebook.select.call_count, 2)
             app.log_stream.close()
 
 

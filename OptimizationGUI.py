@@ -674,9 +674,6 @@ class OptimizationApp:
         self.notebook.add(sensitivity_tab, text='Sensitivity')
         sensitivity_header = ttk.Frame(sensitivity_tab)
         sensitivity_header.pack(fill='x')
-        self.sensitivity_button = ttk.Button(sensitivity_header, text='Run multiplier sensitivities',
-                                             command=self.run_sensitivities)
-        self.sensitivity_button.pack(side='left')
         self.sample_sensitivity_button = ttk.Button(
             sensitivity_header, text='Run sampled sensitivities',
             command=lambda: self.run_sensitivities(method='samples'))
@@ -689,7 +686,7 @@ class OptimizationApp:
         step_button.pack(side='left', padx=8)
         export_button = ttk.Button(sensitivity_header, text='Export results CSV…', command=self.export_sensitivity_results)
         export_button.pack(side='left')
-        self.controls.extend(((self.sensitivity_button, 'normal'), (self.sample_sensitivity_button, 'normal'),
+        self.controls.extend(((self.sample_sensitivity_button, 'normal'),
                               (self.equality_sensitivity_button, 'normal'),
                               (step_button, 'normal'), (export_button, 'normal')))
         self.sensitivity_summary = tk.StringVar(value='')
@@ -1865,8 +1862,7 @@ class OptimizationApp:
             count = len(case.sensitivity_settings) if case.sensitivity_settings else len(asdict(DispesrionFactorsType())) + len(LAUNCH_PARAMETERS)
             text = (f'{case.name}: choose vehicle, recovery, orbit and launch site in the right panel, then run. '
                     f"Recovery strategies: {', '.join(case.sensitivity_recoveries) if case.sensitivity_recoveries else 'current selection'}. "
-                    f'{count} parameters selected. Multiplier reads every selected input from one buffered solve. '
-                    'Equality reads multipliers from exact parameter equality constraints. '
+                    f'{count} parameters selected. Equality reads multipliers from exact parameter constraints in one solve. '
                     'Sampled re-optimizes the maximum payload at ±each step. '
                     'dP/dp is kg per parameter unit; the chart compares the configured steps. '
                     'Very small sampled steps can be dominated by solver noise; compare results at a second step size.')
@@ -1930,11 +1926,11 @@ class OptimizationApp:
         unit = field_unit(row['text'].split(' · ', 1)[-1]).replace('Δ ', '')
         self.sensitivity_detail.set(f"{row['text']}: dP/dp in kg per {unit}. {row['values'][-1]}")
 
-    def run_sensitivities(self, method='multipliers'):
+    def run_sensitivities(self, method='equalities'):
         from tkinter import messagebox
         if self.process is not None:
             return
-        if method not in {'multipliers', 'equalities', 'samples'}:
+        if method not in {'equalities', 'samples'}:
             raise ValueError(f'Unknown sensitivity method: {method}')
         try:
             request = sensitivity_request(self.sensitivity_form_request())

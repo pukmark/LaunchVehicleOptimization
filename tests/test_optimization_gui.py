@@ -671,8 +671,8 @@ class ResultRenderingTests(unittest.TestCase):
                 return process
 
             with patch('OptimizationGUI.subprocess.Popen', side_effect=start):
-                app.sensitivity_button.invoke()
-            self.assertEqual(str(app.sensitivity_button['state']), 'disabled')
+                app.equality_sensitivity_button.invoke()
+            self.assertEqual(str(app.equality_sensitivity_button['state']), 'disabled')
             self.assertIn('2/3 solves', app.status.get())
             app.cancel()
             app.root.after_cancel(app.poll_id)
@@ -682,7 +682,7 @@ class ResultRenderingTests(unittest.TestCase):
             self.assertEqual(case.sensitivity_report['rows'][0]['status'], 'Cancelled')
             self.assertIsNone(case.sensitivity_report['rows'][0]['derivative'])
             self.assertIn('partial results', case.sensitivity_report['termination'])
-            self.assertEqual(str(app.sensitivity_button['state']), 'normal')
+            self.assertEqual(str(app.equality_sensitivity_button['state']), 'normal')
             restored = self.make_app(directory)
             self.assertEqual(restored.cases[0].sensitivity_report, case.sensitivity_report)
 
