@@ -8,6 +8,12 @@ from TelemetryFrames import local_to_ecef_velocity
 from VehicleDefinitions import vehicle_name
 
 
+def kick_is_impulsive(solution):
+    """Recognize explicit and legacy two-state impulsive Kick Stage results."""
+    states = np.asarray(solution.get('x_kick', ()))
+    return bool(solution.get('kick_impulsive', states.ndim == 2 and states.shape[1] == 2))
+
+
 def orbit_curve(position, velocity, mu=VLType.mu, samples=361):
     """Sample a bound osculating Kepler ellipse, including the closing point."""
     position, velocity = np.asarray(position, dtype=float), np.asarray(velocity, dtype=float)
@@ -45,6 +51,22 @@ def solution_orbits(solution, target, mu=VLType.mu):
     """
     state = np.asarray(solution['x3'], dtype=float)[:, -1]
     parking = orbit_curve(state[:3], state[3:6], mu)
+    if 'x_kick' in solution:
+        kick_states = np.asarray(solution['x_kick'], dtype=float)
+        impulsive = kick_is_impulsive(solution)
+        final_state = kick_states[:, -1]
+        final = orbit_curve(final_state[:3], final_state[3:6], mu)
+        initial = kick_states[:, 0]
+        delivered_delta_v = np.linalg.norm(final_state[3:6] - initial[3:6])
+        final.update(burn_position=initial[:3], velocity_before=initial[3:6],
+                     velocity_after=final_state[3:6], delta_v=float(delivered_delta_v),
+                     inclination_change=float(np.arccos(np.clip(final['normal'][2], -1., 1.))
+                                              - np.arccos(np.clip(parking['normal'][2], -1., 1.))),
+                     plane_change=float(np.arctan2(np.linalg.norm(np.cross(parking['normal'], final['normal'])),
+                                                   np.dot(parking['normal'], final['normal']))),
+                     burn_location=('impulsive third-stage burn' if impulsive
+                                    else 'finite Curie burn'))
+        return parking, final
     if all(key in solution for key in ('final_burn_position', 'final_burn_velocity_before', 'final_burn_velocity_after')):
         position = np.asarray(solution['final_burn_position'], dtype=float).reshape(3)
         before = np.asarray(solution['final_burn_velocity_before'], dtype=float).reshape(3)
@@ -204,6 +226,18 @@ def annotate_second_burn(axis, burn, color, label):
 
 def maneuver_summary_text(solution, target):
     """Describe the maneuver using the computed case's target and state."""
+    if 'x_kick' in solution:
+        kick_states = np.asarray(solution['x_kick'], dtype=float)
+        impulsive = kick_is_impulsive(solution)
+        try:
+            _, final = solution_orbits(solution, target)
+        except (KeyError, ValueError):
+            return ('Final maneuver: momentary third-stage impulse' if impulsive
+                    else 'Final maneuver: finite Curie burn')
+        label = ('momentary third-stage impulse' if impulsive
+                 else 'finite Curie burn')
+        return (f"Final maneuver: {label} · "
+                f"Δv {final['delta_v']:,.2f} m/s")
     if solution.get('direct_injection') or target.get('direct_injection'):
         return 'Final maneuver: no second burn (direct injection)'
     try:
@@ -270,12 +304,16 @@ def case_results_text(solution, label, parking=None, final=None):
     for number, name in ((1, 'MECO'), (3, 'SECO')):
         if f't{number}_vec' in solution:
             lines.append(f"{name}: {formatted(np.asarray(solution[f't{number}_vec']).ravel()[-1], 's')}")
+    if 't_kick_vec' in solution:
+        lines.append(f"Kick cutoff: {formatted(np.asarray(solution['t_kick_vec']).ravel()[-1], 's')}")
     if 'Qdyn1_sol' in solution:
         pressure = np.asarray(solution['Qdyn1_sol'])
         pressure = pressure[np.isfinite(pressure)]
         lines.append(f"Max-Q (S1): {formatted(pressure.max() if pressure.size else None, 'kPa', .001)}")
     if 'propellant_mass_for_final_dv' in solution:
         lines.append(f"Orbit-burn propellant: {formatted(solution['propellant_mass_for_final_dv'], 't', .001, 3)}")
+    if 'third_stage_propellant_remaining' in solution:
+        lines.append(f"Kick propellant remaining: {formatted(solution['third_stage_propellant_remaining'], 'kg', 1., 2)}")
     return '\n'.join(lines)
 
 
@@ -331,6 +369,8 @@ def draw_trajectory_3d(figure, cases):
         trajectory = np.concatenate((np.asarray(solution['x2'])[:3].T,
                                      np.asarray(solution['x3'])[:3].T))
         path(trajectory, color, f'{label} · Stage 2', ':')
+        if 'x_kick' in solution:
+            path(np.asarray(solution['x_kick'])[:3].T, color, f'{label} · Third stage', '-.')
         parking = final = None
         try:
             parking, final = solution_orbits(solution, target, model.mu)

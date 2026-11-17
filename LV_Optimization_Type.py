@@ -14,6 +14,7 @@ import LV_Type_scaled as LV_Type
 import LV_Plot as LVp
 import pickle
 from LaunchSites import parse_launch_site
+from VehicleDefinitions import allowed_recoveries, vehicle_name
 from FinalManeuver import add_final_maneuver, seed_final_maneuver, orbit_geometry
 
 
@@ -137,6 +138,10 @@ def _complete_initial_solution(model, solution, recovery):
               'x3': (model.eci.nx, model.eci.N[1] + 1),
               'u3': (model.eci.nu, model.eci.N[1])}
     positive = ['payload_mass', 'dt1', 'dt2', 'dt3']
+    if model.kick is not None:
+        shapes.update(x_kick=(model.kick.nx, model.kick.N + 1),
+                      u_kick=(model.kick.nu, model.kick.N))
+        positive.append('dt_kick')
     vectors = {}
     if recovery != 'EXP':
         shapes['x4_landing'] = (model.rocket_return.nx, model.rocket_return.N + 1)
@@ -283,6 +288,105 @@ def _rollout_initial_guess(model, initial_state, steps, time_step, control, phas
     return states, controls
 
 
+def _add_finite_kick_stage(opti, diagnostics, kick, stage2_final, payload_mass,
+                           target, phase, state_units, state_components):
+    """Add the propagated third-stage arc and return its NLP variables."""
+    states = opti.variable(kick.nx, kick.N + 1)
+    controls = opti.variable(kick.nu, kick.N)
+    time_step = opti.variable(1)
+    separated = ca.vertcat(stage2_final[:6], kick.ThirdStage_FullMass + payload_mass)
+    after_coast = kick.dynamics_kp1(
+        kick.scale_x(separated), np.full(kick.nu, 1e-8),
+        kick.ThirdStage_CoastTimeAfterSep / kick.scaleT)
+    diagnostics.add(phase, 'Initial state after coast', states[:, 0] == after_coast,
+                    kick.scaleX, state_units, state_components)
+    diagnostics.add(phase, 'Time step lower bound', time_step >= 0.1 / kick.scaleT,
+                    kick.scaleT, 's')
+    maximum_step = (kick.ThirdStage_PropellentMass * kick.ThirdStage_Vac_Isp * kick.g0
+                    / kick.ThirdStage_Thrust / kick.N / kick.scaleT)
+    diagnostics.add(phase, 'Time step propellant upper bound', time_step <= maximum_step,
+                    kick.scaleT, 's')
+    minimum_mass = (kick.ThirdStage_EmptyMass + payload_mass) / kick.scaleX[6]
+    for index in range(kick.N):
+        diagnostics.add(phase, f'Dynamics k={index} → {index+1}',
+                        states[:, index+1] == kick.dynamics_kp1(
+                            states[:, index], controls[:, index], time_step),
+                        kick.scaleX, state_units, state_components)
+        diagnostics.add(phase, f'Thrust norm upper bound k={index}',
+                        ca.norm_2(controls[:, index]) <= 1.)
+        diagnostics.add(phase, f'Thrust norm lower bound k={index}',
+                        ca.norm_2(controls[:, index]) >= kick.ThirdStage_MinThrust_Factor)
+        diagnostics.add(phase, f'Payload acceleration k={index}',
+                        kick.specific_acc_fun(states[:, index], controls[:, index])
+                        / kick.Payload_Max_acc <= 1., kick.Payload_Max_acc, 'm/s²')
+        diagnostics.add(phase, f'Mass lower bound k={index}',
+                        states[6, index] >= minimum_mass, kick.scaleX[6], 'kg')
+    final = kick.unscale_x(states[:, -1])
+    diagnostics.add(phase, 'Final mass', states[6, -1] >= minimum_mass,
+                    kick.scaleX[6], 'kg')
+    geometry = orbit_geometry(kick, final)
+    diagnostics.add(phase, 'Deployment energy target',
+                    geometry['inverse_a'] * target['a'] == 1.)
+    diagnostics.add(phase, 'Deployment angular momentum target',
+                    ca.sumsqr(geometry['momentum'])
+                    / (kick.mu * target['a'] * (1. - target['e']**2)) == 1.)
+    momentum = ca.cross(final[:3], final[3:6])
+    diagnostics.add(phase, 'Deployment inclination target',
+                    momentum[2] / ca.norm_2(momentum) == np.cos(target['i']))
+    return {'states': states, 'controls': controls, 'time_step': time_step, 'final': final}
+
+
+def _seed_finite_kick_stage(opti, kick, variables, stage2_guess, eci,
+                            payload_mass, target, phase, diagnostics):
+    """Propagate a complete prograde Curie seed on the active mesh."""
+    initial = eci.unscale_x(stage2_guess[:, -1]).full().flatten()
+    initial[6] = kick.ThirdStage_FullMass + payload_mass
+    initial = kick.dynamics_kp1(
+        kick.scale_x(initial), np.full(kick.nu, 1e-8),
+        kick.ThirdStage_CoastTimeAfterSep / kick.scaleT).full().flatten()
+    physical = kick.unscale_x(initial).full().flatten()
+    radius, speed = np.linalg.norm(physical[:3]), np.linalg.norm(physical[3:6])
+    target_speed = np.sqrt(max(0., kick.mu * (2. / radius - 1. / target['a'])))
+    delta_v = max(abs(target_speed - speed), 10.)
+    initial_mass = kick.ThirdStage_FullMass + payload_mass
+    propellant = initial_mass * (1. - np.exp(-delta_v / (kick.ThirdStage_Vac_Isp * kick.g0)))
+    duration = propellant * kick.ThirdStage_Vac_Isp * kick.g0 / kick.ThirdStage_Thrust
+    maximum_duration = (.95 * kick.ThirdStage_PropellentMass
+                        * kick.ThirdStage_Vac_Isp * kick.g0 / kick.ThirdStage_Thrust)
+    duration = np.clip(duration, .1 * kick.N, maximum_duration)
+
+    def prograde(state):
+        return state[3:6] / np.linalg.norm(state[3:6])
+
+    def rollout(burn_duration):
+        step = burn_duration / kick.N / kick.scaleT
+        states, controls = _rollout_initial_guess(
+            kick, initial, kick.N, step, prograde, phase,
+            minimum_mass=kick.ThirdStage_EmptyMass + payload_mass)
+        return step, states, controls
+
+    try:
+        step, states, controls = rollout(duration)
+    except _IncompleteInitialGuess:
+        step, states, controls = rollout(maximum_duration)
+    opti.set_initial(variables['time_step'], step)
+    opti.set_initial(variables['states'], states)
+    opti.set_initial(variables['controls'], controls)
+    diagnostics.report(phase)
+
+
+def _unscale_kick_solution(kick, time_step, states, controls):
+    """Convert a solved Curie mesh to SI arrays used by results and warm starts."""
+    physical_step = float(np.asarray(time_step).item()) * kick.scaleT
+    physical_states = np.column_stack([
+        kick.unscale_x(states[:, index]).full().flatten()
+        for index in range(states.shape[1])])
+    physical_controls = np.column_stack([
+        kick.unscale_u(controls[:, index]).full().flatten()
+        for index in range(controls.shape[1])])
+    return physical_step, physical_states, physical_controls
+
+
 class InitialGuessConstraintDiagnostics:
     """Label actual Opti constraints and evaluate them at the current initial values.
 
@@ -416,6 +520,7 @@ class VLType(PythonMsg):
     booster: LV_Type.BoosterLaunchVehicle_2D = field(default = None)
     boostback: LV_Type.BoostBackBurn_2D = field(default = None)
     eci: LV_Type.LaunchVehicle_ECI = field(default = None)
+    kick: LV_Type.LaunchVehicle_ECI = field(default = None)
     rocket_return: LV_Type.BoosterReturn_2D = field(default = None)
     atmosphere: Atm_Type = field(default = None)
 
@@ -444,6 +549,9 @@ class LV_Optimization(VLType):
         self.booster = LV_Type.BoosterLaunchVehicle_2D(self.atmosphere, LV_Configuration, ScenarioDispersion, launch_site=self.launch_site)
         self.boostback = LV_Type.BoostBackBurn_2D(ScenarioDispersion, LV_Configuration, launch_site=self.launch_site)
         self.eci = LV_Type.LaunchVehicle_ECI(ScenarioDispersion, LV_Configuration, launch_site=self.launch_site)
+        self.kick = (LV_Type.LaunchVehicle_ECI(ScenarioDispersion, LV_Configuration, N=20,
+                                               launch_site=self.launch_site, stage=3)
+                     if self.eci.has_third_stage else None)
         self.rocket_return = LV_Type.BoosterReturn_2D(self.atmosphere, LV_Configuration, ScenarioDispersion, launch_site=self.launch_site)
 
     def SolveOptimiztion(self, RecoveryStrategy: list = 'EXP',
@@ -457,6 +565,8 @@ class LV_Optimization(VLType):
                          initial_guess_diagnostics: bool = True):
         if RecoveryStrategy not in {'EXP', 'ASDS', 'RTLS'}:
             raise ValueError(f'Unknown recovery strategy: {RecoveryStrategy}')
+        if RecoveryStrategy not in allowed_recoveries(self.LV_Configuration):
+            raise ValueError(f'{vehicle_name(self.LV_Configuration)} supports expendable missions only.')
         if init_guess is None:
             init_guess = 0.5
         elif isinstance(init_guess, dict):
@@ -492,6 +602,7 @@ class LV_Optimization(VLType):
         phase1 = 'First-stage ascent'
         phase2 = 'Second stage before fairing separation'
         phase3 = 'Second stage after fairing separation'
+        phase_kick = 'Third-stage finite delivery burn'
         separation = 'Booster separation'
         boostback = 'Boostback burn'
         ballistic = 'Ballistic coast to reentry'
@@ -560,7 +671,8 @@ class LV_Optimization(VLType):
                         scale=self.booster.FirstStage_StageSeparationMaxDynamicPressure / 1000., unit='kPa')
         if RecoveryStrategy == 'EXP':
             diagnostics.add(phase1, 'Final mass lower bound',
-                            x1[4,self.booster.N] >= (self.eci.EmptyFirstStageMass + self.eci.SecondStage_FullMass + payload_mass) / self.booster.scaleX[4],
+                            x1[4,self.booster.N] >= (self.eci.EmptyFirstStageMass + self.eci.SecondStage_FullMass
+                                                    + self.eci.ThirdStage_FullMass + payload_mass) / self.booster.scaleX[4],
                             self.booster.scaleX[4], 'kg')
 
         # Phase 2 - Second Stage, before fairing separation (if needed)
@@ -573,7 +685,8 @@ class LV_Optimization(VLType):
         diagnostics.add(phase2, 'Launch azimuth lower bound', LaunchAz >= -np.pi/2, 180. / np.pi, 'deg')
         diagnostics.add(phase2, 'Launch azimuth upper bound', LaunchAz <= np.pi/2, 180. / np.pi, 'deg')
         eci_pos, eci_vel = self.eci.local_to_eci_func(ca.vertcat(x1f[0], 0.0, x1f[1]), ca.vertcat(x1f[2], 0.0, x1f[3]), LaunchAz)
-        x2_init = ca.vertcat(eci_pos, eci_vel, self.eci.SecondStage_FullMass + payload_mass)
+        x2_init = ca.vertcat(eci_pos, eci_vel, self.eci.SecondStage_FullMass
+                            + self.eci.ThirdStage_FullMass + payload_mass)
         x2_beforeCoast = self.eci.scale_x(x2_init)
         x2_afterCoast = self.eci.dynamics_kp1(x2_beforeCoast, 1e-8*np.ones((self.eci.nu,)), self.eci.SecondStage_CoastTimeAfterSep / self.eci.scaleT)
         
@@ -617,15 +730,18 @@ class LV_Optimization(VLType):
         # Default: parking orbit plus a later-burn propellant reserve. Callers
         # may request direct injection into the supplied deployment orbit.
         x3f = self.eci.unscale_x(x3[:,self.eci.N[1]])
+        has_kick = self.kick is not None
         direct_injection = bool(Target_Orbit.get('direct_injection', False))
-        maneuver = None if direct_injection else add_final_maneuver(opti, diagnostics, self.eci, x3f, Target_Orbit, phase3)
+        maneuver = (None if has_kick or direct_injection else
+                    add_final_maneuver(opti, diagnostics, self.eci, x3f, Target_Orbit, phase3))
         extra_variables = [] if maneuver is None else list(maneuver['variables'])
-        propellent_mass_for_final_dv = ca.MX(0.) if direct_injection else maneuver['reserve']
+        propellent_mass_for_final_dv = ca.MX(0.) if maneuver is None else maneuver['reserve']
 
-        x3f_minmass_scaled = (self.eci.SecondStage_EmptyMass + payload_mass + propellent_mass_for_final_dv) / self.eci.scaleX[6]
-        diagnostics.add(phase3, 'Final mass including orbit-burn reserve',
+        x3f_minmass_scaled = (self.eci.SecondStage_EmptyMass + self.eci.ThirdStage_FullMass
+                              + payload_mass + propellent_mass_for_final_dv) / self.eci.scaleX[6]
+        diagnostics.add(phase3, 'Final retained mass',
                         x3[6,self.eci.N[1]] >= x3f_minmass_scaled, self.eci.scaleX[6], 'kg')
-        if direct_injection:
+        if direct_injection and not has_kick:
             geometry = orbit_geometry(self.eci, x3f)
             diagnostics.add(phase3, 'Deployment energy target',
                             geometry['inverse_a'] * Target_Orbit['a'] == 1.)
@@ -635,6 +751,17 @@ class LV_Optimization(VLType):
             diagnostics.add(phase3, 'Deployment inclination target',
                             angular_momentum[2] / ca.norm_2(angular_momentum)
                             == np.cos(Target_Orbit['i']))
+
+        # Optional third stage: separate, coast, then propagate the finite Curie burn.
+        if has_kick:
+            kick_problem = _add_finite_kick_stage(
+                opti, diagnostics, self.kick, x3f, payload_mass, Target_Orbit,
+                phase_kick, eci_units, eci_components)
+            x_kick = kick_problem['states']
+            u_kick = kick_problem['controls']
+            dt_kick = kick_problem['time_step']
+            kick_final = kick_problem['final']
+            extra_variables.extend((x_kick, u_kick, dt_kick))
         
     # Phase 4 - Booster Return:
         if RecoveryStrategy != 'EXP':
@@ -677,7 +804,8 @@ class LV_Optimization(VLType):
                             self.rocket_return.scaleT, 's')
 
             # Set the initial state
-            x4_init_unscaled = ca.vertcat(x1f[0:4], x1f[4] - (self.eci.SecondStage_FullMass + payload_mass))
+            x4_init_unscaled = ca.vertcat(x1f[0:4], x1f[4] - (self.eci.SecondStage_FullMass
+                                                              + self.eci.ThirdStage_FullMass + payload_mass))
             
             # Boostback phase and ballistic phase
             if RecoveryStrategy == 'RTLS':
@@ -783,6 +911,8 @@ class LV_Optimization(VLType):
             cost += 0.05*gain*ca.sumsqr(u4_landing[1:]-u4_landing[:-1]) 
         if payload_mass_predefined < 0:
             cost += -payload_mass # maximize the payload mass and propellant spares
+        elif has_kick:
+            cost += -(kick_final[6] - self.kick.ThirdStage_EmptyMass - payload_mass)
         else:
             cost += -(x3f[6] - self.eci.SecondStage_EmptyMass - payload_mass - propellent_mass_for_final_dv) # maximize the payload mass and propellant spares
         opti.minimize(cost)
@@ -852,7 +982,9 @@ class LV_Optimization(VLType):
         nominal_burn = _nominal_orbit_burn(self.eci, nominal_separation, LaunchAz_guess, Target_Orbit)
         final_burn_ratio = float(nominal_burn['delta_v']) / (0.99 * self.eci.SecondStage_Vac_Isp * self.eci.g0)
 
-        if payload_mass_predefined <= 0.0:
+        if payload_mass_predefined <= 0.0 and has_kick:
+            payload_mass_guess = (init_guess['payload_mass'] if isinstance(init_guess, dict) else 200.0)
+        elif payload_mass_predefined <= 0.0:
             alpha = ca.exp(ca.fabs(v_parking-v3_0_guess) / (self.eci.SecondStage_Vac_Isp * self.eci.g0) + final_burn_ratio)
             if type(init_guess) == float:
                 payload_mass_guess = max(0., float(init_guess*(self.eci.SecondStage_FullMass - alpha*self.eci.SecondStage_EmptyMass)/(alpha-1.0)))
@@ -876,7 +1008,8 @@ class LV_Optimization(VLType):
         else:    
             dm = 0.0
         separation_mass_target = float(self.booster.EmptyFirstStageMass +
-                                       self.eci.SecondStage_FullMass + payload_mass_guess + dm)
+                                       self.eci.SecondStage_FullMass + self.eci.ThirdStage_FullMass
+                                       + payload_mass_guess + dm)
 
         x1_guess[:,0] = self.booster.scale_x(x0_guess).full().flatten()
         if type(payload_mass_scaled) == ca.MX:
@@ -947,12 +1080,14 @@ class LV_Optimization(VLType):
         LaunchAz_guess = _initial_launch_azimuth(self.eci, x1f_guess, Target_Orbit['i'])
         nominal_burn = _nominal_orbit_burn(self.eci, x1f_guess, LaunchAz_guess, Target_Orbit)
         final_burn_ratio = float(nominal_burn['delta_v']) / (0.99 * self.eci.SecondStage_Vac_Isp * self.eci.g0)
-        m3_final = float(self.eci.SecondStage_EmptyMass + payload_mass_guess) * np.expm1(final_burn_ratio)
+        m3_final = (0. if has_kick else
+                    float(self.eci.SecondStage_EmptyMass + payload_mass_guess) * np.expm1(final_burn_ratio))
         opti.set_initial(LaunchAz, LaunchAz_guess)
         pos, vel = self.eci.local_to_eci_func(
             ca.vertcat(x1f_guess[0], 0.0, x1f_guess[1]),
             ca.vertcat(x1f_guess[2], 0.0, x1f_guess[3]), LaunchAz_guess)
-        x2_init = ca.vertcat(pos, vel, self.eci.SecondStage_FullMass + payload_mass_guess)
+        x2_init = ca.vertcat(pos, vel, self.eci.SecondStage_FullMass
+                            + self.eci.ThirdStage_FullMass + payload_mass_guess)
         # Match the constraint: separate, transform to ECI, then coast until ignition.
         x2_guess[:,0] = self.eci.dynamics_kp1(
             self.eci.scale_x(x2_init), 1e-8*np.ones(self.eci.nu),
@@ -990,7 +1125,8 @@ class LV_Optimization(VLType):
         dt3_guess = 370.0/self.eci.N[1]/self.eci.scaleT
         x3_initial = x2_guess[:,-1].copy()
         x3_initial[6] -= self.eci.FairingMass / self.eci.scaleX[6]
-        minimum_stage3_mass = float(m3_final + self.eci.SecondStage_EmptyMass + payload_mass_guess)
+        minimum_stage3_mass = float(m3_final + self.eci.SecondStage_EmptyMass
+                                    + self.eci.ThirdStage_FullMass + payload_mass_guess)
         best_stage3 = _BestInitialGuess()
         iter=0
 
@@ -1057,6 +1193,11 @@ class LV_Optimization(VLType):
         if maneuver is not None:
             seed_final_maneuver(opti, maneuver, self.eci, self.eci.unscale_x(x3_guess[:, -1]), Target_Orbit)
         diagnostics.report(phase3)
+
+        if has_kick and not isinstance(init_guess, dict):
+            _seed_finite_kick_stage(
+                opti, self.kick, kick_problem, x3_guess, self.eci,
+                payload_mass_guess, Target_Orbit, phase_kick, diagnostics)
 
         # A supplied trajectory already contains the recovery states and controls.
         # Avoid running the expensive recovery search before overwriting its result.
@@ -1302,6 +1443,12 @@ class LV_Optimization(VLType):
                 opti.set_initial(x3[:,k], self.eci.scale_x(init_guess['x3'][:,k]))
             for k in range(init_guess['u3'].shape[1]):
                 opti.set_initial(u3[:,k], self.eci.scale_u(init_guess['u3'][:,k]))
+            if has_kick:
+                opti.set_initial(dt_kick, init_guess['dt_kick'] / self.kick.scaleT)
+                for k in range(init_guess['x_kick'].shape[1]):
+                    opti.set_initial(x_kick[:, k], self.kick.scale_x(init_guess['x_kick'][:, k]))
+                for k in range(init_guess['u_kick'].shape[1]):
+                    opti.set_initial(u_kick[:, k], self.kick.scale_u(init_guess['u_kick'][:, k]))
             if RecoveryStrategy != 'EXP':
                 opti.set_initial(dt4_ballistic, init_guess['dt4_ballistic']/self.rocket_return.scaleT)
                 opti.set_initial(dt4_reentry, init_guess['dt4_reentry']/self.rocket_return.scaleT)
@@ -1350,6 +1497,10 @@ class LV_Optimization(VLType):
             dt3_scaled_sol = np.array(sol.value(dt3))
             x3_scaled_sol = np.array(sol.value(x3))
             u3_scaled_sol = np.array(sol.value(u3))
+            if has_kick:
+                dt_kick_scaled_sol = np.array(sol.value(dt_kick))
+                x_kick_scaled_sol = np.array(sol.value(x_kick))
+                u_kick_scaled_sol = np.array(sol.value(u_kick))
             if type(payload_mass_scaled) == ca.MX:
                 payload_mass_scaled_sol = np.array(sol.value(payload_mass_scaled))
             LaunchAz_sol = np.array(sol.value(LaunchAz))
@@ -1384,6 +1535,10 @@ class LV_Optimization(VLType):
             dt3_scaled_sol = np.array(opti.debug.value(dt3))
             x3_scaled_sol = np.array(opti.debug.value(x3))
             u3_scaled_sol = np.array(opti.debug.value(u3))
+            if has_kick:
+                dt_kick_scaled_sol = np.array(opti.debug.value(dt_kick))
+                x_kick_scaled_sol = np.array(opti.debug.value(x_kick))
+                u_kick_scaled_sol = np.array(opti.debug.value(u_kick))
             if type(payload_mass_scaled) == ca.MX:
                 payload_mass_scaled_sol = np.array(opti.debug.value(payload_mass_scaled))
             LaunchAz_sol = np.array(opti.debug.value(LaunchAz))
@@ -1434,6 +1589,9 @@ class LV_Optimization(VLType):
         u3_sol = np.zeros_like(u3_scaled_sol)
         for i in range(u3_scaled_sol.shape[1]):
             u3_sol[:,i] = self.eci.unscale_u(u3_scaled_sol[:,i]).full().flatten()
+        if has_kick:
+            dt_kick_sol, x_kick_sol, u_kick_sol = _unscale_kick_solution(
+                self.kick, dt_kick_scaled_sol, x_kick_scaled_sol, u_kick_scaled_sol)
         if RecoveryStrategy != 'EXP':
             dt4_reentry_sol = dt4_reentry_scaled_sol * self.rocket_return.scaleT
             dt4_ballistic_sol = dt4_ballistic_scaled_sol * self.rocket_return.scaleT
@@ -1490,7 +1648,7 @@ class LV_Optimization(VLType):
         # save the solution
         self.Solution = {}
         self.Solution['solution_units'] = 'SI'
-        self.Solution['direct_injection'] = direct_injection
+        self.Solution['direct_injection'] = direct_injection or has_kick
         self.Solution['configuration'] = self.LV_Configuration
         self.Solution['launch_site'] = dict(self.launch_site)
         self.Solution['dispersion'] = dispersion_values
@@ -1506,7 +1664,17 @@ class LV_Optimization(VLType):
         self.Solution['payload_mass'] = payload_mass_sol
         self.Solution['propellant_mass_for_final_dv'] = float(propellent_mass_for_final_dv_sol)
         value = sol.value if solve_error is None else opti.debug.value
-        self.Solution['final_burn_delta_v'] = 0. if direct_injection else float(value(maneuver['delta_v']))
+        self.Solution['final_burn_delta_v'] = (float(
+            self.kick.ThirdStage_Vac_Isp * self.kick.g0
+            * np.log(x_kick_sol[6, 0] / x_kick_sol[6, -1])) if has_kick
+                                               else 0. if maneuver is None
+                                               else float(value(maneuver['delta_v'])))
+        if has_kick:
+            self.Solution.update(x_kick=x_kick_sol, u_kick=u_kick_sol,
+                                 dt_kick=dt_kick_sol, has_third_stage=True,
+                                 kick_impulsive=False,
+                                 third_stage_propellant_remaining=float(
+                                     x_kick_sol[6, -1] - self.kick.ThirdStage_EmptyMass - payload_mass_sol))
         if maneuver is not None:
             self.Solution['final_burn_coast_angle'] = float(value(maneuver['coast_angle']))
             self.Solution['final_burn_position'] = np.asarray(value(maneuver['position'])).ravel()
@@ -1534,6 +1702,11 @@ class LV_Optimization(VLType):
         t1_vec = np.linspace(init_time, init_time+self.booster.N*dt1_sol, self.booster.N+1)
         t2_vec = np.linspace(t1_vec[-1], t1_vec[-1]+self.eci.N[0]*dt2_sol, self.eci.N[0]+1) + self.eci.SecondStage_CoastTimeAfterSep
         t3_vec = np.linspace(t2_vec[-1], t2_vec[-1]+self.eci.N[1]*dt3_sol, self.eci.N[1]+1)
+        if has_kick:
+            t_kick_vec = (np.linspace(t3_vec[-1],
+                                      t3_vec[-1] + self.kick.N * dt_kick_sol,
+                                      self.kick.N + 1)
+                          + self.kick.ThirdStage_CoastTimeAfterSep)
 
         Isp1_sol, acc1_sol = np.zeros((self.booster.N)), np.zeros((self.booster.N))
         Qdyn1_sol = np.zeros((self.booster.N+1))
@@ -1613,6 +1786,25 @@ class LV_Optimization(VLType):
         v3_desired = ca.sqrt(self.eci.mu * (2.0 / apogee3_sol[-1] - 1.0 / Target_Orbit["a"]))
         propellent_mass_for_final_dv3 = x3_sol[6,self.eci.N[1]] * (1.0 - ca.exp((v3_apogee - v3_desired) / (self.eci.SecondStage_Vac_Isp * self.eci.g0)))
         actual_apogee3 = Target_Orbit["a"] * (1.0 + Target_Orbit["e"])
+
+        if has_kick:
+            alt_kick_sol = np.linalg.norm(x_kick_sol[:3], axis=0) - self.kick.R0
+            Isp_kick_sol = np.array([
+                float(self.kick.ISP_calc(x_kick_scaled_sol[:, k], u_kick_scaled_sol[:, k]))
+                for k in range(self.kick.N)])
+            acc_kick_sol = np.array([
+                float(self.kick.specific_acc_fun(x_kick_scaled_sol[:, k], u_kick_scaled_sol[:, k]))
+                for k in range(self.kick.N)])
+            momentum = np.cross(x_kick_sol[:3].T, x_kick_sol[3:6].T).T
+            momentum_norm = np.linalg.norm(momentum, axis=0)
+            i_kick_sol = np.arccos(np.clip(momentum[2] / momentum_norm, -1., 1.))
+            radius = np.linalg.norm(x_kick_sol[:3], axis=0)
+            speed2 = np.sum(x_kick_sol[3:6]**2, axis=0)
+            energy = .5 * speed2 - self.kick.mu / radius
+            semimajor = -self.kick.mu / (2. * energy)
+            eccentricity = np.sqrt(np.maximum(0., 1. + 2. * energy * momentum_norm**2 / self.kick.mu**2))
+            apogee_kick_sol = semimajor * (1. + eccentricity)
+            perigee_kick_sol = semimajor * (1. - eccentricity)
 
         if RecoveryStrategy != 'EXP':
             if RecoveryStrategy == 'RTLS':
@@ -1747,6 +1939,11 @@ class LV_Optimization(VLType):
         self.Solution['i3_sol'] = i3_sol
         self.Solution['Isp3_sol'] = Isp3_sol
         self.Solution['Alpha3_sol'] = Alpha3_sol
+        if has_kick:
+            self.Solution.update(t_kick_vec=t_kick_vec, alt_kick_sol=alt_kick_sol,
+                                 acc_kick_sol=acc_kick_sol, Isp_kick_sol=Isp_kick_sol,
+                                 i_kick_sol=i_kick_sol, apogee_kick_sol=apogee_kick_sol,
+                                 perigee_kick_sol=perigee_kick_sol)
 
         if RecoveryStrategy != 'EXP':
             if RecoveryStrategy == 'RTLS':

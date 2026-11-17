@@ -31,11 +31,12 @@ from TrajectoryCSV import export_trajectory_csv
 from VehicleDefinitions import (VEHICLE_PARAMETERS, BUILTIN_VEHICLES, VEHICLE_PARAMETER_GROUPS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name,
                                 read_vehicle_definition, write_vehicle_definition,
-                                validate_vehicle_definition, migrate_builtin_vehicles)
+                                validate_vehicle_definition, migrate_builtin_vehicles,
+                                allowed_recoveries)
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from TelemetryFrames import local_to_ecef_velocity, eci_to_ecef_velocity
 from Trajectory3D import (draw_trajectory_3d, maneuver_summary_text, second_burn_history,
-                          annotate_second_burn)
+                          annotate_second_burn, kick_is_impulsive)
 from IntegratedResults import draw_integrated_results
 from PaperResults import draw_paper_results, paper_comparison_costs
 from BoosterResults import draw_booster_altitude_results
@@ -49,7 +50,8 @@ PROJECT_DIR = Path(__file__).resolve().parent
 RECOVERY = {"EXP — Expendable": "EXP", "ASDS — Drone ship": "ASDS",
             "RTLS — Return to launch site": "RTLS"}
 VEHICLES = BUILTIN_VEHICLES
-RESULT_TABS = ("Summery", "First stage", "S1 details", "Second stage", "S2 propulsion", "S2 orbit", "3D trajectory", "Booster", "Booster 2", "Paper figures")
+RESULT_TABS = ("Summery", "First stage", "S1 details", "Second stage", "S2 propulsion", "S2 orbit",
+               "Third stage", "3D trajectory", "Booster", "Booster 2", "Paper figures")
 MULTIPLIERS = {"FirstStageIsp", "SecondStageIsp", "FirstStageThrust",
                "SecondStageThrust", "FirstStageCx0", "BoosterStageCx0", "AtmosphereDensity"}
 
@@ -190,6 +192,8 @@ def parse_payload_mass(value):
 def nominal_request(values, configuration=1, recovery="EXP", orbit_values=None, payload_mass=-1, launch_site=None):
     if recovery not in RECOVERY.values():
         raise ValueError("Unknown recovery strategy.")
+    if recovery not in allowed_recoveries(configuration):
+        raise ValueError(f"{vehicle_name(configuration)} supports expendable missions only.")
     site = parse_launch_site(launch_site)
     dispersion = parse_dispersion(values, configuration)
     if 6378137.0 + site["altitude"] + dispersion.LaunchAltDelta <= 0:
@@ -277,6 +281,7 @@ def second_stage_propellant_remaining(solution, request=None):
     model.ApplyScenarioDispersionToLV(DispesrionFactorsType(**dispersion))
     remaining = (float(np.asarray(solution["x3"])[6, -1])
                  - float(solution["payload_mass"]) - model.SecondStage_EmptyMass
+                 - model.ThirdStage_FullMass
                  - float(solution["propellant_mass_for_final_dv"]))
     if not np.isfinite(remaining):
         return None
@@ -427,6 +432,21 @@ def draw_phase(figure, phase, solution, target, *, color="tab:blue", case_label=
             axes[5].axhline((target[key] - 6378137.0) / 1000, color=color,
                            linestyle=style, alpha=0.65)
         axes[5].set_yscale("symlog", linthresh=100)
+    elif phase == "Third stage":
+        if 'x_kick' not in s:
+            figure.text(.5, .5, 'This vehicle has no third stage.', ha='center', va='center')
+            return False
+        t, x, u = np.asarray(s['t_kick_vec']).ravel(), np.asarray(s['x_kick']), np.asarray(s['u_kick'])
+        orbit = orbital_diagnostics(x)
+        line(0, t, s['alt_kick_sol'] / 1000., 'Third-stage altitude', 'Altitude [km]')
+        line(1, t, np.linalg.norm(x[3:6], axis=0), 'Third-stage inertial speed', 'Speed [m/s]')
+        line(2, t, x[6], 'Third-stage mass', 'Mass [kg]')
+        if kick_is_impulsive(s):
+            line(3, t[:-1], np.linalg.norm(u, axis=0), 'Momentary third-stage impulse', 'Δv [m/s]')
+        else:
+            line(3, t[:-1], np.linalg.norm(u, axis=0) / 1000., 'Curie thrust', 'Thrust [kN]')
+        line(4, t, np.rad2deg(s['i_kick_sol']), 'Orbital inclination', 'Inclination [deg]')
+        line(5, t, (s['apogee_kick_sol'] - VLType.R0) / 1000., 'Osculating apogee', 'Altitude [km]')
     elif phase == "Booster":
         t, x = np.asarray(s["t4_vec"]).ravel(), np.asarray(s["x4"])
         line(0, x[:, 0] / 1000, x[:, 1] / 1000, "Return trajectory", "Local Z [km]", xlabel="Downrange [km]")
@@ -735,6 +755,8 @@ class OptimizationApp:
             combo.grid(row=row, column=1, sticky="ew", pady=4)
             if row == 0:
                 self.vehicle_combo = combo
+            else:
+                self.recovery_combo = combo
             self.controls.append((combo, "readonly"))
         vehicle_actions = ttk.Frame(settings)
         vehicle_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
@@ -825,6 +847,7 @@ class OptimizationApp:
         self.vehicle.trace_add("write", self.inputs_changed)
         self.vehicle.trace_add("write", self.refresh_dispersion_nominals)
         self.vehicle.trace_add("write", self.refresh_vehicle_actions)
+        self.vehicle.trace_add("write", self.refresh_recovery_choices)
         self.refresh_vehicle_actions()
         self.site_variables['altitude'].trace_add("write", self.refresh_dispersion_nominals)
         self.refresh_dispersion_nominals()
@@ -1168,6 +1191,16 @@ class OptimizationApp:
             self.status.set(f"{self.cases[self.selected_case].name}: inputs changed — run to apply.")
             self.schedule_save()
 
+    def refresh_recovery_choices(self, *args):
+        """Constrain built-ins such as Electron to their physical recovery modes."""
+        if not hasattr(self, 'recovery_combo') or self.vehicle.get() not in self.vehicles:
+            return
+        permitted = set(allowed_recoveries(self.vehicles[self.vehicle.get()]))
+        labels = [label for label, value in RECOVERY.items() if value in permitted]
+        self.recovery_combo.configure(values=labels)
+        if RECOVERY.get(self.recovery.get()) not in permitted:
+            self.recovery.set(labels[0])
+
     def select_case(self, index):
         if self.process is not None:
             self.case_selection.set(self.selected_case)
@@ -1408,7 +1441,8 @@ class OptimizationApp:
                                           for case in displayed])
                 self.canvases[phase].draw_idle()
                 continue
-            channels = telemetry.channels(phase_group(phase), primary) if telemetry else {}
+            group = phase_group(phase)
+            channels = telemetry.channels(group, primary) if telemetry and group != 'stage3' else {}
             speed_frame = "ECEF" if any(key in channels for key in ("speed", "vx", "vy", "vz")) else "Inertial"
             phase_cases = [case for case in displayed if phase != "Booster" or "x4" in case.result]
             if not phase_cases:
@@ -1428,7 +1462,7 @@ class OptimizationApp:
                         windows.append((min(0, float(np.min(case.result["t1_vec"]))), float(np.max(case.result["t1_vec"]))))
                     elif phase == "Booster":
                         windows.append((float(np.min(case.result["t4_vec"])), float(np.max(case.result["t4_vec"]))))
-            show_telemetry = telemetry is not None and (phase != "Booster" or has_booster)
+            show_telemetry = telemetry is not None and group != 'stage3' and (phase != "Booster" or has_booster)
             overlaid = show_telemetry and overlay_telemetry(figure, phase, telemetry, primary,
                                                           self.telemetry_color, self.telemetry_shift, windows)
             if overlaid:

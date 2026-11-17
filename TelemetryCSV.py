@@ -258,7 +258,11 @@ def interpolate_speed_time(time, speed, target_speed):
 
 
 def phase_group(phase):
-    return "booster" if phase == "Booster" else "stage2" if phase.startswith("S2") or phase == "Second stage" else "stage1"
+    if phase == 'Booster':
+        return 'booster'
+    if phase == 'Third stage':
+        return 'stage3'
+    return "stage2" if phase.startswith("S2") or phase == "Second stage" else "stage1"
 
 
 def overlay_telemetry(figure, phase, telemetry, primary_group, color, shift=0, windows=None):

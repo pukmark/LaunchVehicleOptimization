@@ -46,6 +46,25 @@ class Trajectory3DTests(unittest.TestCase):
         self.assertTrue(np.isfinite(orbit['points']).all())
         np.testing.assert_allclose(np.linalg.norm(orbit['points'], axis=1), radius)
 
+    def test_impulsive_kick_stage_supplies_final_orbit_and_summary(self):
+        parking_radius = VLType.R0 + 180000.
+        final_radius = VLType.R0 + 200000.
+        x3 = np.zeros((7, 1))
+        x3[:, 0] = [parking_radius, 0., 0., 0., np.sqrt(VLType.mu / parking_radius), 0., 400.]
+        x_kick = np.zeros((7, 2))
+        x_kick[:, 0] = [parking_radius, 0., 0., 0., np.sqrt(VLType.mu / parking_radius), 0., 290.]
+        x_kick[:, 1] = [final_radius, 0., 0., 0., np.sqrt(VLType.mu / final_radius), 0., 270.]
+        solution = {'configuration': 6, 'x3': x3, 'x_kick': x_kick,
+                    'direct_injection': True, 't_kick_vec': [500., 600.]}
+        target = {'apogee': final_radius, 'perigee': final_radius, 'i': 0.}
+        parking, final = solution_orbits(solution, target)
+        self.assertAlmostEqual(final['apogee'], final_radius)
+        self.assertAlmostEqual(final['perigee'], final_radius)
+        expected_delta_v = np.linalg.norm(x_kick[3:6, 1] - x_kick[3:6, 0])
+        self.assertAlmostEqual(final['delta_v'], expected_delta_v)
+        self.assertIn('momentary third-stage impulse', maneuver_summary_text(solution, target))
+        self.assertIn('Kick cutoff: 600.0 s', case_results_text(solution, 'Electron', parking, final))
+
     def test_final_burn_at_parking_apogee_matches_saved_speed_and_target(self):
         solution, target = elliptic_case()
         original = deepcopy(solution)

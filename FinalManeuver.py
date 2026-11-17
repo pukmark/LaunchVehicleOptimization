@@ -18,7 +18,7 @@ def orbit_geometry(model, state):
                 momentum_norm=momentum_norm)
 
 
-def add_final_maneuver(opti, diagnostics, model, state, target, phase):
+def add_final_maneuver(opti, diagnostics, model, state, target, phase, *, vacuum_isp=None):
     """Keep the parking apogee at target perigee, with free coast angle/RAAN.
 
     Project the eccentricity vector onto a local orbital basis instead of
@@ -64,7 +64,8 @@ def add_final_maneuver(opti, diagnostics, model, state, target, phase):
                     delta_v_scaled == ca.sqrt(ca.sumsqr((after - before) / velocity_scale) + 1e-12),
                     velocity_scale, 'm/s')
     delta_v = velocity_scale * delta_v_scaled
-    retained = ca.exp(-delta_v / (.99 * model.SecondStage_Vac_Isp * model.g0))
+    vacuum_isp = model.SecondStage_Vac_Isp if vacuum_isp is None else vacuum_isp
+    retained = ca.exp(-delta_v / (.99 * vacuum_isp * model.g0))
     return dict(reserve=state[6] * (1. - retained), delta_v=delta_v,
                 position=radius * burn_radial, before=before, after=after,
                 coast_angle=coast_angle, after_direction=after_direction,
