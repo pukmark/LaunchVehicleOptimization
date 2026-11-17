@@ -612,17 +612,17 @@ class LV_Optimization(VLType):
 
         # First Phase - Booster 
         if payload_mass_predefined > 0.0:
-            payload_mass_scaled = payload_mass_predefined / self.booster.scaleX[4]
+            payload_mass_scaled = payload_mass_predefined / self.booster.PayloadMassScale
         else:
             payload_mass_scaled = opti.variable(1, 1)
             diagnostics.add(phase1, 'Payload mass lower bound', payload_mass_scaled >= 0.0,
-                            scale=self.booster.scaleX[4], unit='kg')
+                            scale=self.booster.PayloadMassScale, unit='kg')
         x1 = opti.variable(self.booster.nx, self.booster.N+1) # [x, z, vx, vz, m]
         u1 = opti.variable(self.booster.nu, self.booster.N) # [T_factor, alpha]
         dt1 = opti.variable(1)
         LaunchAz = opti.variable(1)
 
-        payload_mass = payload_mass_scaled * self.booster.scaleX[4]
+        payload_mass = payload_mass_scaled * self.booster.PayloadMassScale
 
         # Set the initial state
         init_time = 5.0
@@ -1013,7 +1013,7 @@ class LV_Optimization(VLType):
 
         x1_guess[:,0] = self.booster.scale_x(x0_guess).full().flatten()
         if type(payload_mass_scaled) == ca.MX:
-            opti.set_initial(payload_mass_scaled, payload_mass_guess/self.booster.scaleX[4])
+            opti.set_initial(payload_mass_scaled, payload_mass_guess/self.booster.PayloadMassScale)
         best_stage1 = _BestInitialGuess()
         iter=0
         while iter < 30:
@@ -1426,7 +1426,7 @@ class LV_Optimization(VLType):
 
         if type(init_guess) == dict:
             if type(payload_mass_scaled) == ca.MX:
-                opti.set_initial(payload_mass_scaled, init_guess['payload_mass']/self.booster.scaleX[4])
+                opti.set_initial(payload_mass_scaled, init_guess['payload_mass']/self.booster.PayloadMassScale)
             opti.set_initial(dt1, init_guess['dt1']/self.booster.scaleT)
             opti.set_initial(dt2, init_guess['dt2']/self.eci.scaleT)
             opti.set_initial(dt3, init_guess['dt3']/self.eci.scaleT)
@@ -1564,7 +1564,7 @@ class LV_Optimization(VLType):
             LV_plot.plot_close()
 
         if type(payload_mass_scaled) == ca.MX:
-            payload_mass_sol = payload_mass_scaled_sol * self.booster.scaleX[4]
+            payload_mass_sol = payload_mass_scaled_sol * self.booster.PayloadMassScale
         else:
             payload_mass_scaled_sol = payload_mass
             payload_mass_sol = payload_mass_scaled_sol

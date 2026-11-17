@@ -120,6 +120,9 @@ class VLType(PythonMsg):
     ThirdStage_FullMass: float = field(default = 0.0)
 
     Payload_Max_acc: float = field(default = 3.75*9.81) # [m/s^2]
+    # Scale used only for the payload optimization variable.  Keep this
+    # separate from scaleX[4], which scales the propagated vehicle mass state.
+    PayloadMassScale: float = field(default = 100000.0) # [kg]
 
     #Gravity and earth properties
     g0: float = field(default = None)
@@ -422,10 +425,14 @@ class VLType(PythonMsg):
         self.Booster_k_empirical = 0.0002
         self.SecondStage_CoastTimeAfterSep = 0.5
         self.Payload_Max_acc = 8.0 * 9.80665
+        self.PayloadMassScale = 2000.0
         self.ParkingOrbit_PerigeeAlt = 180000.0
         self.__post_init__()
 
     def ApplyVehicleConfiguration(self, LV_Configuration: int):
+        # All vehicles use the common payload scale unless their database
+        # explicitly overrides it (Electron does so for its smaller payloads).
+        self.PayloadMassScale = 100000.0
         if isinstance(LV_Configuration, dict):
             definition = validate_vehicle_definition(LV_Configuration)
             for name, value in definition['parameters'].items():

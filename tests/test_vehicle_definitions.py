@@ -35,7 +35,8 @@ class VehicleDefinitionTests(unittest.TestCase):
         common_or_derived = {'LaunchLatitude', 'LaunchLongitude', 'LaunchAltitude', 'g0',
                              'R0', 'e', 'omega_earth', 'mu', 'Sref', 'LV_total_mass',
                              'FirstStage_EmptyMass', 'SecondStage_EmptyMass',
-                             'SecondStage_FullMass', 'ThirdStage_FullMass', 'TotalPropellentMass'}
+                             'SecondStage_FullMass', 'ThirdStage_FullMass', 'TotalPropellentMass',
+                             'PayloadMassScale'}
         physical = {field.name for field in fields(VLType) if field.type is float}
         self.assertEqual(set(VEHICLE_PARAMETERS), physical - common_or_derived)
 
@@ -102,6 +103,11 @@ class VehicleDefinitionTests(unittest.TestCase):
                                              'altitude': '0'})
         self.assertIsNotNone(model.kick)
         self.assertAlmostEqual(model.booster.LV_total_mass, 13000.)
+        self.assertEqual(model.booster.PayloadMassScale, 2000.)
+        for other_configuration in range(1, 6):
+            other = VLType()
+            other.ApplyVehicleConfiguration(other_configuration)
+            self.assertEqual(other.PayloadMassScale, 100000.)
         self.assertAlmostEqual(model.booster.EmptyFirstStageMass, 1020.873)
         self.assertAlmostEqual(model.booster.FirstStagePropellentMass, 9199.723)
         self.assertAlmostEqual(model.booster.EmptySecondStageMass, 225.617)

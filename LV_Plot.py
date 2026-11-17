@@ -75,7 +75,7 @@ class LV_plot():
         if payload_mass_predefined <= 0.0:
             payload_mass = x[i0] ; i0 += 1
         else:
-            payload_mass = payload_mass_predefined/self.rocket_booster.scaleX[4]
+            payload_mass = payload_mass_predefined/self.rocket_booster.PayloadMassScale
         if optimize_stage_partition:
             FirstStage_Propellent_fraction = x[i0] ; i0 += 1
         x1 = x[i0:i0+self.rocket_booster.nx*(self.rocket_booster.N+1)].reshape(self.rocket_booster.N+1, self.rocket_booster.nx) ; i0 += self.rocket_booster.nx*(self.rocket_booster.N+1)
@@ -260,7 +260,7 @@ class LV_plot():
         else:
             self.ax_vec[0].set_xlim([-10, max(x1p[-1,0]/1000, np.max(x4p[:,0])/1000)+10])
             self.ax_vec[0].set_ylim([-30, max(x1p[-1,1]/1000, np.max(x4p[:,1])/1000)+10])
-        self.ax_vec[0].set_title(f"payload mass = {payload_mass * self.rocket_booster.scaleX[4]:.2f}, LaunchAz = {LaunchAz*180/np.pi:.2f}")
+        self.ax_vec[0].set_title(f"payload mass = {payload_mass * self.rocket_booster.PayloadMassScale:.2f}, LaunchAz = {LaunchAz*180/np.pi:.2f}")
         self.ax_vec[0].set_aspect('equal')
         self.ax_vec[1].set_ylim([0, 8000])
         self.ax_vec[1].set_xlim([0, max(t4_landing[-1],t2_vec[-1])+100])
