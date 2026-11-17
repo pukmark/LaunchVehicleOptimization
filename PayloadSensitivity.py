@@ -10,7 +10,8 @@ import numpy as np
 
 from DispersionFit import MULTIPLIERS, _validate_request, _solve_candidate, _atomic_json
 from LV_Type_scaled import DispesrionFactorsType, VLType
-from VehicleDefinitions import VEHICLE_PARAMETERS, validate_vehicle_definition, vehicle_name
+from VehicleDefinitions import (VEHICLE_PARAMETERS, validate_vehicle_definition, vehicle_name,
+                                allowed_recoveries)
 from SensitivityCSV import run_snapshot, warm_start_snapshot
 
 
@@ -31,6 +32,9 @@ def validate_recoveries(request, recoveries=None):
     values = [request['recovery']] if recoveries is None else ([recoveries] if isinstance(recoveries, str) else list(recoveries))
     if not values or any(value not in ('EXP', 'ASDS', 'RTLS') for value in values):
         raise ValueError('Select at least one recovery strategy: EXP, ASDS, RTLS.')
+    permitted = set(allowed_recoveries(request['configuration']))
+    if any(value not in permitted for value in values):
+        raise ValueError(f"{vehicle_name(request['configuration'])} supports expendable missions only.")
     return list(dict.fromkeys(values))
 
 
@@ -40,6 +44,11 @@ def _parameter_request(request, steps):
     if any(name in LAUNCH_PARAMETERS for name in steps):
         model = VLType()
         model.ApplyVehicleConfiguration(request['configuration'])
+        # Launch-limit perturbations need an editable vehicle definition, but
+        # that temporary conversion must not discard solver-only properties of
+        # the originating built-in vehicle.
+        request['payload_mass_scale'] = model.PayloadMassScale
+        request['source_configuration'] = deepcopy(request['configuration'])
         request['configuration'] = validate_vehicle_definition(dict(
             name=vehicle_name(request['configuration']),
             parameters={name: float(getattr(model, name)) for name in VEHICLE_PARAMETERS}))

@@ -1,6 +1,8 @@
 """Custom vehicles survive editor, worker, model, and GUI-state boundaries."""
 from copy import deepcopy
 from dataclasses import asdict, fields
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -13,13 +15,15 @@ import numpy as np
 from DispersionFit import default_fit_bounds, _solve_candidate
 from GUIState import read_gui_state, write_gui_state
 from LV_Optimization_Type import LV_Optimization
+from LV_Optimization_Type import _complete_initial_solution
 from LV_Type_scaled import DispesrionFactorsType, VLType
-from OptimizationGUI import (ComparisonCase, OptimizationApp, nominal_dispersion_values,
+from OptimizationGUI import (ComparisonCase, OptimizationApp, draw_phase, nominal_dispersion_values,
                              nominal_request, run_optimization, worker)
 from VehicleDefinitions import (BUILTIN_VEHICLES, VEHICLE_PARAMETERS, vehicle_catalog,
                                 vehicle_editor_values, vehicle_from_editor, vehicle_name,
                                 validate_vehicle_definition, read_vehicle_definition,
                                 write_vehicle_definition, migrate_builtin_vehicles)
+from LaunchSites import LAUNCH_SITES
 
 
 class VehicleDefinitionTests(unittest.TestCase):
@@ -31,7 +35,8 @@ class VehicleDefinitionTests(unittest.TestCase):
         common_or_derived = {'LaunchLatitude', 'LaunchLongitude', 'LaunchAltitude', 'g0',
                              'R0', 'e', 'omega_earth', 'mu', 'Sref', 'LV_total_mass',
                              'FirstStage_EmptyMass', 'SecondStage_EmptyMass',
-                             'SecondStage_FullMass', 'TotalPropellentMass'}
+                             'SecondStage_FullMass', 'ThirdStage_FullMass', 'TotalPropellentMass',
+                             'PayloadMassScale'}
         physical = {field.name for field in fields(VLType) if field.type is float}
         self.assertEqual(set(VEHICLE_PARAMETERS), physical - common_or_derived)
 
@@ -88,6 +93,157 @@ class VehicleDefinitionTests(unittest.TestCase):
         reused.ApplyVehicleConfiguration(5)
         for name in VEHICLE_PARAMETERS:
             self.assertAlmostEqual(getattr(reused, name), getattr(model.booster, name))
+
+    def test_electron_builtin_has_finite_kick_stage_and_expendable_capability(self):
+        configuration = vehicle_catalog()['Electron']
+        self.assertEqual(configuration, 6)
+        model = LV_Optimization(DispesrionFactorsType(), configuration,
+                                launch_site={'name': 'Rocket Lab LC-1 (Mahia)',
+                                             'latitude': '-39.262', 'longitude': '177.865',
+                                             'altitude': '0'})
+        self.assertIsNotNone(model.kick)
+        self.assertAlmostEqual(model.booster.LV_total_mass, 13000.)
+        self.assertEqual(model.booster.PayloadMassScale, 2000.)
+        for other_configuration in range(1, 6):
+            other = VLType()
+            other.ApplyVehicleConfiguration(other_configuration)
+            self.assertEqual(other.PayloadMassScale, 100000.)
+        self.assertAlmostEqual(model.booster.EmptyFirstStageMass, 1020.873)
+        self.assertAlmostEqual(model.booster.FirstStagePropellentMass, 9199.723)
+        self.assertAlmostEqual(model.booster.EmptySecondStageMass, 225.617)
+        self.assertAlmostEqual(model.booster.SecondStagePropellentMass, 2419.787)
+        self.assertAlmostEqual(model.booster.FirstStage_Cd0, 0.811)
+        self.assertAlmostEqual(model.booster.SecondStage_CoastTimeAfterSep, 0.5)
+        self.assertAlmostEqual(model.kick.ThirdStage_EmptyMass, 40.)
+        self.assertAlmostEqual(model.kick.ThirdStage_Thrust, 120.)
+        self.assertEqual(model.kick.stage, 3)
+        request = nominal_request(asdict(DispesrionFactorsType()), configuration, 'EXP')
+        self.assertEqual(request['recovery'], 'EXP')
+        with self.assertRaisesRegex(ValueError, 'expendable missions only'):
+            nominal_request(asdict(DispesrionFactorsType()), configuration, 'ASDS')
+
+    def test_electron_definition_round_trips_editor_export(self):
+        definition = vehicle_from_editor('Electron export', vehicle_editor_values(6))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'electron.json'
+            write_vehicle_definition(path, definition)
+            restored = read_vehicle_definition(path)
+        self.assertEqual(restored, definition)
+        restored_model = VLType()
+        restored_model.ApplyVehicleConfiguration(restored)
+        builtin_model = VLType()
+        builtin_model.ApplyVehicleConfiguration(6)
+        for name in VEHICLE_PARAMETERS:
+            self.assertAlmostEqual(getattr(restored_model, name), getattr(builtin_model, name))
+
+    def test_legacy_vehicle_definition_gains_disabled_third_stage(self):
+        legacy = deepcopy(self.definition)
+        for name in tuple(legacy['parameters']):
+            if name.startswith('ThirdStage_'):
+                del legacy['parameters'][name]
+        validated = validate_vehicle_definition(legacy)
+        self.assertTrue(all(validated['parameters'][name] == 0.
+                            for name in VEHICLE_PARAMETERS if name.startswith('ThirdStage_')))
+
+    def test_electron_kick_dynamics_and_warm_start_shape(self):
+        model = LV_Optimization(DispesrionFactorsType(), 6)
+        radius = model.kick.R0 + 200e3
+        speed = np.sqrt(model.kick.mu / radius)
+        physical = np.array([radius, 0., 0., 0., speed, 0., 290.])
+        scaled = model.kick.scale_x(physical)
+        following = model.kick.unscale_x(model.kick.dynamics_kp1(
+            scaled, [0., 1., 0.], 1. / model.kick.scaleT)).full().ravel()
+        self.assertAlmostEqual(physical[-1] - following[-1],
+                               model.kick.ThirdStage_Thrust /
+                               (model.kick.ThirdStage_Vac_Isp * model.kick.g0), places=8)
+        coast = model.kick.unscale_x(model.kick.dynamics_kp1(
+            scaled, np.full(model.kick.nu, 1e-8),
+            model.kick.ThirdStage_CoastTimeAfterSep / model.kick.scaleT)).full().ravel()
+        self.assertAlmostEqual(coast[-1], physical[-1], places=8)
+        warm = {'payload_mass': 50., 'dt1': 1., 'dt2': 1., 'dt3': 1., 'dt_kick': 1.,
+                'LaunchAz': 0.,
+                'x1': np.ones((model.booster.nx, model.booster.N + 1)),
+                'u1': np.ones((model.booster.nu, model.booster.N)),
+                'x2': np.ones((model.eci.nx, model.eci.N[0] + 1)),
+                'u2': np.ones((model.eci.nu, model.eci.N[0])),
+                'x3': np.ones((model.eci.nx, model.eci.N[1] + 1)),
+                'u3': np.ones((model.eci.nu, model.eci.N[1])),
+                'x_kick': np.ones((model.kick.nx, model.kick.N + 1)),
+                'u_kick': np.ones((model.kick.nu, model.kick.N))}
+        self.assertTrue(_complete_initial_solution(model, warm, 'EXP'))
+        del warm['x_kick']
+        self.assertFalse(_complete_initial_solution(model, warm, 'EXP'))
+
+    def test_electron_stage_separations_preserve_expected_mass(self):
+        class InitialValues:
+            def __init__(self, opti):
+                self.opti = opti
+
+            def value(self, expression):
+                return self.opti.debug.value(expression, self.opti.initial())
+
+        model = LV_Optimization(DispesrionFactorsType(), 6)
+        radius = model.eci.R0 + 200000.
+        with patch.object(ca.Opti, 'solve', lambda opti: InitialValues(opti)), \
+             patch.object(ca.Opti, 'return_status', return_value='test'), \
+             patch.object(ca.Opti, 'stats', return_value={'success': True}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = model.SolveOptimiztion(
+                RecoveryStrategy='EXP', payload_mass_predefined=50.,
+                Target_Orbit={'apogee': radius, 'perigee': radius, 'i': np.deg2rad(45.)},
+                print_ipopt=False, output_dir=None, initial_guess_diagnostics=False)
+        self.assertAlmostEqual(result['x2'][6, 0],
+                               model.eci.SecondStage_FullMass + model.eci.ThirdStage_FullMass + 50.,
+                               places=5)
+        self.assertAlmostEqual(result['x3'][6, 0],
+                               result['x2'][6, -1] - model.eci.FairingMass, places=6)
+        self.assertAlmostEqual(result['x_kick'][6, 0],
+                               model.kick.ThirdStage_FullMass + 50., places=6)
+        self.assertEqual(result['x_kick'].shape, (model.kick.nx, model.kick.N + 1))
+        self.assertFalse(result['kick_impulsive'])
+        self.assertGreater(result['dt_kick'], 0.)
+
+    def test_existing_two_stage_builtins_keep_third_stage_disabled(self):
+        for configuration in range(1, 6):
+            with self.subTest(configuration=configuration):
+                model = VLType()
+                model.ApplyVehicleConfiguration(configuration)
+                self.assertFalse(model.has_third_stage)
+                self.assertEqual(model.ThirdStage_FullMass, 0.)
+                legacy_total = (model.EmptyFirstStageMass + model.FirstStagePropellentMass
+                                + model.EmptySecondStageMass + model.SecondStagePropellentMass
+                                + model.FairingMass)
+                self.assertAlmostEqual(model.LV_total_mass, legacy_total)
+        reused = VLType()
+        reused.ApplyVehicleConfiguration(6)
+        reused.ApplyVehicleConfiguration(1)
+        fresh = VLType()
+        for name in VEHICLE_PARAMETERS:
+            self.assertAlmostEqual(getattr(reused, name), getattr(fresh, name))
+
+    def test_rocket_lab_launch_site_presets(self):
+        self.assertEqual(LAUNCH_SITES['Rocket Lab LC-1 (Mahia)'], (-39.262, 177.865, 0.))
+        self.assertEqual(LAUNCH_SITES['Rocket Lab LC-2 (Wallops)'], (37.834, -75.488, 0.))
+        self.assertEqual(LAUNCH_SITES['Pacific Spaceport Complex – Alaska (Kodiak)'],
+                         (57.4353, -152.3393, 0.))
+
+    def test_third_stage_result_tab_renders(self):
+        from matplotlib.figure import Figure
+
+        radius = VLType.R0 + 200e3
+        speed = np.sqrt(VLType.mu / radius)
+        state = np.array([[radius, radius, radius], [0., 10e3, 20e3], [0., 0., 0.],
+                          [0., 0., 0.], [speed, speed, speed], [0., 0., 0.],
+                          [290., 280., 270.]])
+        solution = {'t_kick_vec': np.array([500., 510., 520.]), 'x_kick': state,
+                    'u_kick': np.array([[0., 0.], [120., 120.], [0., 0.]]),
+                    'alt_kick_sol': np.linalg.norm(state[:3], axis=0) - VLType.R0,
+                    'i_kick_sol': np.zeros(3),
+                    'apogee_kick_sol': np.full(3, radius)}
+        figure = Figure()
+        self.assertIsNone(draw_phase(figure, 'Third stage', solution, {}))
+        self.assertEqual(len(figure.axes), 6)
+        self.assertTrue(all(axis.lines for axis in figure.axes))
 
     def test_saved_matching_vehicle_is_promoted_without_changing_history(self):
         definition = vehicle_from_editor('Falcon 9 True', vehicle_editor_values(5))

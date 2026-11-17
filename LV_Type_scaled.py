@@ -6,7 +6,7 @@ import numpy as np
 import scipy as sp
 import casadi as ca
 import Atmosphere_Type as Atm_Type
-from VehicleDefinitions import validate_vehicle_definition
+from VehicleDefinitions import VEHICLE_PARAMETERS, validate_vehicle_definition
 
 @dataclass
 class PythonMsg:
@@ -56,6 +56,7 @@ class VLType(PythonMsg):
     '''
     # Falcon 9 Database
     N: int = field(default = 60)
+    stage: int = field(default = 2)
     Diameter: float = field(default = 3.66)
 
     #Mass Properties
@@ -108,7 +109,20 @@ class VLType(PythonMsg):
     SecondStage_MinThrust_Factor: float = field(default = 0.638) # [-]
     SecondStage_MinThrust_IspFactor: float = field(default = 0.975) # [-]
 
+    # Optional generic third stage. A zero propellant mass disables it.
+    ThirdStage_EmptyMass: float = field(default = 0.0)
+    ThirdStage_PropellentMass: float = field(default = 0.0)
+    ThirdStage_Thrust: float = field(default = 0.0)
+    ThirdStage_Vac_Isp: float = field(default = 0.0)
+    ThirdStage_MinThrust_Factor: float = field(default = 0.0)
+    ThirdStage_MinThrust_IspFactor: float = field(default = 0.0)
+    ThirdStage_CoastTimeAfterSep: float = field(default = 0.0)
+    ThirdStage_FullMass: float = field(default = 0.0)
+
     Payload_Max_acc: float = field(default = 3.75*9.81) # [m/s^2]
+    # Scale used only for the payload optimization variable.  Keep this
+    # separate from scaleX[4], which scales the propagated vehicle mass state.
+    PayloadMassScale: float = field(default = 100000.0) # [kg]
 
     #Gravity and earth properties
     g0: float = field(default = None)
@@ -140,10 +154,14 @@ class VLType(PythonMsg):
 
     def __post_init__(self):
         # Mass Properties - without payload
-        self.LV_total_mass = self.EmptyFirstStageMass + self.EmptySecondStageMass + self.FirstStagePropellentMass + self.SecondStagePropellentMass + self.FairingMass
+        self.ThirdStage_FullMass = self.ThirdStage_EmptyMass + self.ThirdStage_PropellentMass
+        self.LV_total_mass = (self.EmptyFirstStageMass + self.EmptySecondStageMass
+                              + self.FirstStagePropellentMass + self.SecondStagePropellentMass
+                              + self.ThirdStage_FullMass + self.FairingMass)
         self.FirstStage_EmptyMass = self.LV_total_mass - self.FirstStagePropellentMass
         self.SecondStage_FullMass = self.EmptySecondStageMass + self.SecondStagePropellentMass + self.FairingMass
         self.SecondStage_EmptyMass = self.EmptySecondStageMass
+        # Retain the historical meaning used by StagePartitionDelta: stages 1+2.
         self.TotalPropellentMass = self.FirstStagePropellentMass + self.SecondStagePropellentMass
         self.Sref = np.pi * (self.Diameter/2)**2
         self.g0 = self.mu / self.R0**2
@@ -352,14 +370,90 @@ class VLType(PythonMsg):
         self.ParkingOrbit_PerigeeAlt = 150000.0
         self.__post_init__()
 
+    def ElectronDatabase(self):
+        """Apply the fixed Electron + Curie engineering model in SI units.
+
+        The stage masses, effective thrust factors and ascent drag area were
+        promoted from the reviewed Flight 40 ``We Love the Nightlife`` fit in
+        ``LaunchVehicleOptimization_training/experiments/electron_flight40_fit.json``.
+        Published Rutherford thrust and Isp remain visible as the base values;
+        the fitted thrust factors convert them to the effective constant thrust
+        used by this simplified optimizer. Curie parameters remain engineering
+        assumptions and are not part of that ascent calibration.
+        """
+        self.Diameter = 1.2
+        # The first-stage dry mass absorbs the 1 g rounding residual so the
+        # complete vehicle still closes at exactly 13,000 kg.
+        self.EmptyFirstStageMass = 1020.873
+        self.EmptySecondStageMass = 225.617
+        self.FirstStagePropellentMass = 9199.723
+        self.SecondStagePropellentMass = 2419.787
+        self.FairingMass = 44.0
+        self.FirstStage_SL_Isp = 303.0
+        self.FirstStage_Vac_Isp = 311.0
+        # Effective thrusts: published Rutherford values multiplied by the
+        # fitted Flight-40 thrust factors, then rounded to 1e-3 N.
+        self.FirstStage_SL_Thrust = 191521.783
+        self.FirstStage_Vac_Thrust = 196578.464
+        self.FirstStage_MinThrust_Factor = 1.0
+        self.FirstStage_MinThrust_IspFactor = 1.0
+        self.FirstStage_Ae = round(
+            (self.FirstStage_Vac_Thrust - self.FirstStage_SL_Thrust) / 101325.0, 3)
+        self.SecondStage_Thrust = 20606.053
+        self.SecondStage_Vac_Isp = 343.0
+        self.SecondStage_MinThrust_Factor = 1.0
+        self.SecondStage_MinThrust_IspFactor = 1.0
+        self.ThirdStage_EmptyMass = 40.0
+        self.ThirdStage_PropellentMass = 50.0
+        self.ThirdStage_Thrust = 120.0
+        self.ThirdStage_Vac_Isp = 290.0
+        self.ThirdStage_MinThrust_Factor = 1.0
+        self.ThirdStage_MinThrust_IspFactor = 1.0
+        self.ThirdStage_CoastTimeAfterSep = 4.0
+        self.FirstStage_CLa = 0.5
+        # Flight-40 effective CdA=0.917 m^2 divided by Sref.
+        self.FirstStage_Cd0 = 0.811
+        self.FirstStage_Cda2 = 3.0
+        self.FirstStage_MaxAlpha = np.deg2rad(10.0)
+        self.FairingSeparationAltitude = 107770.0
+        self.FirstStage_MaxDynamicPressure = 30000.0
+        self.FirstStage_StageSeparationMaxDynamicPressure = 1000.0
+        self.FirstStage_MaxQdynAlpha = 5000.0
+        self.Booster_Cd0 = 1.6
+        self.Booster_MaxDynamicPressure = 70000.0
+        self.Booster_MaxHeatFlux = 110000.0
+        self.Booster_k_empirical = 0.0002
+        self.SecondStage_CoastTimeAfterSep = 0.5
+        self.Payload_Max_acc = 8.0 * 9.80665
+        self.PayloadMassScale = 2000.0
+        self.ParkingOrbit_PerigeeAlt = 180000.0
+        self.__post_init__()
+
     def ApplyVehicleConfiguration(self, LV_Configuration: int):
+        # All vehicles use the common payload scale unless their database
+        # explicitly overrides it (Electron does so for its smaller payloads).
+        self.PayloadMassScale = 100000.0
         if isinstance(LV_Configuration, dict):
             definition = validate_vehicle_definition(LV_Configuration)
             for name, value in definition['parameters'].items():
                 setattr(self, name, value)
             self.__post_init__()
             return
+        if LV_Configuration != 6:
+            self.ThirdStage_EmptyMass = 0.0
+            self.ThirdStage_PropellentMass = 0.0
+            self.ThirdStage_Thrust = 0.0
+            self.ThirdStage_Vac_Isp = 0.0
+            self.ThirdStage_MinThrust_Factor = 0.0
+            self.ThirdStage_MinThrust_IspFactor = 0.0
+            self.ThirdStage_CoastTimeAfterSep = 0.0
         if LV_Configuration == 1:
+            # Configuration 1 is represented by the dataclass defaults rather
+            # than a database method. Restore those defaults when this model
+            # instance was previously configured as another vehicle.
+            for name in VEHICLE_PARAMETERS:
+                setattr(self, name, VLType.__dataclass_fields__[name].default)
+            self.__post_init__()
             return
         if LV_Configuration == 2:
             self.StarShipDatabase()
@@ -372,6 +466,9 @@ class VLType(PythonMsg):
             return
         if LV_Configuration == 5:
             self.Falcon9TrueDatabase()
+            return
+        if LV_Configuration == 6:
+            self.ElectronDatabase()
             return
         raise ValueError(f"Unknown launch vehicle configuration: {LV_Configuration}")
 
@@ -403,6 +500,10 @@ class VLType(PythonMsg):
         self.LaunchAltitude += DispesrionFactors.LaunchAltDelta
 
         self.__post_init__()
+
+    @property
+    def has_third_stage(self):
+        return self.ThirdStage_PropellentMass > 0.0
         
 @dataclass
 class BoosterLaunchVehicle_2D(VLType):
@@ -485,16 +586,27 @@ class BoosterLaunchVehicle_2D(VLType):
 
 @dataclass
 class LaunchVehicle_ECI(VLType):
-    def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int, N = [10, 60], launch_site=None):
+    def __init__(self, ScenarioDispersion: DispesrionFactorsType, LV_Configuration: int,
+                 N = [10, 60], launch_site=None, stage=2):
         super().__init__()
 
         self.ApplyVehicleConfiguration(LV_Configuration)
         self.ApplyLaunchSite(launch_site)
         self.ApplyScenarioDispersionToLV(ScenarioDispersion)
 
+        if stage not in (2, 3) or stage == 3 and not self.has_third_stage:
+            raise ValueError('ECI propulsion stage must be an enabled stage 2 or 3.')
+        self.stage = stage
         self.N = N
-        self.scaleX = [1e7, 1e7, 1e7, 1e4, 1e4, 1e4, 1e5]
-        self.scaleU = [self.SecondStage_Thrust, self.SecondStage_Thrust, self.SecondStage_Thrust]
+        thrust = self.SecondStage_Thrust if stage == 2 else self.ThirdStage_Thrust
+        vacuum_isp = self.SecondStage_Vac_Isp if stage == 2 else self.ThirdStage_Vac_Isp
+        minimum_thrust = (self.SecondStage_MinThrust_Factor if stage == 2
+                          else self.ThirdStage_MinThrust_Factor)
+        minimum_isp = (self.SecondStage_MinThrust_IspFactor if stage == 2
+                       else self.ThirdStage_MinThrust_IspFactor)
+        self.scaleX = [1e7, 1e7, 1e7, 1e4, 1e4, 1e4,
+                       1e5 if stage == 2 else 1e3]
+        self.scaleU = [thrust, thrust, thrust]
         self.scaleT = 100.0
 
         sx = ca.MX.sym('sx')
@@ -527,7 +639,10 @@ class LaunchVehicle_ECI(VLType):
         fz = sfz * self.scaleU[2]
 
         g = self.g0 * self.R0 ** 2 / (x**2 + y**2 + z**2)
-        Isp = self.SecondStage_Vac_Isp * (self.SecondStage_MinThrust_IspFactor + (1.0-self.SecondStage_MinThrust_IspFactor)*(ca.norm_2(sym_u)-self.SecondStage_MinThrust_Factor)/(1.0-self.SecondStage_MinThrust_Factor))
+        if minimum_thrust == 1.0:
+            Isp = ca.MX(vacuum_isp)
+        else:
+            Isp = vacuum_isp * (minimum_isp + (1.0-minimum_isp)*(ca.norm_2(sym_u)-minimum_thrust)/(1.0-minimum_thrust))
 
         dx = vx
         dy = vy

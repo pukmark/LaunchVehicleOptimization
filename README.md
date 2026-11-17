@@ -8,7 +8,7 @@ flight telemetry, fit model parameters, and explore payload sensitivity.
 
 The desktop GUI supports three comparison cases, custom vehicle definitions,
 launch-site selection, flight-phase plots, and a 3D trajectory view. Built-in
-vehicle models include Falcon 9, Falcon 9 True, Starship, Starship V3, and New Glenn. Their
+vehicle models include Falcon 9, Falcon 9 True, Starship, Starship V3, New Glenn, and Electron. Their
 parameters include engineering estimates; solver convergence and model fidelity
 depend on the selected case.
 
@@ -153,7 +153,7 @@ from OptimizationGUI import nominal_request, run_optimization
 
 request = nominal_request(
     asdict(DispesrionFactorsType()),
-    configuration=1,       # 1: Falcon 9, 2: Starship, 3: Starship V3, 4: New Glenn, 5: Falcon 9 True
+    configuration=1,       # 1: Falcon 9, 2: Starship, 3: Starship V3, 4: New Glenn, 5: Falcon 9 True, 6: Electron
     recovery="EXP",        # EXP, ASDS, or RTLS
     payload_mass=-1,        # kg; non-positive values maximize payload
     orbit_values={"apogee": "200", "perigee": "200", "inclination": "28.6"},
@@ -295,6 +295,20 @@ omitting it selects all fields. API bounds use SI units, and
 `VLType.Falcon9TrueDatabase()` in `LV_Type_scaled.py`. It uses the parameters
 promoted from the GUI's custom library. Older sessions with identical definitions
 use the built-in option; differing historical definitions remain custom variants.
+
+**Electron** is configuration `6` and is expendable-only. It models an optional,
+generic third stage with a propagated finite-duration Curie burn after stage-two
+separation and a configured coast. Stage masses, effective
+Rutherford thrust, and ascent drag were promoted from the Flight 40 “We Love the
+Nightlife” telemetry fit. The provenance and residual report remain in the sibling
+`LaunchVehicleOptimization_training` workspace, which is never imported at runtime.
+Published values, promoted quantities, and remaining Curie assumptions are identified
+in `VLType.ElectronDatabase()`. Rocket Lab LC-1 (Māhia), LC-2 (Wallops), and Pacific
+Spaceport Complex–Alaska (Kodiak) are available as launch-site presets; selecting
+Electron does not change the selected site.
+
+The active finite-duration Curie transcription is implemented directly in
+`LV_Optimization_Type.py`.
 
 `Main.py` prints the vehicle actually selected by each sweep and uses deterministic
 initial estimates. Fixed-payload failures are not retried with ineffective random

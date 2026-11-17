@@ -4,7 +4,7 @@ import numpy as np
 from LV_Type_scaled import DispesrionFactorsType, LaunchVehicle_ECI, VLType
 from TelemetryFrames import eci_to_ecef_velocity
 from PlotLegends import set_vehicle_legend
-from Trajectory3D import second_burn_history, annotate_second_burn
+from Trajectory3D import second_burn_history, annotate_second_burn, kick_is_impulsive
 
 
 def vector_angle(velocity, thrust):
@@ -187,6 +187,22 @@ def draw_integrated_results(figure, cases, *, telemetry=None, primary_group='Pha
             angle = vector_angle(relative[:, :-1], u)
             line(3, t, np.r_[throttle, throttle[-1]], 'Stage 2', control=True)
             line(4, t, np.r_[angle, angle[-1]], 'Stage 2', control=True)
+
+        if 'x_kick' in s:
+            t, x, u = np.ravel(s['t_kick_vec']), np.asarray(s['x_kick']), np.asarray(s['u_kick'])
+            relative = x[3:6] - np.cross([0., 0., model.omega_earth], x[:3].T).T
+            for index, values in enumerate((np.ravel(s['alt_kick_sol']) / 1000.,
+                                            np.linalg.norm(relative, axis=0), x[6] / 1000.)):
+                line(index, t, values, 'Third stage', '-.')
+            if kick_is_impulsive(s):
+                for axis in axes[3:]:
+                    axis.axvline(t[0], color=color, linestyle='-.', linewidth=1.6,
+                                 label=f'{label} · Third-stage impulse')
+            else:
+                throttle = np.linalg.norm(u, axis=0) / model.ThirdStage_Thrust * 100.
+                angle = vector_angle(relative[:, :-1], u)
+                line(3, t, np.r_[throttle, throttle[-1]], 'Third stage', '-.', control=True)
+                line(4, t, np.r_[angle, angle[-1]], 'Third stage', '-.', control=True)
 
         burn = second_burn_history(s)
         if burn is not None:

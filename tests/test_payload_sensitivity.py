@@ -14,7 +14,8 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from LV_Type_scaled import DispesrionFactorsType, VLType
 from OptimizationGUI import ComparisonCase, OptimizationApp, nominal_request
 from PayloadSensitivity import (compute_sensitivities, default_steps, draw_sensitivities,
-                                validate_steps, worker, LAUNCH_PARAMETERS, parameter_values)
+                                validate_steps, worker, LAUNCH_PARAMETERS, parameter_values,
+                                _parameter_request)
 
 
 class PayloadSensitivityTests(unittest.TestCase):
@@ -101,6 +102,14 @@ class PayloadSensitivityTests(unittest.TestCase):
         nominal = VLType()
         nominal.ApplyVehicleConfiguration(request['configuration'])
         self.assertAlmostEqual(baseline_parameters['FirstStage_SL_Thrust'], nominal.FirstStage_SL_Thrust)
+
+    def test_temporary_electron_definition_preserves_payload_scale_and_origin(self):
+        request = self.request()
+        request['configuration'] = 6
+        converted = _parameter_request(request, {'Payload_Max_acc': 1.})
+        self.assertIsInstance(converted['configuration'], dict)
+        self.assertEqual(converted['source_configuration'], 6)
+        self.assertEqual(converted['payload_mass_scale'], 2000.)
 
     def test_invalid_launch_limit_steps_rejected_before_solving(self):
         request = self.request()
