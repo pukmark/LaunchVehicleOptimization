@@ -40,7 +40,7 @@ def return_controls(solution, model):
 
     Return thrust is expressed relative to the model's three-engine reference;
     the boostback model uses vacuum thrust, reentry/landing use sea-level thrust.
-    Angle history is shown only during boostback.
+    Angle history is shown during boostback and landing.
     """
     start = float(np.ravel(solution['t4_vec'])[0])
     times, throttles, angles = [], [], []
@@ -80,7 +80,8 @@ def return_controls(solution, model):
         thrust_direction = np.array([np.sin(radial_angle + angle), np.cos(radial_angle + angle)])
         angles.extend(np.r_[vector_angle(states[2:4, :-1], thrust_direction), np.nan])
     else:
-        angles.extend(np.full(len(landing_time), np.nan))
+        velocity = np.asarray(solution['x4_landing'])[2:4, :-1]
+        angles.extend(np.r_[vector_angle(velocity, -velocity), np.nan])
     return np.asarray(times), np.asarray(throttles), np.asarray(angles)
 
 

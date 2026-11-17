@@ -4,7 +4,7 @@ import casadi as ca
 import numpy as np
 
 from FinalManeuver import add_final_maneuver, seed_final_maneuver
-from LV_Optimization_Type import LV_Optimization, InitialGuessConstraintDiagnostics, _orbit_burn_quantities, _landing_angles
+from LV_Optimization_Type import LV_Optimization, InitialGuessConstraintDiagnostics, _orbit_burn_quantities
 from LV_Type_scaled import DispesrionFactorsType
 
 
@@ -79,27 +79,34 @@ class SmoothFormulationTests(unittest.TestCase):
         for value in derivatives(initial):
             self.assertTrue(np.isfinite(np.asarray(value)).all())
 
-    def test_landing_dynamics_and_rk4_derivatives_finite_at_zero_velocity(self):
+    def test_retrograde_dynamics_and_rk4_derivatives_finite_at_zero_velocity(self):
         model = self.model.rocket_return
         state = model.scale_x([0, 10, 0, 0, model.EmptyFirstStageMass])
-        x, u = ca.MX.sym('x',5), ca.MX.sym('u',2)
-        rate = model.landing_dynamics(x,u)
-        step = model.landing_dynamics_kp1(x,u,.005)
+        x, u = ca.MX.sym('x',5), ca.MX.sym('u',1)
+        rate = model.dynamics(x,u)
+        step = model.dynamics_kp1(x,u,.005)
         heat_flux = model.heat_flux_fun(x)
         values = ca.Function('landing_derivatives',[x,u],[rate,ca.jacobian(rate,x),ca.hessian(ca.sum1(rate),x)[0],
                             ca.jacobian(step,x), ca.hessian(heat_flux,x)[0]])
-        for value in values(state,[.2,0.]):
+        for value in values(state,[.2]):
             self.assertTrue(np.isfinite(np.asarray(value)).all())
-        for angle in (-.5,0.,.5):
-            direction = np.asarray(model.landing_thrust_direction(state,angle)).ravel()
-            self.assertAlmostEqual(np.linalg.norm(direction),1.)
-            self.assertAlmostEqual(float(model.landing_dynamics(state,[.2,angle])[4]), float(model.dynamics(state,[.2])[4]))
-        displaced = model.scale_x([100000, 1000, 0, 0, model.EmptyFirstStageMass])
-        direction = np.asarray(model.landing_thrust_direction(displaced, 0.)).ravel()
-        vertical = np.array([100000., model.R0 + 1000.])
-        np.testing.assert_allclose(direction, vertical / np.linalg.norm(vertical), atol=1e-12)
-        angles = _landing_angles(model,np.array([[0,0],[10,0],[20,0],[-100,-5],[27100,27000]]))
-        self.assertLess(angles[0],0.)
+
+    def test_return_thrust_is_regularized_retrograde_with_throttle_only(self):
+        model = self.model.rocket_return
+        self.assertEqual(model.dynamics.size1_in(1), 1)
+        mass, throttle, epsilon = model.EmptyFirstStageMass, .2, 1e-3
+        for velocity in ([0., 0.], [1e-7, -1e-7], [20., -100.]):
+            with self.subTest(velocity=velocity):
+                state = model.scale_x([0, 10, *velocity, mass])
+                powered = np.asarray(model.dynamics(state, [throttle])).ravel()
+                coast = np.asarray(model.dynamics(state, [0.])).ravel()
+                acceleration = (powered - coast)[2:4] * np.asarray(model.scaleX)[2:4] / model.scaleT
+                v = np.array(velocity)
+                expected = -throttle * model.scaleU[0] * v / (np.sqrt(v @ v + epsilon**2) + epsilon) / mass
+                np.testing.assert_allclose(acceleration, expected, atol=1e-12)
+                self.assertLessEqual(np.dot(acceleration, v), 0.)
+                self.assertAlmostEqual(powered[4] * model.scaleX[4] / model.scaleT,
+                    -throttle * model.scaleU[0] / (model.FirstStage_SL_Isp * model.g0))
 
 
 if __name__ == '__main__':

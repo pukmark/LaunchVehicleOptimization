@@ -689,7 +689,7 @@ imports, loading all included telemetry CSVs, and a small IPOPT/MUMPS solve.
 This verifies installation and solver availability; it does not establish
 convergence of a complete launch/recovery optimization.
 
-## Smooth final maneuver and landing steering
+## Smooth final maneuver and regularized landing thrust
 
 The deployment maneuver now optimizes its ECI post-burn velocity explicitly;
 plane-change Δv remains included in the propellant reserve. The parking-apogee
@@ -697,13 +697,12 @@ geometry also supports circular parking orbits without selecting an apsidal
 direction through an eccentricity-vector division. Direct injection reserves
 no later-burn propellant.
 
-Booster landing now optimizes a thrust angle as well as throttle. The angle is
-measured from the current radial vertical, bounded to ±90°, and constrained to
-brake the vehicle. Saved results store `landing_thrust_angle` in radians while
-`u4_landing` keeps its previous throttle/force convention. Older saved cases
-remain usable as warm starts; initial angles are reconstructed from their
-velocity. Integrated plots show landing thrust–velocity angles, and orbit plots
-use the optimized maneuver vectors.
+Booster landing uses throttle-only control with thrust opposite velocity.
+Return thrust is regularized as `-T * V / (sqrt(V·V + eps²) + eps)`, with
+`eps = 0.001 m/s`. Smoothing the norm also keeps derivatives finite at exactly
+zero velocity. Saved cases with an old landing-angle field can still seed the
+optimizer; that field is ignored. Integrated plots show retrograde landing
+thrust–velocity angles, and orbit plots use the optimized maneuver vectors.
 
 The physical load limits are unchanged. A 1 mm/s regularization keeps the burn
 Δv norm and near-zero-speed return terms differentiable. See

@@ -107,23 +107,18 @@ The Δv norm uses a conservative 0.001 m/s floor to keep its Hessian finite at
 zero impulse. Direct-injection cases use energy/angular-momentum constraints
 and retain zero second-burn reserve.
 
-Landing throttle remains in the existing `u4_landing` field. A new
-`landing_thrust_angle` field stores radians from the current radial vertical.
-The angle is bounded to the outward hemisphere (±90 degrees), with a smooth
-thrust-dot-velocity constraint to retain braking. Thrust magnitude, mass flow,
-load limits and timing limits retain their existing definitions. Drag and
-reentry velocity direction use a 0.001 m/s speed floor; the landing thrust
-magnitude itself is not attenuated at rest. Heat flux and terminal-speed
-constraints have finite derivatives at zero velocity. The equivalent EXP
-separation-mass inequality is normalized by its existing mass scale.
+Landing is throttle-only, using the same retrograde dynamics as reentry.
+Return thrust is `-T * V / (sqrt(V·V + eps²) + eps)`, where `eps = 0.001 m/s`.
+This removes the zero-speed direction singularity and keeps derivatives finite
+at rest without introducing steering controls. Mass flow and the physical
+pressure, heating, acceleration and timing limits retain their definitions.
+Old saved landing-angle fields are ignored when initializing the optimizer.
+Heat flux and terminal-speed constraints retain finite derivatives at zero
+velocity. The equivalent EXP separation-mass inequality remains normalized by
+its existing mass scale.
 
-Saved throttle-only trajectories acquire initial landing angles from their
-retrograde velocity direction. New results preserve the optimized maneuver
-position, before/after velocities, coast angle, Δv and landing angles. GUI and
-Main plots use these values, and warm-start cache fingerprints include the new
-maneuver module. Physical pressure, heating, acceleration and thrust limits
-were not relaxed. Explicit landing steering changes the control model, and
-local payload optima can differ between initial estimates.
+The checks below predate removal of explicit landing steering and do not
+validate the current throttle-only recovery formulation.
 
 Cold-start checks on the final formulation, using the current production cost
 settings, a 400-iteration limit and a 45-second IPOPT CPU limit:

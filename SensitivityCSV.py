@@ -31,7 +31,7 @@ def warm_start_snapshot(solution):
     if solution is None:
         return None
     keys = {'configuration', 'launch_site', 'solution_units', 'payload_mass', 'LaunchAz',
-            'landing_thrust_angle', 'final_burn_coast_angle', 'final_burn_velocity_after'}
+            'final_burn_coast_angle', 'final_burn_velocity_after'}
     selected = {key: value for key, value in solution.items()
                 if key in keys or key.startswith(('x1', 'x2', 'x3', 'x4', 'u1', 'u2', 'u3', 'u4', 'dt'))}
     return json.loads(json.dumps(selected, default=_json_value))

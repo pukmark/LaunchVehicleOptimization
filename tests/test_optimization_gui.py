@@ -571,7 +571,7 @@ class ResultRenderingTests(unittest.TestCase):
                     self.assertTrue(np.any(throttle > 0.))
                     self.assertTrue(np.isnan(angle).any())
                     angle_lines = [line for line in figure.axes[4].lines if 'Booster return' in line.get_label()]
-                    landing_start = time[-(len(solution['landing_thrust_angle']) + 1)]
+                    landing_start = time[-(len(np.ravel(solution['u4_landing'])) + 1)]
                     landing_samples = (time >= landing_start) & (time < time[-1]) & (throttle > 0.)
                     self.assertTrue(np.isfinite(angle[landing_samples]).all())
                     if recovery == 'RTLS':
