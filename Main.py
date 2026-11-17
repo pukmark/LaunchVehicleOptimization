@@ -688,7 +688,7 @@ if __name__ == '__main__':
     RecoveryStrategyVec = ['ASDS'] # 'EXP', 'ASDS', 'RTLS'
     payload_mass_predefined = -1 # payload mass defined in kg, maximmize the payload mass if set to non-positive value
     Plot_interm = 0
-    LV_Configuration = 1 # 1: Falcon 9, 2: Starship, 3: Starship V3, 4: New Glenn, 5: Falcon 9 True
+    LV_Configuration = 1 # 1: Falcon 9, 2: Starship, 3: Starship V3, 4: New Glenn, 5: Falcon 9 True, 6: Electron
     Plot_Results = 2 # 1 - Plot telemetry, 2- Plot 3d trajectory
 
     ConfigName = vehicle_name(LV_Configuration).replace(' ', '')

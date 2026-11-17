@@ -7,7 +7,8 @@ from pathlib import Path
 import tempfile
 
 
-BUILTIN_VEHICLES = {"Falcon 9": 1, "Starship": 2, "Starship V3": 3, "New Glenn": 4, "Falcon 9 True": 5}
+BUILTIN_VEHICLES = {"Falcon 9": 1, "Starship": 2, "Starship V3": 3, "New Glenn": 4,
+                    "Falcon 9 True": 5, "Electron": 6}
 TONNE_FORCE = 1000. * 9.80665
 # Attribute, display label, display unit, conversion from display units to SI.
 VEHICLE_PARAMETER_GROUPS = {
@@ -31,6 +32,15 @@ VEHICLE_PARAMETER_GROUPS = {
         ("SecondStage_Vac_Isp", "Second-stage vacuum Isp", "s", 1.),
         ("SecondStage_MinThrust_Factor", "Second-stage minimum throttle", "fraction", 1.),
         ("SecondStage_MinThrust_IspFactor", "Second-stage Isp at minimum throttle", "fraction", 1.),
+    ),
+    "Optional third stage": (
+        ("ThirdStage_EmptyMass", "Third-stage dry mass", "t", 1000.),
+        ("ThirdStage_PropellentMass", "Third-stage propellant mass", "t", 1000.),
+        ("ThirdStage_Thrust", "Third-stage vacuum thrust", "tf", TONNE_FORCE),
+        ("ThirdStage_Vac_Isp", "Third-stage vacuum Isp", "s", 1.),
+        ("ThirdStage_MinThrust_Factor", "Third-stage minimum throttle", "fraction", 1.),
+        ("ThirdStage_MinThrust_IspFactor", "Third-stage Isp at minimum throttle", "fraction", 1.),
+        ("ThirdStage_CoastTimeAfterSep", "Coast before third-stage ignition", "s", 1.),
     ),
     "Ascent aerodynamics": (
         ("FirstStage_CLa", "First-stage lift slope", "1/rad", 1.),
@@ -59,7 +69,11 @@ NONNEGATIVE_PARAMETERS = {
     "FairingMass", "FirstStage_Ae", "FirstStage_CLa", "FirstStage_Cd0", "FirstStage_Cda2",
     "FairingSeparationAltitude", "Booster_Cd0",
     "Booster_k_empirical", "SecondStage_CoastTimeAfterSep",
+    "ThirdStage_EmptyMass", "ThirdStage_PropellentMass", "ThirdStage_Thrust",
+    "ThirdStage_Vac_Isp", "ThirdStage_MinThrust_Factor",
+    "ThirdStage_MinThrust_IspFactor", "ThirdStage_CoastTimeAfterSep",
 }
+THIRD_STAGE_PARAMETERS = tuple(name for name in VEHICLE_PARAMETERS if name.startswith('ThirdStage_'))
 
 
 def validate_vehicle_definition(definition):
@@ -77,6 +91,9 @@ def validate_vehicle_definition(definition):
     if isinstance(supplied, dict):
         supplied = {key: value for key, value in supplied.items()
                     if key not in ('Booster_Cda2', 'Booster_CLa')}
+        # Version-1 vehicle files predate optional third-stage support.
+        if not any(key in supplied for key in THIRD_STAGE_PARAMETERS):
+            supplied.update({key: 0. for key in THIRD_STAGE_PARAMETERS})
     if not isinstance(supplied, dict) or set(supplied) != set(VEHICLE_PARAMETERS):
         raise ValueError("Custom vehicle parameters must contain exactly all fields shown in the editor.")
     parameters = {}
@@ -96,7 +113,19 @@ def validate_vehicle_definition(definition):
         if key == 'FirstStage_MaxAlpha' and value > math.pi / 2:
             raise ValueError("Maximum angle of attack cannot exceed 90 degrees.")
         parameters[key] = value
+    enabled = parameters['ThirdStage_PropellentMass'] > 0.
+    required = ('ThirdStage_EmptyMass', 'ThirdStage_Thrust', 'ThirdStage_Vac_Isp',
+                'ThirdStage_MinThrust_Factor', 'ThirdStage_MinThrust_IspFactor')
+    if enabled and any(parameters[name] <= 0. for name in required):
+        raise ValueError('An enabled third stage requires positive dry mass, thrust, Isp and throttle factors.')
+    if not enabled and any(parameters[name] != 0. for name in THIRD_STAGE_PARAMETERS):
+        raise ValueError('Set all optional third-stage fields to zero when third-stage propellant mass is zero.')
     return {'name': name, 'parameters': parameters}
+
+
+def allowed_recoveries(configuration):
+    """Return recovery strategies supported by a built-in or custom vehicle."""
+    return ('EXP',) if configuration == BUILTIN_VEHICLES['Electron'] else ('EXP', 'ASDS', 'RTLS')
 
 
 def vehicle_editor_values(configuration):
