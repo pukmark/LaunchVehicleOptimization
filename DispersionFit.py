@@ -131,10 +131,17 @@ def _solve_candidate(request, init_guess=None, ipopt_options=None):
     dispersion = _validate_request(request)
     model = LV_Optimization(dispersion, request['configuration'],
                             launch_site=parse_launch_site(request.get('launch_site')))
+    payload_mass_scale = request.get('payload_mass_scale')
+    if payload_mass_scale is not None:
+        payload_mass_scale = float(payload_mass_scale)
+        if not np.isfinite(payload_mass_scale) or payload_mass_scale <= 0.:
+            raise ValueError('Payload mass scale must be positive and finite.')
+        model.booster.PayloadMassScale = payload_mass_scale
     if init_guess is not None:
         previous_configuration = init_guess.get('configuration', request['configuration'])
         # Physical fits change custom values, but retain the same state/control layout.
         same_configuration = (previous_configuration == request['configuration']
+                              or previous_configuration == request.get('source_configuration')
                               or isinstance(previous_configuration, dict)
                               and isinstance(request['configuration'], dict))
         compatible = (same_configuration
